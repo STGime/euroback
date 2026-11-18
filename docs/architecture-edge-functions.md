@@ -12,7 +12,7 @@ EU-sovereign function execution on Scaleway infrastructure. Zero US cloud depend
 - [x] Database migration (000026): `edge_functions`, `edge_function_logs` tables, `edge_function_limit` on plan_limits
 - [x] Go service: `internal/functions/` — CRUD, logs, invocation proxy
 - [x] Gateway routes: Platform management (`/platform/projects/{id}/functions/*`) + SDK invocation (`/v1/functions/{name}`)
-- [x] Plan limits: Free = 3 functions, Pro = 25 functions. Usage tracked in dashboard.
+- [x] Plan limits: Free = 3 functions, Pro = 500 functions, Team = unlimited. Usage tracked in dashboard.
 - [x] CLI: `eurobase edge-functions` — list, deploy, get, delete, logs, invoke
 - [x] SDK: `eurobase.functions.invoke(name, { body })` method
 - [x] Console: Functions tab with list, code editor, settings, logs viewer
@@ -187,11 +187,11 @@ CREATE INDEX idx_edge_function_logs_project ON public.edge_function_logs(project
 
 | Limit | Free | Pro |
 |-------|------|-----|
-| Functions per project | 3 | 25 |
+| Functions per project | 3 | 500 |
 | Invocations / month | 100K | 2M |
 | Execution timeout | 10s | 60s |
 | Memory per isolate | 64 MB | 256 MB |
-| Code size | 1 MB | 10 MB |
+| Code size | 1 MB | 1 MB |
 | Env vars per function | 5 | 20 |
 
 ---

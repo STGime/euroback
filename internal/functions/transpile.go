@@ -1,11 +1,33 @@
 package functions
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	esbuild "github.com/evanw/esbuild/pkg/api"
 )
+
+// MaxCodeBytes is the largest function source accepted on create and
+// update.
+const MaxCodeBytes = 1 << 20
+
+// ErrCodeTooLarge is returned for source over MaxCodeBytes.
+var ErrCodeTooLarge = errors.New("function code too large (max 1 MB)")
+
+// transpileSlots bounds concurrent esbuild transforms per process, so a
+// burst of deploys can't multiply their memory peak.
+const transpileSlots = 2
+
+var transpileSem = make(chan struct{}, transpileSlots)
+
+// checkCodeSize refuses source over MaxCodeBytes.
+func checkCodeSize(code string) error {
+	if len(code) > MaxCodeBytes {
+		return ErrCodeTooLarge
+	}
+	return nil
+}
 
 // Transpile converts user TypeScript/JavaScript source into the plain
 // CommonJS-shaped JavaScript the runner's worker bootstrap can execute
@@ -31,7 +53,13 @@ import (
 // Errors carry esbuild's line/column diagnostics so a bad deploy fails
 // at deploy time with a pointer to the offending source, instead of an
 // opaque failure on first invocation.
+//
+// esbuild needs roughly 60x the source size in memory while it works, so
+// the source size is capped (MaxCodeBytes, checked by Create / Update)
+// and at most transpileSlots transforms run at once per process.
 func Transpile(source string) (string, error) {
+	transpileSem <- struct{}{}
+	defer func() { <-transpileSem }()
 	result := esbuild.Transform(source, esbuild.TransformOptions{
 		Loader:     esbuild.LoaderTS,
 		Format:     esbuild.FormatCommonJS,

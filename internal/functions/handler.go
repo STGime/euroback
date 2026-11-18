@@ -108,14 +108,42 @@ func withholdEnvValues(fn *EdgeFunction) {
 	fn.EnvVars = nil
 }
 
+// maxFunctionBody caps a create / update request body before decoding.
+// The source itself is limited to MaxCodeBytes (checked after decoding,
+// with a clearer message); this leaves room for JSON escaping (Go's
+// encoder writes < as a 6-byte escape) and env vars.
+const maxFunctionBody = 8 << 20
+
+// decodeFunctionBody decodes a create / update body, answering 413 when
+// it is over maxFunctionBody. It reports whether decoding succeeded.
+func decodeFunctionBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxFunctionBody)).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(w, "request too large: function code can be up to 1 MB", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// fnErrStatus maps a create / update error to its HTTP status.
+func fnErrStatus(err error) int {
+	if errors.Is(err, ErrCodeTooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
 // HandleCreate creates a new edge function with plan limit enforcement.
 func HandleCreate(svc *Service, limitsSvc *plans.LimitsService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
 		var req CreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeFunctionBody(w, r, &req) {
 			return
 		}
 
@@ -134,7 +162,7 @@ func HandleCreate(svc *Service, limitsSvc *plans.LimitsService) http.HandlerFunc
 		fn, err := svc.Create(r.Context(), projectID, req)
 		if err != nil {
 			slog.Error("create edge function failed", "project_id", projectID, "error", err)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), fnErrStatus(err))
 			return
 		}
 
@@ -151,15 +179,14 @@ func HandleUpdate(svc *Service) http.HandlerFunc {
 		name := chi.URLParam(r, "name")
 
 		var req UpdateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeFunctionBody(w, r, &req) {
 			return
 		}
 
 		fn, err := svc.Update(r.Context(), projectID, name, req)
 		if err != nil {
 			slog.Error("update edge function failed", "project_id", projectID, "name", name, "error", err)
-			jsonError(w, err.Error(), http.StatusBadRequest)
+			jsonError(w, err.Error(), fnErrStatus(err))
 			return
 		}
 
