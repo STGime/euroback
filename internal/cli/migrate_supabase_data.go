@@ -1,28 +1,25 @@
 package cli
 
-// #270 (part of #267): `eurobase import supabase data` — pull row
-// data + auth users from a Supabase project and emit migration files
-// the tenant applies against their Eurobase project.
+// `eurobase import supabase data` — read auth users and row data from
+// a Supabase project and write migration files the developer applies to
+// their Eurobase project with `eurobase migrations up`.
 //
-// Emission approach: multi-row INSERT statements per table plus the
-// translated `auth.users` / `auth.identities` → Eurobase `users` /
-// `user_identities`. Each output file is a standalone migration —
-// no BEGIN/COMMIT wrappers because the tenant-migrations endpoint
-// wraps every migration in its own transaction (and rejects
-// bare-BEGIN inside the body). Output is split across files at
-// 450 KB each because that endpoint caps each migration body at
-// 512 KB (`maxMigrationSQLBytes` in internal/query/tenant_migrations.go).
+// The files hold, in this order: the users (`auth.users` → `users`,
+// `auth.identities` → `user_identities`), then each public table's rows
+// as multi-row INSERTs in foreign-key order, then the sequence
+// positions. Users come first because app tables reference them.
 //
-// Streaming COPY-to-COPY is the target end-state (issue #270's own
-// scoping) but requires a `/platform/projects/{id}/data/copy`
-// endpoint that doesn't exist today. Multi-row INSERT is ~5–10×
-// slower than COPY at ingest but is what runs on the existing
-// tenant-migrations channel. The streaming variant lands with the
-// backend endpoint in a later PR.
+// No BEGIN/COMMIT in a file: the migrations endpoint runs each file in
+// its own transaction (with the service identity, which the platform's
+// `users` tables require) and refuses transaction control in the body.
+// Output is split at 450 KB per file because the endpoint caps a
+// migration at 512 KB (`maxMigrationSQLBytes`).
+//
+// Everything is read in one REPEATABLE READ snapshot, so rows that
+// reference each other match even while the source is in use.
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -31,7 +28,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 )
 
@@ -50,38 +46,45 @@ func importSupabaseDataCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "data",
-		Short: "Translate Supabase row + auth data into Eurobase migration files",
-		Long: `Read row data from a Supabase project's public schema plus
-auth.users / auth.identities, and write migration files the tenant applies
-against their Eurobase project.
+		Short: "Write Supabase users and table rows as Eurobase migration files",
+		Long: `Read auth users and row data from a Supabase project and write
+migration files to apply to your Eurobase project. Run it after
+` + "`import supabase schema`" + ` has been applied.
 
 Env vars:
   SUPABASE_DB_URL   postgres:// URL of the Supabase project (required)
 
-Emits multi-row INSERT statements grouped by table, in FK topological
-order so parents insert before children. Auth users translate into
-Eurobase's ` + "`users`" + ` + ` + "`user_identities`" + ` tables — UUIDs are preserved
-so existing RLS policies keep lining up post-cutover.
+What the files contain, in order:
+  1. Users: auth.users → ` + "`users`" + `, OAuth links (auth.identities) →
+     ` + "`user_identities`" + `. Ids and bcrypt password hashes are kept, so your
+     rows still point at the right user and passwords keep working.
+  2. Rows of every table in the public schema, parents before children.
+     Triggers on a table are switched off while its rows are inserted.
+  3. Sequence positions, so new rows get ids after the imported ones.
 
-Output is split across as many migration files as needed: the tenant-
-migrations endpoint caps each body at 512 KiB, so a project with more
-than ~1,500 rows lands in multiple files. Each file is a self-contained
-migration; ` + "`eurobase migrations up`" + ` applies them in version order.
+Everything is read in one snapshot. The output is split into files of at
+most 450 KB (a migration may be 512 KB); ` + "`eurobase migrations up`" + ` applies
+them in order.
 
-Not migrated (by design):
-  - Refresh tokens — users re-authenticate on first request post-cutover.
-  - Session state — reissued on next sign-in.
+Not copied:
+  - Sessions and refresh tokens: users sign in again after the cutover.
+  - Users deleted on Supabase (soft delete) and SSO users.
+  - MFA factors.
+
+The command prints what it changed or left out (anonymous users,
+temporary bans, passwords that can't be carried over). Read that list.
 
 Files land under --migrations-dir (default ./migrations), named
-<epoch>_<name>_part_NNN.sql. Rerun-safe: files are timestamped and
-cycle-detected FK errors surface loudly rather than silently
-mis-ordering the inserts.
+<epoch>_<name>_part_NNN.sql. Apply them to an empty project: a second
+run writes new files and would insert the same rows again.
 
 Flags:
-  --skip-auth   emit only public-table rows, no auth translation
-  --skip-rows   emit only auth translation, no public-table rows
-  --table       migrate only this single table (retry a partial run)`,
+  --skip-auth   only table rows, no users (rows that reference a user
+                fail to apply unless the users are already there)
+  --skip-rows   only users
+  --table       only this table's rows (implies no users)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			dbURL := os.Getenv("SUPABASE_DB_URL")
 			if dbURL == "" {
 				return fmt.Errorf("SUPABASE_DB_URL is required (postgres:// URL of the Supabase project)")
@@ -96,32 +99,56 @@ Flags:
 			}
 			defer conn.Close(ctx)
 
+			// One snapshot for users and rows, and nothing is written to
+			// the source.
+			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+			if err != nil {
+				return fmt.Errorf("start read-only snapshot: %w", err)
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+			if _, err := tx.Exec(ctx, pinSourceOutputSQL); err != nil {
+				return fmt.Errorf("prepare snapshot: %w", err)
+			}
+
 			if err := os.MkdirAll(migrationsDir, 0o755); err != nil {
 				return fmt.Errorf("create %s: %w", migrationsDir, err)
 			}
 
-			writer := newSQLFileWriter(migrationsDir, migName, time.Now(), maxPartBytes)
+			now := time.Now()
+			writer := newSQLFileWriter(migrationsDir, migName, now, maxPartBytes)
+			if tableOnly != "" {
+				skipAuth = true
+			}
+			var notes []string
 
-			counts := map[string]int64{}
-			// ── Row data ──
-			if !skipRows {
-				n, err := emitRowData(ctx, conn, writer, tableOnly, counts)
+			// Users first: app tables reference them.
+			if !skipAuth {
+				nUsers, nIdent, authNotes, err := emitAuthData(ctx, tx, writer, now)
 				if err != nil {
-					return fmt.Errorf("emit row data: %w", err)
+					return fmt.Errorf("users: %w", err)
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "Row data: %d table(s), %d row(s) total\n", n, sumCounts(counts))
+				fmt.Fprintf(cmd.ErrOrStderr(), "Users: %d, OAuth links: %d\n", nUsers, nIdent)
+				notes = append(notes, authNotes...)
 			}
 
-			// ── Auth users + identities ──
-			if !skipAuth {
-				nUsers, nIdent, notes, err := emitAuthData(ctx, conn, writer)
+			counts := map[string]int64{}
+			if !skipRows {
+				n, rowNotes, err := emitRowData(ctx, tx, writer, tableOnly, counts)
 				if err != nil {
-					return fmt.Errorf("emit auth data: %w", err)
+					return fmt.Errorf("row data: %w", err)
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "Auth: %d user(s), %d identity link(s)\n", nUsers, nIdent)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Row data: %d table(s), %d row(s)\n", n, sumCounts(counts))
+				notes = append(notes, rowNotes...)
+				if skipAuth && tableOnly == "" {
+					notes = append(notes, "--skip-auth: rows that reference a user fail to apply unless the users are already in the project")
+				}
+			}
+			if len(notes) > 0 {
+				fmt.Fprintln(cmd.ErrOrStderr(), "\n── Read before applying: ──")
 				for _, note := range notes {
-					fmt.Fprintf(cmd.ErrOrStderr(), "  note: %s\n", note)
+					fmt.Fprintf(cmd.ErrOrStderr(), "  - %s\n", note)
 				}
+				fmt.Fprintln(cmd.ErrOrStderr())
 			}
 
 			paths, err := writer.Close()
@@ -129,21 +156,21 @@ Flags:
 				return fmt.Errorf("finalise output: %w", err)
 			}
 			if len(paths) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "Nothing to write — the source project has no data (or --skip flags removed everything).")
+				fmt.Fprintln(cmd.OutOrStdout(), "Nothing to write — the source project has no data (or the --skip flags left nothing).")
 				return nil
 			}
 			for _, p := range paths {
 				fmt.Fprintf(cmd.OutOrStdout(), "Migration written to %s\n", p)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Next: `eurobase migrations up` to apply.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Next: `eurobase migrations up` to apply (to a project that has the schema and no data yet).")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&migrationsDir, "migrations-dir", "./migrations", "Directory to write the migration files")
 	cmd.Flags().StringVar(&migName, "name", "data_from_supabase", "Migration file basename (before _part_NNN.sql)")
-	cmd.Flags().BoolVar(&skipAuth, "skip-auth", false, "Skip auth.users + auth.identities translation")
-	cmd.Flags().BoolVar(&skipRows, "skip-rows", false, "Skip public-schema row data (auth only)")
-	cmd.Flags().StringVar(&tableOnly, "table", "", "Migrate a single public-schema table by name (retry a partial run)")
+	cmd.Flags().BoolVar(&skipAuth, "skip-auth", false, "Only table rows, no users")
+	cmd.Flags().BoolVar(&skipRows, "skip-rows", false, "Only users, no table rows")
+	cmd.Flags().StringVar(&tableOnly, "table", "", "Only this public-schema table's rows")
 	return cmd
 }
 
@@ -227,35 +254,37 @@ func (w *sqlFileWriter) flush() error {
 
 func (w *sqlFileWriter) header() string {
 	return fmt.Sprintf(
-		"-- Auto-translated from Supabase by `eurobase import supabase data`.\n"+
+		"-- Written by `eurobase import supabase data`: users and rows from Supabase.\n"+
 			"-- Part %d, generated %s UTC.\n"+
-			"-- Command to apply: eurobase migrations up\n"+
-			"-- \n"+
-			"-- NOTE: refresh tokens + session state are NOT migrated.\n"+
-			"-- Users re-authenticate on their first request post-cutover.\n\n",
+			"-- Apply with: eurobase migrations up (to a project that has the schema and no data yet)\n"+
+			"--\n"+
+			"-- Sessions and refresh tokens are not copied: users sign in again.\n\n",
 		w.partIdx+1, w.baseTime.UTC().Format(time.RFC3339),
 	)
 }
 
-// ── column type introspection ───────────────────────────────────────
+// ── reading the source ──────────────────────────────────────────────
 
-// columnInfo carries name + Postgres type name so emit can decide
-// whether to cast the column to text in the SELECT (see #275 review
-// #3/#4 — a JSONB scalar like `"foo"` decoded by pgx as a bare Go
-// string produced an invalid INSERT because the value went to the
-// jsonb column without a `::jsonb` cast).
-type columnInfo struct {
-	name   string
-	pgType string // e.g. "jsonb", "numeric", "text"
+// sourceQuerier is what the readers need; a pgx.Tx (the command reads
+// everything in one snapshot) and a *pgx.Conn both satisfy it.
+type sourceQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// listColumnsWithTypes returns the ordered user columns for `table`
-// plus each column's format_type — skipping system columns and
-// STORED generated columns.
-func listColumnsWithTypes(ctx context.Context, conn *pgx.Conn, table string) ([]columnInfo, error) {
-	rows, err := conn.Query(ctx, `
-		SELECT a.attname,
-		       format_type(a.atttypid, NULL) AS type
+// columnInfo is one column to copy.
+type columnInfo struct {
+	name string
+	// identityAlways: GENERATED ALWAYS AS IDENTITY. An INSERT that names
+	// the column needs OVERRIDING SYSTEM VALUE.
+	identityAlways bool
+}
+
+// listColumns returns the columns of a public table to copy, in order:
+// no system, dropped or generated (STORED) columns.
+func listColumns(ctx context.Context, q sourceQuerier, table string) ([]columnInfo, error) {
+	rows, err := q.Query(ctx, `
+		SELECT a.attname, a.attidentity = 'a'
 		  FROM pg_attribute a
 		  JOIN pg_class c ON c.oid = a.attrelid
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -273,7 +302,7 @@ func listColumnsWithTypes(ctx context.Context, conn *pgx.Conn, table string) ([]
 	var cols []columnInfo
 	for rows.Next() {
 		var c columnInfo
-		if err := rows.Scan(&c.name, &c.pgType); err != nil {
+		if err := rows.Scan(&c.name, &c.identityAlways); err != nil {
 			return nil, err
 		}
 		cols = append(cols, c)
@@ -281,174 +310,17 @@ func listColumnsWithTypes(ctx context.Context, conn *pgx.Conn, table string) ([]
 	return cols, rows.Err()
 }
 
-// castToTextTypes is the set of Postgres types we cast to text in the
-// SELECT so pgx doesn't parse them into Go values that sqlLiteral
-// mishandles. JSONB is the leading motivator (scalar values fell
-// through to `sqlLiteral(string)` with no `::jsonb` cast); numeric,
-// interval, inet, etc. return pgtype wrappers that sqlLiteral's
-// default fallback would `%v`-print into a Go-struct dump.
-//
-// Compared by the base type name in `format_type` (which strips
-// `pg_catalog.` and normalises to canonical form).
-var castToTextTypes = map[string]bool{
-	"jsonb":                       true,
-	"json":                        true,
-	"numeric":                     true,
-	"interval":                    true,
-	"inet":                        true,
-	"cidr":                        true,
-	"macaddr":                     true,
-	"macaddr8":                    true,
-	"tsvector":                    true,
-	"tsquery":                     true,
-	"box":                         true,
-	"circle":                      true,
-	"line":                        true,
-	"lseg":                        true,
-	"path":                        true,
-	"point":                       true,
-	"polygon":                     true,
-	"date":                        true, // pgtype.Date wrapper; text form is portable
-	"time without time zone":      true,
-	"time with time zone":         true,
-	"timestamp without time zone": true, // timestamptz stays native (time.Time)
-	"money":                       true,
-	// Range + multirange types (PG14+ multiranges). pgx returns
-	// pgtype.Range wrappers that %v-print into unusable Go structs.
-	"int4range":       true,
-	"int8range":       true,
-	"numrange":        true,
-	"tsrange":         true,
-	"tstzrange":       true,
-	"daterange":       true,
-	"int4multirange":  true,
-	"int8multirange":  true,
-	"nummultirange":   true,
-	"tsmultirange":    true,
-	"tstzmultirange":  true,
-	"datemultirange":  true,
-	// Bit strings — pgx pgtype.Bits wrapper.
-	"bit":        true,
-	"bit varying": true,
-	// Extension-shipped types Supabase templates use.
-	"hstore":  true, // pg_hstore
-	"ltree":   true, // ltree extension
-	"lquery":  true,
-	"ltxtquery": true,
-	"citext":  true, // citext extension
-	"pg_lsn":  true, // wal position
-	// Full-text search dictionaries + regconfig (rare but pg_dump can
-	// emit them in templates).
-	"regconfig":     true,
-	"regprocedure":  true,
-	"regoper":       true,
-	"regoperator":   true,
-	"regclass":      true,
-	"regtype":       true,
-	"regrole":       true,
-	"regnamespace":  true,
-	// tid (row identifiers) — rare, but pgtype.TID would %v-print.
-	// xml — pgx returns []byte, which our default bytea branch would
-	// hex-emit into an xml column (wrong cast).
-	"tid": true,
-	"xml": true,
-}
-
-// selectExpr for one column — casts troublesome types to text so
-// pgx returns them as strings sqlLiteral can safely wrap. numeric()
-// with a scale gets stripped down to "numeric" via a canonical form
-// (format_type returns "numeric(10,2)" — we key on the type name
-// prefix).
-func selectExprFor(c columnInfo) string {
-	if needsTextCast(c.pgType) {
-		return quoteIdent(c.name) + "::text AS " + quoteIdent(c.name)
-	}
-	// Postgres array types show as "typname[]" — cast the whole thing
-	// to text so we don't hit pgtype array decoding, which returns
-	// []interface{} that sqlLiteral wouldn't format correctly.
-	if strings.HasSuffix(c.pgType, "[]") {
-		return quoteIdent(c.name) + "::text AS " + quoteIdent(c.name)
-	}
-	return quoteIdent(c.name)
-}
-
-func needsTextCast(pgType string) bool {
-	if castToTextTypes[pgType] {
-		return true
-	}
-	// numeric(P,S) / numeric(P) etc.
-	if strings.HasPrefix(pgType, "numeric(") {
-		return true
-	}
-	// timestamp/time with precision variants.
-	if strings.HasPrefix(pgType, "timestamp(") || strings.HasPrefix(pgType, "time(") {
-		// keep timestamptz native — the "with time zone" text form is
-		// standard timestamptz. Everything else casts to text.
-		return !strings.Contains(pgType, "with time zone")
-	}
-	return false
-}
-
-// wrapValue converts a raw pgx value into the form sqlLiteral will
-// render correctly given the column's declared type. For jsonb/json
-// the value came back as a text-cast string — wrap as jsonbValue so
-// the `::jsonb` cast is emitted. For numeric/interval/inet/etc. we
-// emit `'<value>'::<type>` so Postgres re-parses.
-func wrapValue(c columnInfo, v interface{}) interface{} {
-	if v == nil {
-		return nil
-	}
-	baseType := c.pgType
-	if i := strings.IndexByte(baseType, '('); i >= 0 {
-		baseType = baseType[:i]
-	}
-	baseType = strings.TrimSuffix(baseType, "[]")
-	switch baseType {
-	case "jsonb", "json":
-		if s, ok := v.(string); ok {
-			return jsonbLiteral(s)
-		}
-	case "numeric", "money", "interval", "inet", "cidr", "macaddr", "macaddr8",
-		"tsvector", "tsquery", "box", "circle", "line", "lseg",
-		"path", "point", "polygon", "date",
-		"int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange",
-		"int4multirange", "int8multirange", "nummultirange", "tsmultirange", "tstzmultirange", "datemultirange",
-		"bit", "bit varying",
-		"hstore", "ltree", "lquery", "ltxtquery", "citext", "pg_lsn",
-		"regconfig", "regprocedure", "regoper", "regoperator", "regclass", "regtype", "regrole", "regnamespace",
-		"tid", "xml":
-		if s, ok := v.(string); ok {
-			return typedLiteral{value: s, pgType: baseType}
-		}
-	case "time without time zone", "time with time zone",
-		"timestamp without time zone":
-		if s, ok := v.(string); ok {
-			return typedLiteral{value: s, pgType: baseType}
-		}
-	}
-	// Also cover the []-array case — the text-cast produces a string
-	// like `{1,2,3}` that Postgres accepts on insert if the target
-	// column is the matching array type.
-	if strings.HasSuffix(c.pgType, "[]") {
-		if s, ok := v.(string); ok {
-			return typedLiteral{value: s, pgType: c.pgType}
-		}
-	}
-	return v
-}
-
-// listPublicTables returns every user-visible table in the public
-// schema, ordered by name (topology sort happens later). System
-// tables and views are excluded.
-func listPublicTables(ctx context.Context, conn *pgx.Conn) ([]tableRef, error) {
-	rows, err := conn.Query(ctx, `
+// listPublicTables returns every ordinary table in the public schema,
+// ordered by name (the FK sort happens later).
+func listPublicTables(ctx context.Context, q sourceQuerier) ([]tableRef, error) {
+	rows, err := q.Query(ctx, `
 		SELECT c.relname
 		  FROM pg_class c
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname = 'public'
 		   AND c.relkind = 'r'
 		   AND c.relname NOT LIKE 'pg\_%'
-		   AND c.relpersistence = 'p'
+		   AND c.relpersistence IN ('p', 'u')
 		 ORDER BY c.relname
 	`)
 	if err != nil {
@@ -466,12 +338,34 @@ func listPublicTables(ctx context.Context, conn *pgx.Conn) ([]tableRef, error) {
 	return out, rows.Err()
 }
 
+// pinSourceOutputSQL fixes how the source writes values as text, so the
+// target reads them the same way whatever the source database or role
+// has configured (a day-first DateStyle would otherwise swap day and
+// month without an error). The search path makes names inside values and
+// constraint definitions come out without a "public." prefix; the
+// project's schema has another name.
+const pinSourceOutputSQL = `
+	SET LOCAL DateStyle = 'ISO, YMD';
+	SET LOCAL IntervalStyle = 'postgres';
+	SET LOCAL bytea_output = 'hex';
+	SET LOCAL extra_float_digits = 1;
+	SET LOCAL search_path = public`
+
+// selfFK is a foreign key from a table to itself.
+type selfFK struct {
+	name string
+	def  string // as pg_get_constraintdef prints it
+}
+
 // listPublicFKEdges returns FK dependencies between public-schema
-// tables (parent → child). Cross-schema references are skipped.
-func listPublicFKEdges(ctx context.Context, conn *pgx.Conn) ([]fkEdge, error) {
-	rows, err := conn.Query(ctx, `
+// tables (parent → child), and each table's foreign keys to itself.
+// Cross-schema references are skipped.
+func listPublicFKEdges(ctx context.Context, q sourceQuerier) ([]fkEdge, map[string][]selfFK, error) {
+	rows, err := q.Query(ctx, `
 		SELECT cl.relname   AS child,
-		       cp.relname   AS parent
+		       cp.relname   AS parent,
+		       con.conname,
+		       pg_get_constraintdef(con.oid)
 		  FROM pg_constraint con
 		  JOIN pg_class cl ON cl.oid = con.conrelid
 		  JOIN pg_class cp ON cp.oid = con.confrelid
@@ -480,90 +374,291 @@ func listPublicFKEdges(ctx context.Context, conn *pgx.Conn) ([]fkEdge, error) {
 		 WHERE con.contype = 'f'
 		   AND ncl.nspname = 'public'
 		   AND ncp.nspname = 'public'
+		 ORDER BY cl.relname, con.conname
+	`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var edges []fkEdge
+	self := map[string][]selfFK{}
+	for rows.Next() {
+		var child, parent, name, def string
+		if err := rows.Scan(&child, &parent, &name, &def); err != nil {
+			return nil, nil, err
+		}
+		edges = append(edges, fkEdge{from: child, to: parent})
+		if child == parent {
+			self[child] = append(self[child], selfFK{name: name, def: def})
+		}
+	}
+	return edges, self, rows.Err()
+}
+
+// tableTriggers describes a table's own (non-internal) triggers.
+type tableTriggers struct {
+	enabled  int      // triggers that would fire on INSERT of imported rows
+	disabled []string // switched off on the source; must stay off
+}
+
+// listUserTriggers returns the user triggers per public table.
+func listUserTriggers(ctx context.Context, q sourceQuerier) (map[string]*tableTriggers, error) {
+	rows, err := q.Query(ctx, `
+		SELECT c.relname, t.tgname, t.tgenabled = 'D'
+		  FROM pg_trigger t
+		  JOIN pg_class c ON c.oid = t.tgrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'public' AND NOT t.tgisinternal
+		 ORDER BY c.relname, t.tgname
 	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var edges []fkEdge
+	out := map[string]*tableTriggers{}
 	for rows.Next() {
-		var child, parent string
-		if err := rows.Scan(&child, &parent); err != nil {
+		var table, name string
+		var off bool
+		if err := rows.Scan(&table, &name, &off); err != nil {
 			return nil, err
 		}
-		edges = append(edges, fkEdge{from: child, to: parent})
+		tt := out[table]
+		if tt == nil {
+			tt = &tableTriggers{}
+			out[table] = tt
+		}
+		if off {
+			tt.disabled = append(tt.disabled, name)
+		} else {
+			tt.enabled++
+		}
 	}
-	return edges, rows.Err()
+	return out, rows.Err()
 }
 
-// emitRowData enumerates public tables, orders by FK topology, and
-// writes multi-row INSERTs for each. Returns the count of tables
-// visited. Per-table row counts land in `counts`.
-func emitRowData(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, tableOnly string, counts map[string]int64) (int, error) {
-	tables, err := listPublicTables(ctx, conn)
+// sequenceState is one public sequence and where it stands.
+type sequenceState struct {
+	name      string
+	ownerTab  string // table that owns it (serial / identity column); "" for a standalone sequence
+	lastValue int64
+	isCalled  bool
+}
+
+// listSequences reads every public sequence's position. Imported rows
+// carry their ids, so without this the first INSERT after the import
+// would be handed an id that already exists.
+func listSequences(ctx context.Context, q sourceQuerier) ([]sequenceState, error) {
+	rows, err := q.Query(ctx, `
+		SELECT s.relname, COALESCE(t.relname, '')
+		  FROM pg_class s
+		  JOIN pg_namespace n ON n.oid = s.relnamespace
+		  LEFT JOIN pg_depend d
+		         ON d.classid = 'pg_class'::regclass AND d.objid = s.oid
+		        AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+		  LEFT JOIN pg_class t ON t.oid = d.refobjid
+		 WHERE n.nspname = 'public' AND s.relkind = 'S'
+		 ORDER BY s.relname
+	`)
 	if err != nil {
-		return 0, fmt.Errorf("list tables: %w", err)
+		return nil, err
 	}
-	edges, err := listPublicFKEdges(ctx, conn)
+	var out []sequenceState
+	for rows.Next() {
+		var st sequenceState
+		if err := rows.Scan(&st.name, &st.ownerTab); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := q.QueryRow(ctx, "SELECT last_value, is_called FROM public."+quoteIdent(out[i].name)).
+			Scan(&out[i].lastValue, &out[i].isCalled); err != nil {
+			return nil, fmt.Errorf("read sequence %s: %w", out[i].name, err)
+		}
+	}
+	return out, nil
+}
+
+// setvalStatement moves a sequence to where it stood on the source.
+func setvalStatement(st sequenceState) string {
+	// The sequence name is a regclass literal: quoted as an identifier,
+	// then as a string.
+	return fmt.Sprintf("SELECT setval(%s, %d, %t);\n", sqlLiteral(quoteIdent(st.name)), st.lastValue, st.isCalled)
+}
+
+// ── row data ────────────────────────────────────────────────────────
+
+// emitRowData enumerates public tables, orders them by foreign key, and
+// writes multi-row INSERTs for each, followed by the sequence positions.
+// Returns the number of tables written and notes for the developer.
+// Per-table row counts land in `counts`.
+func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, tableOnly string, counts map[string]int64) (int, []string, error) {
+	tables, err := listPublicTables(ctx, q)
 	if err != nil {
-		return 0, fmt.Errorf("list FK edges: %w", err)
+		return 0, nil, fmt.Errorf("list tables: %w", err)
+	}
+	edges, selfFKs, err := listPublicFKEdges(ctx, q)
+	if err != nil {
+		return 0, nil, fmt.Errorf("list FK edges: %w", err)
 	}
 	ordered, err := sortTablesByFK(tables, edges)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
+	}
+	triggers, err := listUserTriggers(ctx, q)
+	if err != nil {
+		return 0, nil, fmt.Errorf("list triggers: %w", err)
+	}
+	sequences, err := listSequences(ctx, q)
+	if err != nil {
+		return 0, nil, fmt.Errorf("list sequences: %w", err)
 	}
 
+	var notes []string
+	var paused []string
+	written := map[string]bool{}
 	visited := 0
+	found := tableOnly == ""
 	for _, t := range ordered {
 		if tableOnly != "" && t.name != tableOnly {
 			continue
 		}
-		cols, err := listColumnsWithTypes(ctx, conn, t.name)
+		found = true
+		if platformTableNames[t.name] {
+			notes = append(notes, fmt.Sprintf("table %s skipped: every Eurobase project already has a table with that name — rename it in Supabase (and in your app), then import again", t.name))
+			continue
+		}
+		cols, err := listColumns(ctx, q, t.name)
 		if err != nil {
-			return visited, fmt.Errorf("list columns for %s: %w", t.name, err)
+			return visited, notes, fmt.Errorf("list columns for %s: %w", t.name, err)
 		}
 		if len(cols) == 0 {
 			continue
 		}
-		n, err := emitOneTable(ctx, conn, writer, t.name, cols)
+		n, res, err := emitOneTable(ctx, q, writer, t.name, cols, triggers[t.name], selfFKs[t.name])
 		if err != nil {
-			return visited, fmt.Errorf("emit rows for %s: %w", t.name, err)
+			return visited, notes, fmt.Errorf("emit rows for %s: %w", t.name, err)
+		}
+		written[t.name] = true
+		if res.oversize > 0 {
+			notes = append(notes, fmt.Sprintf("table %s: %d row(s) are larger than one migration file may be (512 KB) — the file that holds them will be refused; delete those rows from the file and copy them another way", t.name, res.oversize))
+		}
+		if res.fkReadded {
+			notes = append(notes, fmt.Sprintf("table %s refers to itself and needs more than one INSERT: its self-referencing foreign key is dropped before the first rows and added back after the last — apply all files", t.name))
+		}
+		if n > 0 && triggers[t.name] != nil && triggers[t.name].enabled > 0 {
+			paused = append(paused, t.name)
+		}
+		for _, st := range sequences {
+			if st.ownerTab == t.name {
+				if err := writer.WriteStatement(setvalStatement(st)); err != nil {
+					return visited, notes, err
+				}
+			}
+		}
+		if err := writer.WriteStatement("\n"); err != nil {
+			return visited, notes, err
 		}
 		counts[t.name] = n
 		visited++
 	}
-	return visited, nil
+	if !found {
+		return visited, notes, fmt.Errorf("no table %q in the public schema", tableOnly)
+	}
+	if tableOnly == "" {
+		var standalone strings.Builder
+		for _, st := range sequences {
+			// Also sequences whose table wasn't copied itself, such as
+			// a partitioned table (its rows are in the partitions).
+			if st.ownerTab == "" || (!written[st.ownerTab] && !platformTableNames[st.ownerTab]) {
+				standalone.WriteString(setvalStatement(st))
+			}
+		}
+		if standalone.Len() > 0 {
+			if err := writer.WriteStatement("-- Other sequences\n" + standalone.String() + "\n"); err != nil {
+				return visited, notes, err
+			}
+		}
+	}
+	if len(paused) > 0 {
+		notes = append(notes, fmt.Sprintf("triggers are switched off while rows are inserted into: %s — the rows arrive as they are on Supabase (a trigger would write its audit rows or timestamps a second time)", strings.Join(paused, ", ")))
+	}
+	return visited, notes, nil
 }
 
-// emitOneTable reads every row from `table` and writes batched
-// INSERTs via `writer`. Returns the row count.
-func emitOneTable(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, table string, cols []columnInfo) (int64, error) {
+// emitOneTable reads every row from `table` and writes batched INSERTs
+// via `writer`. Returns the row count.
+//
+// Every column is read as text and written as an untyped literal, so
+// the target's own input function parses it — the form pg_dump uses,
+// and the only one that round-trips every type (NaN, infinity, JSON
+// null, bit(n), composites, domains, extension types) without a list
+// of special cases.
+//
+// ONLY: a table that others inherit from would otherwise also return its
+// children's rows, and the children are copied as tables of their own.
+//
+// A table that refers to itself can't be copied in several INSERTs in
+// the order the rows are stored (a row may refer to one in a later
+// statement, or a later file), so when a second INSERT is needed the
+// self-referencing foreign keys are dropped with the first and added
+// back, which checks every row, after the last.
+func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, table string, cols []columnInfo, trg *tableTriggers, selfFKs []selfFK) (int64, tableResult, error) {
+	var res tableResult
 	selectParts := make([]string, len(cols))
 	colNames := make([]string, len(cols))
+	overriding := false
 	for i, c := range cols {
-		selectParts[i] = selectExprFor(c)
+		selectParts[i] = quoteIdent(c.name) + "::text"
 		colNames[i] = c.name
+		overriding = overriding || c.identityAlways
 	}
-	q := fmt.Sprintf("SELECT %s FROM %s", strings.Join(selectParts, ", "), quoteIdent(table))
-	rows, err := conn.Query(ctx, q)
+	rows, err := q.Query(ctx, fmt.Sprintf("SELECT %s FROM ONLY public.%s", strings.Join(selectParts, ", "), quoteIdent(table)))
 	if err != nil {
-		return 0, err
+		return 0, res, err
 	}
 	defer rows.Close()
 
-	if err := writer.WriteStatement(fmt.Sprintf("-- Table: %s\n", table)); err != nil {
-		return 0, err
+	if err := writer.WriteStatement(fmt.Sprintf("-- Table: %s\n", commentSafe(table))); err != nil {
+		return 0, res, err
+	}
+
+	// User triggers stay off while a batch is inserted; triggers that
+	// were off on the source are switched off again afterwards.
+	var before, after string
+	if trg != nil && trg.enabled > 0 {
+		before = fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER USER;\n", quoteIdent(table))
+		// A deferred foreign-key check still waiting would make the
+		// ALTER TABLE fail; run it now.
+		after = fmt.Sprintf("SET CONSTRAINTS ALL IMMEDIATE;\nALTER TABLE %s ENABLE TRIGGER USER;\n", quoteIdent(table))
+		for _, name := range trg.disabled {
+			after += fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER %s;\n", quoteIdent(table), quoteIdent(name))
+		}
 	}
 
 	var batch [][]interface{}
 	var batchBytes int
 	var total int64
-	flushBatch := func() error {
+	dropped := false
+	flushBatch := func(more bool) error {
 		if len(batch) == 0 {
 			return nil
 		}
 		var buf strings.Builder
-		emitInsertBatch(&buf, table, colNames, batch)
+		if more && !dropped && len(selfFKs) > 0 {
+			for _, fk := range selfFKs {
+				fmt.Fprintf(&buf, "ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;\n", quoteIdent(table), quoteIdent(fk.name))
+			}
+			dropped = true
+		}
+		buf.WriteString(before)
+		emitInsert(&buf, table, colNames, batch, overriding)
+		buf.WriteString(after)
 		if err := writer.WriteStatement(buf.String()); err != nil {
 			return err
 		}
@@ -571,23 +666,31 @@ func emitOneTable(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, ta
 		batchBytes = 0
 		return nil
 	}
+	dest := make([]interface{}, len(cols))
 	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			return total, err
+		vals := make([]*string, len(cols))
+		for i := range vals {
+			dest[i] = &vals[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return total, res, err
 		}
 		row := make([]interface{}, len(cols))
 		for i, v := range vals {
-			row[i] = wrapValue(cols[i], coerceValue(v))
+			if v != nil {
+				row[i] = *v
+			}
 		}
 		rowBytes := estimateRowBytes(row)
-		// Flush BEFORE appending if adding this row would tip us over
-		// either ceiling. The row-count cap is a fallback for pathological
-		// tiny-row cases; the byte cap is the real endpoint-shape guard
-		// (#275 round-2 ship-blocker #1).
+		if rowBytes > maxPartBytes {
+			res.oversize++
+		}
+		// Flush BEFORE appending if this row would tip the batch over
+		// either ceiling: the byte cap is what the endpoint enforces,
+		// the row cap covers tables of tiny rows.
 		if len(batch) > 0 && (len(batch) >= dataBatchSize || batchBytes+rowBytes > maxBatchBytes) {
-			if err := flushBatch(); err != nil {
-				return total, err
+			if err := flushBatch(true); err != nil {
+				return total, res, err
 			}
 		}
 		batch = append(batch, row)
@@ -595,202 +698,221 @@ func emitOneTable(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter, ta
 		total++
 	}
 	if err := rows.Err(); err != nil {
-		return total, err
+		return total, res, err
 	}
-	if err := flushBatch(); err != nil {
-		return total, err
+	if err := flushBatch(false); err != nil {
+		return total, res, err
+	}
+	if dropped {
+		var buf strings.Builder
+		buf.WriteString("SET CONSTRAINTS ALL IMMEDIATE;\n")
+		for _, fk := range selfFKs {
+			fmt.Fprintf(&buf, "ALTER TABLE %s ADD CONSTRAINT %s %s;\n", quoteIdent(table), quoteIdent(fk.name), fk.def)
+		}
+		if err := writer.WriteStatement(buf.String()); err != nil {
+			return total, res, err
+		}
+		res.fkReadded = true
 	}
 	if total == 0 {
-		if err := writer.WriteStatement("-- (no rows)\n\n"); err != nil {
-			return total, err
+		if err := writer.WriteStatement("-- (no rows)\n"); err != nil {
+			return total, res, err
 		}
 	}
-	return total, nil
+	return total, res, nil
 }
 
-// coerceValue adapts non-string pgx values that WON'T come through the
-// text cast (UUIDs, decoded JSONB maps if any escape the cast). Most
-// of the "silent-corruption" cases are now handled by needsTextCast /
-// selectExprFor at query time.
-func coerceValue(v interface{}) interface{} {
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case [16]byte:
-		return fmt.Sprintf("%x-%x-%x-%x-%x", t[0:4], t[4:6], t[6:8], t[8:10], t[10:16])
-	case map[string]interface{}:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return jsonbLiteral("{}")
-		}
-		return jsonbLiteral(string(b))
-	case []interface{}:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return jsonbLiteral("[]")
-		}
-		return jsonbLiteral(string(b))
-	default:
-		return v
-	}
+// tableResult is what emitOneTable reports besides the row count.
+type tableResult struct {
+	oversize  int  // rows too large for one migration file
+	fkReadded bool // self-referencing foreign keys dropped and added back
 }
+
+// commentSafe keeps a name on its comment line.
+func commentSafe(name string) string {
+	return strings.NewReplacer("\n", " ", "\r", " ").Replace(name)
+}
+
+// ── auth users ──────────────────────────────────────────────────────
 
 // emitAuthData reads Supabase's auth.users + auth.identities, translates
-// each row, and writes the corresponding INSERTs. Returns user + identity
-// counts and any translator notes.
+// them, and writes the INSERTs. Returns user + identity counts and notes
+// for the developer.
 //
-// Does NOT wrap in BEGIN/COMMIT — the tenant-migrations endpoint runs
-// each migration file in its own transaction and rejects explicit
-// transaction-control statements (#275 review ship-blocker #1).
-func emitAuthData(ctx context.Context, conn *pgx.Conn, writer *sqlFileWriter) (int64, int64, []string, error) {
-	if err := writer.WriteStatement("-- Auth users (auth.users → users)\n"); err != nil {
-		return 0, 0, nil, err
-	}
-
-	users, notes, err := readAuthUsers(ctx, conn)
+// No BEGIN/COMMIT: the migrations endpoint runs each file in its own
+// transaction and refuses transaction control in the body.
+func emitAuthData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, now time.Time) (int64, int64, []string, error) {
+	users, err := readAuthUsers(ctx, q)
 	if err != nil {
 		return 0, 0, nil, fmt.Errorf("read auth.users: %w", err)
 	}
-	var userBatch [][]interface{}
-	var userBytes int
-	flushUserBatch := func() error {
-		if len(userBatch) == 0 {
-			return nil
-		}
-		var buf strings.Builder
-		emitInsertBatch(&buf, "users", authUserColumns, userBatch)
-		if err := writer.WriteStatement(buf.String()); err != nil {
-			return err
-		}
-		userBatch = userBatch[:0]
-		userBytes = 0
-		return nil
-	}
-	for _, u := range users {
-		row, rowNotes := translateAuthUser(u)
-		notes = append(notes, prefixNotes(u.ID, rowNotes)...)
-		vals := userRowAsValues(row)
-		rowBytes := estimateRowBytes(vals)
-		if len(userBatch) > 0 && (len(userBatch) >= dataBatchSize || userBytes+rowBytes > maxBatchBytes) {
-			if err := flushUserBatch(); err != nil {
-				return int64(len(users)), 0, notes, err
-			}
-		}
-		userBatch = append(userBatch, vals)
-		userBytes += rowBytes
-	}
-	if err := flushUserBatch(); err != nil {
-		return int64(len(users)), 0, notes, err
-	}
-
-	if err := writer.WriteStatement("-- Auth identities (auth.identities → user_identities)\n"); err != nil {
-		return int64(len(users)), 0, notes, err
-	}
-	identities, idNotes, err := readAuthIdentities(ctx, conn)
-	notes = append(notes, idNotes...)
+	// Looked up first: a failed query would end the snapshot.
+	identityCols, err := authColumnPresent(ctx, q, "identities")
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
-			return int64(len(users)), 0, notes, fmt.Errorf("read auth.identities: %w", err)
-		}
-		notes = append(notes, "auth.identities not found on source — OAuth link rows skipped")
-		identities = nil
+		return 0, 0, nil, fmt.Errorf("read auth.identities: %w", err)
 	}
-	var identBatch [][]interface{}
-	var identBytes int
-	flushIdentBatch := func() error {
-		if len(identBatch) == 0 {
+	var identities []supabaseIdentity
+	var idNotes []string
+	if !identityCols["provider_id"] {
+		idNotes = append(idNotes, "auth.identities has no provider_id column (or doesn't exist) on the source — OAuth links are not imported")
+	} else if identities, idNotes, err = readAuthIdentities(ctx, q); err != nil {
+		return 0, 0, nil, fmt.Errorf("read auth.identities: %w", err)
+	}
+	plan, err := planAuthImport(users, identities, now)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	notes := append(idNotes, plan.notes...)
+
+	if err := writer.WriteStatement("-- Auth users (auth.users → users)\n"); err != nil {
+		return 0, 0, notes, err
+	}
+	userRows := make([][]interface{}, len(plan.users))
+	for i, u := range plan.users {
+		userRows[i] = userRowAsValues(u)
+	}
+	if err := writeBatched(writer, "users", authUserColumns, userRows); err != nil {
+		return 0, 0, notes, err
+	}
+	if err := writer.WriteStatement("\n-- OAuth links (auth.identities → user_identities)\n"); err != nil {
+		return 0, 0, notes, err
+	}
+	identRows := make([][]interface{}, len(plan.identities))
+	for i, id := range plan.identities {
+		identRows[i] = identityRowAsValues(id)
+	}
+	if err := writeBatched(writer, "user_identities", authIdentityColumns, identRows); err != nil {
+		return 0, 0, notes, err
+	}
+	if err := writer.WriteStatement("\n"); err != nil {
+		return 0, 0, notes, err
+	}
+	return int64(len(plan.users)), int64(len(plan.identities)), notes, nil
+}
+
+// writeBatched writes rows as INSERT statements that each stay under the
+// endpoint's size cap.
+func writeBatched(writer *sqlFileWriter, table string, columns []string, rows [][]interface{}) error {
+	var batch [][]interface{}
+	var batchBytes int
+	flush := func() error {
+		if len(batch) == 0 {
 			return nil
 		}
 		var buf strings.Builder
-		emitInsertBatch(&buf, "user_identities", authIdentityColumns, identBatch)
-		if err := writer.WriteStatement(buf.String()); err != nil {
-			return err
-		}
-		identBatch = identBatch[:0]
-		identBytes = 0
-		return nil
+		emitInsertBatch(&buf, table, columns, batch)
+		batch, batchBytes = batch[:0], 0
+		return writer.WriteStatement(buf.String())
 	}
-	for _, i := range identities {
-		row := translateAuthIdentity(i)
-		vals := identityRowAsValues(row)
-		rowBytes := estimateRowBytes(vals)
-		if len(identBatch) > 0 && (len(identBatch) >= dataBatchSize || identBytes+rowBytes > maxBatchBytes) {
-			if err := flushIdentBatch(); err != nil {
-				return int64(len(users)), int64(len(identities)), notes, err
+	for _, row := range rows {
+		rowBytes := estimateRowBytes(row)
+		if len(batch) > 0 && (len(batch) >= dataBatchSize || batchBytes+rowBytes > maxBatchBytes) {
+			if err := flush(); err != nil {
+				return err
 			}
 		}
-		identBatch = append(identBatch, vals)
-		identBytes += rowBytes
+		batch = append(batch, row)
+		batchBytes += rowBytes
 	}
-	if err := flushIdentBatch(); err != nil {
-		return int64(len(users)), int64(len(identities)), notes, err
-	}
-	return int64(len(users)), int64(len(identities)), notes, nil
+	return flush()
 }
 
-func prefixNotes(id string, notes []string) []string {
-	out := make([]string, len(notes))
-	for i, n := range notes {
-		out[i] = "user " + id + ": " + n
+// authColumnPresent reports which of the optional auth.users columns the
+// source has (older Supabase projects lack some).
+func authColumnPresent(ctx context.Context, q sourceQuerier, table string) (map[string]bool, error) {
+	rows, err := q.Query(ctx, `
+		SELECT a.attname
+		  FROM pg_attribute a
+		 WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped`, "auth."+table)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
 }
 
-// readAuthUsers projects the Supabase auth.users columns we care about.
-// Only rows with at least a non-null email OR phone survive — a bare
-// UUID with no login handle isn't recoverable in Eurobase.
-func readAuthUsers(ctx context.Context, conn *pgx.Conn) ([]supabaseUser, []string, error) {
-	rows, err := conn.Query(ctx, `
+// readAuthUsers reads every auth.users row with the columns we map.
+// Which users are imported is decided in planAuthImport.
+func readAuthUsers(ctx context.Context, q sourceQuerier) ([]supabaseUser, error) {
+	have, err := authColumnPresent(ctx, q, "users")
+	if err != nil {
+		return nil, err
+	}
+	if len(have) == 0 {
+		return nil, errors.New("auth.users not found — is SUPABASE_DB_URL a Supabase project? (use --skip-auth to copy only the tables)")
+	}
+	opt := func(col, fallback string) string {
+		if have[col] {
+			return col
+		}
+		return fallback
+	}
+	// "infinity" is a valid ban end on Supabase; read it as a far date.
+	bannedUntil := "NULL::timestamptz"
+	if have["banned_until"] {
+		bannedUntil = "CASE WHEN banned_until = 'infinity' THEN '9999-01-01'::timestamptz WHEN banned_until = '-infinity' THEN NULL ELSE banned_until END"
+	}
+	rows, err := q.Query(ctx, fmt.Sprintf(`
 		SELECT id::text, email, encrypted_password,
-		       email_confirmed_at, phone, phone_confirmed_at,
-		       last_sign_in_at, banned_until,
+		       email_confirmed_at, %s, %s,
+		       last_sign_in_at, %s,
 		       COALESCE(raw_user_meta_data::text, '{}'),
 		       COALESCE(raw_app_meta_data::text, '{}'),
-		       created_at, updated_at
+		       created_at, updated_at,
+		       %s, COALESCE(%s, false), COALESCE(%s, false)
 		  FROM auth.users
-		 WHERE email IS NOT NULL OR phone IS NOT NULL
-		 ORDER BY created_at
-	`)
+		 ORDER BY created_at, id`,
+		opt("phone", "NULL::text"), opt("phone_confirmed_at", "NULL::timestamptz"),
+		bannedUntil,
+		opt("deleted_at", "NULL::timestamptz"), opt("is_anonymous", "false"), opt("is_sso_user", "false")))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
 	var out []supabaseUser
-	var notes []string
 	for rows.Next() {
 		var u supabaseUser
+		var createdAt *time.Time
 		if err := rows.Scan(
 			&u.ID, &u.Email, &u.EncryptedPassword,
 			&u.EmailConfirmedAt, &u.Phone, &u.PhoneConfirmedAt,
 			&u.LastSignInAt, &u.BannedUntil,
 			&u.RawUserMetaData, &u.RawAppMetaData,
-			&u.CreatedAt, &u.UpdatedAt,
+			&createdAt, &u.UpdatedAt,
+			&u.DeletedAt, &u.IsAnonymous, &u.IsSSOUser,
 		); err != nil {
-			return out, notes, err
+			return out, err
+		}
+		if createdAt != nil {
+			u.CreatedAt = *createdAt
 		}
 		out = append(out, u)
 	}
-	return out, notes, rows.Err()
+	return out, rows.Err()
 }
 
-// readAuthIdentities projects the Supabase auth.identities columns we
-// map. Rows with NULL provider_id are skipped with a note — a NULL
-// there means we can't populate the `(provider, provider_user_id)`
-// unique index target, and inserting `''` (as an earlier draft did)
-// would violate the constraint the moment two such rows collide
-// (#275 review H #8).
+// readAuthIdentities reads the auth.identities columns we map. Rows
+// without a provider_id are skipped with a note: they can't fill the
+// (provider, provider_user_id) key.
 //
 // Returns 42P01 (undefined_table) on projects that predate the
-// identities table — caller treats that as "no rows".
-func readAuthIdentities(ctx context.Context, conn *pgx.Conn) ([]supabaseIdentity, []string, error) {
-	rows, err := conn.Query(ctx, `
+// identities table — the caller treats that as "no rows".
+func readAuthIdentities(ctx context.Context, q sourceQuerier) ([]supabaseIdentity, []string, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id::text, user_id::text, provider,
 		       provider_id,
 		       COALESCE(identity_data::text, '{}'),
 		       last_sign_in_at, created_at, updated_at
 		  FROM auth.identities
-		 ORDER BY user_id, created_at
+		 ORDER BY user_id, created_at, id
 	`)
 	if err != nil {
 		return nil, nil, err
@@ -802,10 +924,11 @@ func readAuthIdentities(ctx context.Context, conn *pgx.Conn) ([]supabaseIdentity
 	for rows.Next() {
 		var i supabaseIdentity
 		var providerID *string
+		var createdAt *time.Time
 		if err := rows.Scan(
 			&i.ID, &i.UserID, &i.Provider,
 			&providerID, &i.IdentityData,
-			&i.LastSignInAt, &i.CreatedAt, &i.UpdatedAt,
+			&i.LastSignInAt, &createdAt, &i.UpdatedAt,
 		); err != nil {
 			return out, notes, err
 		}
@@ -813,11 +936,14 @@ func readAuthIdentities(ctx context.Context, conn *pgx.Conn) ([]supabaseIdentity
 			skipped++
 			continue
 		}
+		if createdAt != nil {
+			i.CreatedAt = *createdAt
+		}
 		i.ProviderID = *providerID
 		out = append(out, i)
 	}
 	if skipped > 0 {
-		notes = append(notes, fmt.Sprintf("skipped %d auth.identities row(s) with NULL provider_id — would violate the (provider, provider_user_id) unique index", skipped))
+		notes = append(notes, fmt.Sprintf("%d OAuth link(s) without a provider id skipped", skipped))
 	}
 	return out, notes, rows.Err()
 }

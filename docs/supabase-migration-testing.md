@@ -201,59 +201,108 @@ eurobase migrations up
 
 ---
 
-## 4. Step 3 — `data` (rows + auth translation)
+## 4. Step 3 — `data` (users + rows)
 
-**Goal:** move row data from public tables + `auth.users` +
-`auth.identities` into the target project.
+**Goal:** move the users (`auth.users`, `auth.identities`) and the rows
+of the public tables into the target project. Run it after the schema
+migration from step 2 has been applied, against a project that has no
+data yet.
 
 ```bash
 eurobase import supabase data --migrations-dir ./migrations
 eurobase migrations up
 ```
 
+The command reads everything in one read-only snapshot and writes
+nothing to Supabase. Together the files hold, in this order: users,
+OAuth links, then each table's rows (parents before children) followed
+by its sequence positions. Apply all of them.
+
 ### 4.1 Assertions on emission
 
 - [ ] Exits 0. One or more files land under `./migrations/`
       named `<epoch>_data_from_supabase_part_NNN.sql`.
-- [ ] Each file is **under 512 KiB** (the tenant-migrations endpoint
-      cap). Check with `ls -la` — anything at or over is a bug.
-- [ ] No file contains `BEGIN;` or `COMMIT;` (the endpoint rejects
+- [ ] Each file is **under 512 KiB** (the migrations endpoint's cap).
+- [ ] No file contains `BEGIN;` or `COMMIT;` (the endpoint refuses
       those).
-- [ ] `INSERT INTO "users" …` uses **bare** table names, no
-      `public.` / `tenant_<slug>.` prefix.
-- [ ] Auth users show up in the `users` INSERT with UUIDs
-      **preserved** from Supabase (same as `SELECT id FROM
-      auth.users` on the source).
-- [ ] OAuth-only users (no password) get a stderr note.
-- [ ] `raw_user_meta_data` lands at the top level of `metadata`;
-      `raw_app_meta_data` lands nested under `_app_metadata`.
-- [ ] `auth.identities` rows land in `user_identities` with the
-      original `user_id` preserved.
+- [ ] The `users` INSERT comes **before** any table rows, with ids
+      **kept** from Supabase, emails in lower case and phone numbers
+      with a leading `+`.
+- [ ] `raw_user_meta_data` lands at the top level of `metadata`,
+      `raw_app_meta_data` under `_app_metadata`; `display_name` /
+      `avatar_url` are filled from the metadata when present.
+- [ ] `user_identities` holds the OAuth links only (no `email` /
+      `phone` rows), each with an `id`, under Eurobase's provider
+      names: `azure` becomes `microsoft`, `linkedin_oidc` becomes
+      `linkedin`. A Microsoft link is written with the object id
+      (`oid`) from Supabase's `identity_data`, which is what Eurobase
+      knows a Microsoft user by; without one the link is left out.
+      Links for a provider Eurobase doesn't offer are left out too.
+      Both are listed.
+- [ ] Values are plain quoted literals without casts (`'1234.5678'`,
+      `'NaN'`, `'{a,b}'`), `NULL` for nulls.
+- [ ] A table with a `GENERATED ALWAYS AS IDENTITY` column is inserted
+      with `OVERRIDING SYSTEM VALUE`.
+- [ ] Each table with a serial / identity column is followed by a
+      `SELECT setval(…)`.
+- [ ] A table that has triggers gets `ALTER TABLE … DISABLE TRIGGER
+      USER` before and `ENABLE TRIGGER USER` after each INSERT.
+- [ ] A table that refers to itself and needs more than one INSERT:
+      its self-referencing foreign key is dropped before the first
+      INSERT and added back after the last one.
+- [ ] The "Read before applying" list names what was changed or left
+      out: deleted users, SSO users, users without email and phone,
+      users without a password, passwords that can't be used (not
+      bcrypt, or cost above 12), bans with an end date, OAuth links
+      that were left out, tables whose triggers are switched off, rows
+      too large for one file.
 
 ### 4.2 Assertions on apply
 
 - [ ] `eurobase migrations up` applies every part in order without
       error.
-- [ ] Row count per table on target matches source (`SELECT count(*)`
-      on both).
-- [ ] A user from Supabase can log in on the target project with
-      their **original password** (bcrypt passthrough).
-- [ ] A user with an OAuth identity: their next Google/GitHub sign-in
-      links to the pre-existing `users` row (uses `user_identities`).
+- [ ] Every table has the same rows as the source. Compare with
+      `SELECT count(*), md5(string_agg(t::text, ',' ORDER BY t::text))
+      FROM <table> t` on both sides.
+- [ ] Tables that a trigger writes to (audit logs) have the source's
+      rows, not a second set; `updated_at` columns are unchanged.
+- [ ] Inserting a new row into a table with a serial / identity column
+      works (the sequence is past the imported ids).
+- [ ] Triggers are enabled again; a trigger that was disabled on
+      Supabase is still disabled.
+- [ ] A user from Supabase can sign in on the target project with
+      their **original password**.
+- [ ] A user with an OAuth link: their next sign-in with that provider
+      lands on the existing `users` row. The project must use the same
+      OAuth app (client ID) as on Supabase. Check one sign-in per
+      provider: only Google and GitHub ids have been tested, and
+      whether a Microsoft link carries an `oid` depends on what
+      Supabase stored.
+- [ ] A user whose ban on Supabase had run out can sign in; a user
+      with a running ban can't.
 - [ ] An RLS policy from step 2 gates rows correctly — a user only
       sees their own data.
 
+`TestDataImport_Fixture` (set `ASSESS_SCRATCH_DB_URL` to a throwaway
+local database) runs emission, the server's validator, the apply and
+the row-for-row comparison.
+
 ### 4.3 Bug categories
 
-- A JSONB scalar (`"foo"`, `42`, `true`) fell through to a bare
-  string literal without the `::jsonb` cast → apply-time failure.
-- A `numeric` / `interval` / `inet` / range column emitted as a Go
-  struct dump.
-- Batch overshoots 512 KiB on a wide-row table.
-- FK cycle detected: should be a **loud error** on emit, not a wrong
-  order silently emitted.
-- Refresh tokens migrated (they shouldn't be — the note says users
-  re-authenticate).
+- A value that doesn't survive the copy (compare the md5 above):
+  floats (`NaN`, `Infinity`), JSON `null`, `bit(n)`, arrays with
+  quotes or NULLs, composite and domain types.
+- Rows inserted before the users or the parent rows they reference
+  (foreign-key error on apply).
+- A foreign-key cycle between tables: a **loud error** on emit, not a
+  wrong order. There is no automatic way around it: drop one of the
+  foreign keys in the project, import the tables with `--table`, add
+  it back.
+- A source database with a day-first `DateStyle`: dates must still
+  arrive unchanged.
+- A table others inherit from: its rows must not arrive twice.
+- A batch over 512 KiB on a wide-row table.
+- Refresh tokens or sessions copied (they shouldn't be).
 
 ---
 

@@ -1,28 +1,13 @@
 package cli
 
-// #270 (part of #267): Supabase → Eurobase data translator.
+// Supabase → Eurobase data translation: the pure parts of
+// `eurobase import supabase data` (no database access), so tests can pin
+// them: literal formatting, foreign-key ordering, and the mapping of
+// `auth.users` / `auth.identities` to Eurobase's `users` /
+// `user_identities`.
 //
-// Given rows read from a Supabase project — public tables and
-// `auth.users` / `auth.identities` — produces SQL that runs cleanly
-// against a Eurobase tenant schema. The translator lives here so its
-// behavior is pinnable by unit tests without needing a live database.
-//
-// Emission strategy: multi-row `INSERT INTO t (cols) VALUES (row1),
-// (row2), …` batched at ~1000 rows per statement. We don't use
-// `COPY … FROM STDIN` because the tenant migrations endpoint (#190)
-// accepts a SQL body over HTTP; there's no way to pipe stdin through
-// it. Multi-row INSERT is ~5–10× slower than COPY but works with the
-// existing infrastructure — a proper streaming path lands with the
-// backend endpoint in a follow-up.
-//
-// Auth users get translated into Eurobase's `users` + `user_identities`
-// table pair: `auth.users` has one row per human, `auth.identities`
-// has one row per (user, provider). Eurobase mirrors this shape after
-// migration `000032`.
-//
-// UUIDs are preserved across the migration so RLS policies keep
-// working — a policy like `USING (user_id = auth_uid())` still lines
-// up because the underlying UUIDs didn't change.
+// User ids are kept, so rows and policies that refer to a user
+// (`user_id = auth_uid()`) still line up after the import.
 
 import (
 	"encoding/hex"
@@ -31,6 +16,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // dataBatchSize is the row-count ceiling per multi-row INSERT. Kept
@@ -72,17 +60,14 @@ func estimateValueBytes(v interface{}) int {
 		// 175 KiB batch to 350 KiB (still under the 512 KiB endpoint
 		// cap given our 350 KiB flush threshold, but not by much).
 		return len(t) + len(t)/4 + 12 // '' + ::jsonb + slack
-	case typedLiteral:
-		return len(t.value) + len(t.value)/4 + len(t.pgType) + 6 // '' + :: + slack
 	case string:
-		// Assume up to ~25% of chars might be `'` needing doubling
-		// (worst-realistic case for JSON-ish payloads).
-		return len(t) + len(t)/4 + 2
+		// Exact: every `'` is doubled.
+		return len(t) + strings.Count(t, "'") + 2
 	case *string:
 		if t == nil {
 			return 4
 		}
-		return len(*t) + len(*t)/4 + 2
+		return len(*t) + strings.Count(*t, "'") + 2
 	case time.Time:
 		return 45 // RFC3339Nano + ::timestamptz + slack
 	case *time.Time:
@@ -141,9 +126,8 @@ type fkEdge struct {
 // parents (referenced tables) before children (referencing tables).
 // Returns an error listing the cycle members when a real FK cycle is
 // present, because emitting a wrong order would silently apply-time-
-// fail on FK violations. Self-references are tolerated (Postgres
-// accepts them within a single-statement multi-row INSERT if the
-// rows are consistent).
+// fail on FK violations. Self-references don't take part in the order;
+// emitOneTable handles them.
 //
 // Deterministic: given the same inputs, always returns the same
 // order. Sort is stable within an FK level via lexicographic
@@ -203,7 +187,7 @@ func sortTablesByFK(tables []tableRef, edges []fkEdge) ([]tableRef, error) {
 			// Build the sub-graph of unresolved nodes only, then run
 			// Tarjan's SCC on it.
 			cycle := findCycleMembers(indeg, deps, names)
-			return nil, fmt.Errorf("FK cycle among tables %v — resolve on Supabase (DEFERRABLE the constraint or drop one side) and rerun", cycle)
+			return nil, fmt.Errorf("foreign keys form a cycle among tables %v, so no order of tables satisfies them — import these with --table, one at a time, after dropping one of the foreign keys in the project, and add it back afterwards", cycle)
 		}
 		sort.Strings(ready)
 		for _, n := range ready {
@@ -342,13 +326,16 @@ type supabaseUser struct {
 	RawAppMetaData    string     // JSONB (raw JSON text)
 	CreatedAt         time.Time
 	UpdatedAt         *time.Time
+	DeletedAt         *time.Time // soft delete
+	IsAnonymous       bool
+	IsSSOUser         bool
 }
 
 // supabaseIdentity is one row from `auth.identities` — the OAuth-link
 // side table. One user can have many identities (a Google + a GitHub
 // login attached to the same account).
 type supabaseIdentity struct {
-	ID           string     // uuid — Eurobase generates its own, we drop this
+	ID           string     // uuid on current Supabase; kept as the link's id
 	UserID       string     // uuid — preserved so it lines up with users.id
 	Provider     string     // "google" / "github" / …
 	ProviderID   string     // opaque per-provider user identifier
@@ -365,6 +352,8 @@ type eurobaseUserRow struct {
 	Email            *string
 	Phone            *string
 	PasswordHash     *string
+	DisplayName      *string
+	AvatarURL        *string
 	Metadata         string // JSONB
 	EmailConfirmedAt *time.Time
 	PhoneConfirmedAt *time.Time
@@ -377,6 +366,7 @@ type eurobaseUserRow struct {
 // eurobaseIdentityRow is what we emit into `user_identities`. Exposed
 // for tests.
 type eurobaseIdentityRow struct {
+	ID             string
 	UserID         string
 	Provider       string
 	ProviderUserID string
@@ -386,36 +376,76 @@ type eurobaseIdentityRow struct {
 	UpdatedAt      time.Time
 }
 
-// translateAuthUser maps one Supabase auth.users row to a Eurobase
-// users row. Pure — no DB access. Returns the row and a "notes" list
-// with any information the tenant might want to eyeball (e.g. "no
-// password_hash — user must reset").
-func translateAuthUser(u supabaseUser) (eurobaseUserRow, []string) {
-	var notes []string
+// maxImportHashCost mirrors the server: sign-in refuses a stored bcrypt
+// hash with a higher cost, so importing one would only look like it
+// worked.
+const maxImportHashCost = 12
 
-	// Password: preserved verbatim. Supabase and Eurobase both use
-	// bcrypt with the same output shape ($2a$… / $2b$…), so
-	// bcrypt.CompareHashAndPassword works across the boundary. NULL
-	// on Supabase → NULL on Eurobase (OAuth-only user must sign in
-	// via the provider first, which sets a fresh hash if the tenant
-	// enables password fallback).
+// userFlags says what translateAuthUser changed, for the summary.
+type userFlags struct {
+	noPassword      bool // no password on the source (OAuth / phone / anonymous)
+	passwordDropped bool // a hash Eurobase can't use
+	temporaryBan    bool // banned until a date
+	noLogin         bool // neither email nor phone
+}
+
+// translateAuthUser maps one Supabase auth.users row to a Eurobase
+// users row. Pure — no DB access.
+func translateAuthUser(u supabaseUser, now time.Time) (eurobaseUserRow, userFlags) {
+	var flags userFlags
+
+	// Sign-in looks the email up in lower case.
+	email := u.Email
+	if email != nil {
+		e := strings.ToLower(strings.TrimSpace(*email))
+		email = &e
+		if e == "" {
+			email = nil
+		}
+	}
+	// Supabase stores phone numbers without the leading +; Eurobase
+	// uses E.164.
+	phone := u.Phone
+	if phone != nil {
+		ph := strings.TrimSpace(*phone)
+		if ph != "" && isDigits(ph) {
+			ph = "+" + ph
+		}
+		phone = &ph
+		if ph == "" {
+			phone = nil
+		}
+	}
+	flags.noLogin = email == nil && phone == nil
+
+	// Password: Supabase and Eurobase both store bcrypt, so the hash is
+	// kept as it is. Anything else (or a cost sign-in would refuse)
+	// can't be carried over — the user resets the password.
 	pw := u.EncryptedPassword
+	if pw != nil && *pw == "" {
+		pw = nil
+	}
 	if pw == nil {
-		notes = append(notes, "no password on source — user must sign in via OAuth to establish local password")
+		flags.noPassword = true
+	} else if cost, err := bcrypt.Cost([]byte(*pw)); err != nil || cost > maxImportHashCost {
+		pw = nil
+		flags.passwordDropped = true
 	}
 
-	// Metadata: Supabase's `raw_user_meta_data` is where clients stash
-	// display_name / avatar_url; `raw_app_meta_data` is where the
-	// server (and app code) stashes provider / providers / role /
-	// tenant-membership hints. Eurobase collapses both into a single
-	// `metadata` JSONB. We merge them, putting user-meta at the top
-	// level (existing app code reads it there) and nesting app-meta
-	// under an `app_metadata` key so nothing is lost. (#275 review
-	// H #6 — raw_app_meta_data was previously discarded silently.)
-	metadata := mergeUserAndAppMetadata(u.RawUserMetaData, u.RawAppMetaData)
+	// A ban that has run out is not a ban. Eurobase has no "until": a
+	// ban that is still running becomes a ban without an end.
+	var bannedAt *time.Time
+	if u.BannedUntil != nil && u.BannedUntil.After(now) {
+		t := now.UTC().Truncate(time.Second)
+		bannedAt = &t
+		flags.temporaryBan = true
+	}
 
-	// updated_at defaults to created_at when the source didn't record
-	// one (Supabase started stamping it later in its schema history).
+	// Metadata: user metadata stays at the top level (app code reads it
+	// there), app metadata goes under `_app_metadata`.
+	metadata := mergeUserAndAppMetadata(u.RawUserMetaData, u.RawAppMetaData)
+	userMeta, _ := parseJSONObject(u.RawUserMetaData)
+
 	updatedAt := u.CreatedAt
 	if u.UpdatedAt != nil {
 		updatedAt = *u.UpdatedAt
@@ -423,22 +453,199 @@ func translateAuthUser(u supabaseUser) (eurobaseUserRow, []string) {
 
 	return eurobaseUserRow{
 		ID:               u.ID,
-		Email:            u.Email,
-		Phone:            u.Phone,
+		Email:            email,
+		Phone:            phone,
 		PasswordHash:     pw,
+		DisplayName:      firstString(userMeta, "display_name", "full_name", "name"),
+		AvatarURL:        firstString(userMeta, "avatar_url", "picture"),
 		Metadata:         metadata,
 		EmailConfirmedAt: u.EmailConfirmedAt,
 		PhoneConfirmedAt: u.PhoneConfirmedAt,
 		LastSignInAt:     u.LastSignInAt,
-		BannedAt:         u.BannedUntil, // Supabase's `banned_until` maps to Eurobase's soft-delete `banned_at`
+		BannedAt:         bannedAt,
 		CreatedAt:        u.CreatedAt,
 		UpdatedAt:        updatedAt,
-	}, notes
+	}, flags
+}
+
+func isDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// firstString returns the first of keys that holds a non-empty string.
+func firstString(m map[string]interface{}, keys ...string) *string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			return &v
+		}
+	}
+	return nil
+}
+
+// authPlan is what the import writes for auth, and what it tells the
+// developer about it.
+type authPlan struct {
+	users      []eurobaseUserRow
+	identities []eurobaseIdentityRow
+	notes      []string
+}
+
+// planAuthImport decides which users and OAuth links are imported and
+// how. Pure — no DB access.
+//
+// Left out: users deleted on Supabase and SSO users (their sign-in
+// belongs to an identity provider Eurobase doesn't have a link for; an
+// SSO user may also share an email with a normal user). Everyone else is
+// imported, including users without email or phone (anonymous sign-ins),
+// because rows in the app's tables refer to them.
+func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now time.Time) (authPlan, error) {
+	var plan authPlan
+	var deleted, sso, noLogin, noPassword, pwDropped, tempBans int
+	imported := map[string]bool{}
+	byEmail := map[string]string{}
+	byPhone := map[string]string{}
+	for _, u := range users {
+		if u.DeletedAt != nil {
+			deleted++
+			continue
+		}
+		if u.IsSSOUser {
+			sso++
+			continue
+		}
+		row, flags := translateAuthUser(u, now)
+		if row.Email != nil {
+			if other, dup := byEmail[*row.Email]; dup {
+				return plan, fmt.Errorf("users %s and %s have the same email address once it is lower-cased; Eurobase needs it unique — change one of them on Supabase and run again", other, u.ID)
+			}
+			byEmail[*row.Email] = u.ID
+		}
+		if row.Phone != nil {
+			if other, dup := byPhone[*row.Phone]; dup {
+				return plan, fmt.Errorf("users %s and %s have the same phone number; Eurobase needs it unique — change one of them on Supabase and run again", other, u.ID)
+			}
+			byPhone[*row.Phone] = u.ID
+		}
+		if flags.noLogin {
+			noLogin++
+		} else if flags.noPassword {
+			noPassword++
+		}
+		if flags.passwordDropped {
+			pwDropped++
+		}
+		if flags.temporaryBan {
+			tempBans++
+		}
+		imported[u.ID] = true
+		plan.users = append(plan.users, row)
+	}
+
+	var orphanLinks int
+	unsupported := map[string]int{}
+	msNoOID := 0
+	for _, i := range identities {
+		// Supabase also keeps an "identity" for email and phone
+		// sign-in; on Eurobase those are the user row itself.
+		if i.Provider == "email" || i.Provider == "phone" {
+			continue
+		}
+		if !imported[i.UserID] {
+			orphanLinks++
+			continue
+		}
+		provider, ok := eurobaseProviderFor[i.Provider]
+		if !ok {
+			unsupported[i.Provider]++
+			continue
+		}
+		if i.Provider == "azure" {
+			// Eurobase knows a Microsoft user by the directory object id
+			// ("oid"); Supabase's provider id is the per-app subject.
+			oid := microsoftObjectID(i.IdentityData)
+			if oid == "" {
+				msNoOID++
+				continue
+			}
+			i.ProviderID = oid
+		}
+		i.Provider = provider
+		plan.identities = append(plan.identities, translateAuthIdentity(i))
+	}
+
+	add := func(n int, format string) {
+		if n > 0 {
+			plan.notes = append(plan.notes, fmt.Sprintf(format, n))
+		}
+	}
+	add(deleted, "%d user(s) deleted on Supabase are not imported; rows in your tables that still refer to them will fail to apply")
+	add(sso, "%d SSO user(s) are not imported (their sign-in belongs to your identity provider); rows that refer to them will fail to apply")
+	add(noLogin, "%d user(s) have neither email nor phone (anonymous sign-ins): imported so their rows stay valid, but they can't sign in again — their Supabase session doesn't carry over")
+	add(noPassword, "%d user(s) have no password (OAuth or phone sign-in): they sign in the same way as before, once that provider is set up in the project")
+	add(pwDropped, "%d user(s) have a password hash Eurobase can't use (not bcrypt, or a cost above 12): imported without a password — they use \"forgot password\"")
+	add(tempBans, "%d user(s) are banned until a date on Supabase: imported as banned, without an end date — lift the ban in the console when it is due")
+	add(orphanLinks, "%d OAuth link(s) belong to users that are not imported; skipped")
+	if len(unsupported) > 0 {
+		var parts []string
+		for name, n := range unsupported {
+			parts = append(parts, fmt.Sprintf("%s (%d)", name, n))
+		}
+		sort.Strings(parts)
+		plan.notes = append(plan.notes, fmt.Sprintf("OAuth links for providers Eurobase doesn't offer are not imported: %s — these users sign in with a magic link or \"forgot password\" on their email address", strings.Join(parts, ", ")))
+	}
+	add(msNoOID, "%d Microsoft link(s) are not imported: Supabase stored no object id (\"oid\") for them, which is what Eurobase knows a Microsoft user by — these users sign in with a magic link or \"forgot password\" on their email address")
+	if len(plan.identities) > 0 {
+		plan.notes = append(plan.notes, fmt.Sprintf("%d OAuth link(s) imported: set each provider up in the project with the same OAuth app (client ID) as on Supabase — Apple gives a user a different id per developer team. Try one sign-in per provider before you switch your app over", len(plan.identities)))
+	}
+	return plan, nil
+}
+
+// eurobaseProviderFor maps Supabase's provider names to the names
+// Eurobase's sign-in looks links up by. A provider that isn't listed has
+// no sign-in on Eurobase. Supabase's older "linkedin" provider is left
+// out on purpose: its user ids are not the OpenID Connect ones.
+var eurobaseProviderFor = map[string]string{
+	"google":        "google",
+	"github":        "github",
+	"apple":         "apple",
+	"azure":         "microsoft",
+	"linkedin_oidc": "linkedin",
+}
+
+// microsoftObjectID returns the "oid" claim from a Supabase azure
+// identity's identity_data, at the top level or under custom_claims, or
+// "" when Supabase didn't keep it.
+func microsoftObjectID(identityData string) string {
+	data, ok := parseJSONObject(identityData)
+	if !ok {
+		return ""
+	}
+	if oid, _ := data["oid"].(string); oid != "" {
+		return oid
+	}
+	if claims, _ := data["custom_claims"].(map[string]interface{}); claims != nil {
+		if oid, _ := claims["oid"].(string); oid != "" {
+			return oid
+		}
+	}
+	return ""
 }
 
 // translateAuthIdentity maps one Supabase auth.identities row to a
 // Eurobase user_identities row. Pure — no DB access.
 func translateAuthIdentity(i supabaseIdentity) eurobaseIdentityRow {
+	// The id is always written: the column's default is a function the
+	// migration's database role may not be allowed to call. Older
+	// Supabase projects have a text id here; those get a stable uuid.
+	id := i.ID
+	if _, err := uuid.Parse(id); err != nil {
+		id = uuid.NewSHA1(uuid.NameSpaceOID, []byte(i.UserID+"\x00"+i.Provider+"\x00"+i.ProviderID)).String()
+	}
 	// Supabase's identity_data is the profile blob (name, email, avatar,
 	// scopes) — Eurobase's identity_data has the same purpose.
 	data := i.IdentityData
@@ -450,6 +657,7 @@ func translateAuthIdentity(i supabaseIdentity) eurobaseIdentityRow {
 		updatedAt = *i.UpdatedAt
 	}
 	return eurobaseIdentityRow{
+		ID:             id,
 		UserID:         i.UserID,
 		Provider:       i.Provider,
 		ProviderUserID: i.ProviderID,
@@ -484,14 +692,6 @@ func sqlLiteral(v interface{}) string {
 			s = "{}"
 		}
 		return "'" + strings.ReplaceAll(s, "'", "''") + "'::jsonb"
-	case typedLiteral:
-		// Typed literal — the CLI casts numeric/interval/inet/etc.
-		// columns to text in the SELECT so pgx returns them as
-		// strings; we re-emit as `'value'::type` so Postgres re-
-		// parses. Without this, sqlLiteral's default fallback would
-		// `%v`-print a pgtype wrapper into a Go-struct dump. (#275
-		// review ship-blocker #3/#4.)
-		return "'" + strings.ReplaceAll(t.value, "'", "''") + "'::" + t.pgType
 	case string:
 		return "'" + strings.ReplaceAll(t, "'", "''") + "'"
 	case *string:
@@ -551,6 +751,13 @@ func quoteIdent(name string) string {
 // Emits nothing if `rows` is empty (Postgres rejects a zero-row VALUES
 // clause).
 func emitInsertBatch(dest *strings.Builder, table string, columns []string, rows [][]interface{}) {
+	emitInsert(dest, table, columns, rows, false)
+}
+
+// emitInsert is emitInsertBatch with the option a table with a
+// GENERATED ALWAYS identity column needs: without OVERRIDING SYSTEM
+// VALUE, Postgres refuses an INSERT that names the column.
+func emitInsert(dest *strings.Builder, table string, columns []string, rows [][]interface{}, overridingSystemValue bool) {
 	if len(rows) == 0 {
 		return
 	}
@@ -563,7 +770,11 @@ func emitInsertBatch(dest *strings.Builder, table string, columns []string, rows
 		}
 		dest.WriteString(quoteIdent(c))
 	}
-	dest.WriteString(") VALUES\n")
+	dest.WriteString(")")
+	if overridingSystemValue {
+		dest.WriteString(" OVERRIDING SYSTEM VALUE")
+	}
+	dest.WriteString(" VALUES\n")
 	for ri, row := range rows {
 		dest.WriteString("  (")
 		for ci, v := range row {
@@ -576,7 +787,7 @@ func emitInsertBatch(dest *strings.Builder, table string, columns []string, rows
 		if ri < len(rows)-1 {
 			dest.WriteString(",\n")
 		} else {
-			dest.WriteString(";\n\n")
+			dest.WriteString(";\n")
 		}
 	}
 }
@@ -585,7 +796,7 @@ func emitInsertBatch(dest *strings.Builder, table string, columns []string, rows
 // INSERT. Kept as a package var so both the emitter and the tests see
 // the same list.
 var authUserColumns = []string{
-	"id", "email", "phone", "password_hash", "metadata",
+	"id", "email", "phone", "password_hash", "display_name", "avatar_url", "metadata",
 	"email_confirmed_at", "phone_confirmed_at", "last_sign_in_at",
 	"banned_at", "created_at", "updated_at",
 }
@@ -593,7 +804,7 @@ var authUserColumns = []string{
 // authIdentityColumns is the fixed column order we emit for the
 // user_identities INSERT.
 var authIdentityColumns = []string{
-	"user_id", "provider", "provider_user_id", "identity_data",
+	"id", "user_id", "provider", "provider_user_id", "identity_data",
 	"last_sign_in_at", "created_at", "updated_at",
 }
 
@@ -605,6 +816,8 @@ func userRowAsValues(u eurobaseUserRow) []interface{} {
 		u.Email,
 		u.Phone,
 		u.PasswordHash,
+		u.DisplayName,
+		u.AvatarURL,
 		// Metadata is JSONB — emit as string with a ::jsonb cast so
 		// Postgres parses it at insert time. sqlLiteral wraps the
 		// string in quotes; we append the cast by wrapping.
@@ -622,6 +835,7 @@ func userRowAsValues(u eurobaseUserRow) []interface{} {
 // []interface{} tuple used by emitInsertBatch.
 func identityRowAsValues(i eurobaseIdentityRow) []interface{} {
 	return []interface{}{
+		i.ID,
 		i.UserID,
 		i.Provider,
 		i.ProviderUserID,
@@ -638,18 +852,6 @@ func identityRowAsValues(i eurobaseIdentityRow) []interface{} {
 type jsonbValue string
 
 func jsonbLiteral(s string) jsonbValue { return jsonbValue(s) }
-
-// typedLiteral carries a text-cast source value + its target Postgres
-// type so sqlLiteral can emit `'value'::type`. Used by wrapValue in
-// migrate_supabase_data.go for column types the CLI cast to text at
-// SELECT time (jsonb / numeric / interval / inet / array types) —
-// without this wrapper, pgx would return the raw pgtype struct and
-// sqlLiteral's fallback would `%v`-print it into an unparseable
-// blob. (#275 review ship-blocker #3/#4.)
-type typedLiteral struct {
-	value  string
-	pgType string
-}
 
 // mergeUserAndAppMetadata combines Supabase's `raw_user_meta_data`
 // (client-writable) and `raw_app_meta_data` (server-writable) into the
