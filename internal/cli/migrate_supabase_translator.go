@@ -176,8 +176,17 @@ func translatePass1(input string, mask []bool, res *translationResult) string {
 				}
 				res.rewrites["keep:SET LOCAL check_function_bodies = false"]++
 				dropped = true
+			case line != trimmed && !reSetForbidden.MatchString(trimmed):
+				// An indented SET is a function's own setting (pg_dump
+				// writes `    SET statement_timeout TO '5s'` in the
+				// function header) — keep it; only search_path / role
+				// settings are refused by the platform.
 			case reSetAny.MatchString(trimmed):
-				res.rewrites["strip:SET <preamble>"]++
+				if line != trimmed {
+					res.rewrites["strip:function SET search_path / role"]++
+				} else {
+					res.rewrites["strip:SET <preamble>"]++
+				}
 				dropped = true
 			case reMetaCommand.MatchString(trimmed):
 				// pg_dump ≥ 17.6 / 18 brackets the dump in psql
@@ -330,6 +339,20 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 		warns = append(warns, translationWarning{
 			line: lineNum,
 			note: "uses `auth.jwt()` — Eurobase does not expose the raw JWT to SQL; verify the intent (may need a policy rewrite that reads Eurobase's session GUC instead)",
+		})
+	}
+	// request.jwt.* is read through current_setting('request.jwt…'), so
+	// that check looks at the whole line, literals included.
+	if reSupabaseRoleCheck.MatchString(code) || reJWTSetting.MatchString(line) {
+		warns = append(warns, translationWarning{
+			line: lineNum,
+			note: "checks the database role or JWT settings (current_user / session_user / current_role / request.jwt.*) — on Eurobase every API request runs as the same role and those settings are empty, so a check like `current_user <> 'anon'` lets anonymous callers through. Rewrite it with auth_uid() (NULL when no one is signed in) or public.is_service_role()",
+		})
+	}
+	if rePublicBareWord.MatchString(reStripQualifiedPublic.ReplaceAllString(code, "")) {
+		warns = append(warns, translationWarning{
+			line: lineNum,
+			note: "uses `public` as a name (an alias or column), and `public.<x>` references were rewritten to `<x>` — check that this line still refers to what it did",
 		})
 	}
 	if reExtensionsRef.MatchString(code) {
@@ -693,6 +716,7 @@ var (
 	// controls the session role and locale). The wider net is
 	// intentional. (#274 review M2, M6.)
 	reSetCheckFunctionBodies = regexp.MustCompile(`(?i)^\s*SET\s+check_function_bodies\s*=\s*false\s*;\s*$`)
+	reSetForbidden           = regexp.MustCompile(`(?i)^\s*SET\s+(LOCAL\s+|SESSION\s+)?(search_path|role|session_authorization)\b`)
 	reSetAny                 = regexp.MustCompile(`(?i)^\s*SET\s+\w+`)
 	reCreateSchemaPublic     = regexp.MustCompile(`(?i)^\s*CREATE\s+SCHEMA\s+(IF\s+NOT\s+EXISTS\s+)?public\b`)
 	reAlterSchemaOwner       = regexp.MustCompile(`(?i)^\s*ALTER\s+SCHEMA\s+\w+\s+OWNER\s+TO`)
@@ -722,6 +746,10 @@ var (
 	reExtensionsUUID          = regexp.MustCompile(`\bextensions\.uuid_generate_v4\s*\(\s*\)`)
 	reExtensionsGenRandomUUID = regexp.MustCompile(`\bextensions\.gen_random_uuid\s*\(\s*\)`)
 	reExtensionsModdatetime   = regexp.MustCompile(`(?i)\bextensions\s*\.\s*moddatetime\s*\(`)
+	reSupabaseRoleCheck       = regexp.MustCompile(`(?i)\b(current_user|session_user|current_role)\b`)
+	reJWTSetting              = regexp.MustCompile(`(?i)current_setting\s*\(\s*'request\.jwt`)
+	rePublicBareWord          = regexp.MustCompile(`(?i)\bpublic\b`)
+	reStripQualifiedPublic    = regexp.MustCompile(`(?i)\bpublic\s*\.`)
 	reExtensionsRef           = regexp.MustCompile(`(?i)\bextensions\s*\.\s*[A-Za-z_]`)
 	reDefinesModdatetime      = regexp.MustCompile(`(?i)\bCREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+moddatetime\s*\(`)
 	reUUIDGenerateV4          = regexp.MustCompile(`(?i)\b(public\s*\.\s*)?uuid_generate_v4\s*\(\s*\)`)

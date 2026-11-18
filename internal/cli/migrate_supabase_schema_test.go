@@ -566,9 +566,21 @@ func TestSchemaImport_Fixture(t *testing.T) {
 	}
 
 	// The translated policies, as a non-owner role (like SDK traffic):
-	// "Own profile" was TO authenticated — the signed-in owner sees the
-	// row, an anonymous caller and another user don't, the service key
-	// does.
+	//   - profiles "Own profile" (TO authenticated): the signed-in owner
+	//     sees the row, anonymous callers and other users don't;
+	//   - notes "Read all" + a RESTRICTIVE own-only policy TO
+	//     authenticated: anonymous callers see every row (the
+	//     restriction isn't theirs), signed-in users only their own;
+	//   - members_only (auth.role() = 'authenticated'): not anonymous;
+	//   - posts "Anyone reads posts" (TO anon, authenticated): everyone.
+	// The service key sees everything.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO notes VALUES (1, 'a0000000-0000-0000-0000-000000000001'), (2, 'b0000000-0000-0000-0000-000000000002');
+		INSERT INTO members_only VALUES (1);
+		INSERT INTO posts (user_id) VALUES ('a0000000-0000-0000-0000-000000000001');
+	`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tx.Exec(ctx, `
 		CREATE ROLE eb_schemaimport_sdk NOLOGIN;
 		GRANT USAGE ON SCHEMA tenant_schemaimport TO eb_schemaimport_sdk;
@@ -578,13 +590,22 @@ func TestSchemaImport_Fixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
-		name, uid, role string
-		want            int
+		name, uid, role, table string
+		want                   int
 	}{
-		{"anonymous", "", "anon", 0},
-		{"owner", "a0000000-0000-0000-0000-000000000001", "", 1},
-		{"other user", "b0000000-0000-0000-0000-000000000002", "", 0},
-		{"service key", "", "service", 1},
+		{"anonymous", "", "anon", "profiles", 0},
+		{"owner", "a0000000-0000-0000-0000-000000000001", "", "profiles", 1},
+		{"other user", "b0000000-0000-0000-0000-000000000002", "", "profiles", 0},
+		{"service key", "", "service", "profiles", 1},
+		{"anonymous", "", "anon", "notes", 2},
+		{"owner", "a0000000-0000-0000-0000-000000000001", "", "notes", 1},
+		{"other user", "b0000000-0000-0000-0000-000000000002", "", "notes", 1},
+		{"service key", "", "service", "notes", 2},
+		{"anonymous", "", "anon", "members_only", 0},
+		{"owner", "a0000000-0000-0000-0000-000000000001", "", "members_only", 1},
+		{"service key", "", "service", "members_only", 1},
+		{"anonymous", "", "anon", "posts", 1},
+		{"other user", "b0000000-0000-0000-0000-000000000002", "", "posts", 1},
 	} {
 		var n int
 		if err := tx.QueryRow(ctx, `
@@ -592,11 +613,11 @@ func TestSchemaImport_Fixture(t *testing.T) {
 			c.uid, c.role).Scan(new(string), new(string)); err != nil {
 			t.Fatal(err)
 		}
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM profiles`).Scan(&n); err != nil {
-			t.Fatalf("%s: %v", c.name, err)
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+c.table).Scan(&n); err != nil {
+			t.Fatalf("%s on %s: %v", c.name, c.table, err)
 		}
 		if n != c.want {
-			t.Errorf("%s sees %d profile rows, want %d", c.name, n, c.want)
+			t.Errorf("%s sees %d rows of %s, want %d", c.name, n, c.table, c.want)
 		}
 	}
 }
@@ -640,6 +661,7 @@ DROP MATERIALIZED VIEW IF EXISTS public.post_counts;
 DROP TABLE IF EXISTS public.profiles CASCADE;
 DROP FUNCTION IF EXISTS public.is_admin() CASCADE;
 DROP TYPE IF EXISTS public.user_role;
+DROP TABLE IF EXISTS public.notes, public.members_only CASCADE;
 `
 
 // schemaImportFixtureSQL adds what a typical app has on top of
@@ -669,6 +691,189 @@ CREATE POLICY "Own profile" ON public.profiles TO authenticated
   USING ((SELECT auth.uid()) = id) WITH CHECK ((SELECT auth.uid()) = id);
 CREATE POLICY "Anyone reads posts" ON public.posts FOR SELECT TO anon, authenticated USING (true);
 CREATE POLICY "Admins write posts" ON public.posts FOR ALL TO authenticated USING (public.is_admin());
+CREATE TABLE public.notes (id integer PRIMARY KEY, owner uuid);
+ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Read all" ON public.notes FOR SELECT USING (true);
+CREATE POLICY "Signed-in users: own only" ON public.notes AS RESTRICTIVE FOR SELECT TO authenticated
+  USING (owner = auth.uid());
+CREATE TABLE public.members_only (id integer PRIMARY KEY);
+ALTER TABLE public.members_only ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $f$ SELECT 'anon' $f$;
+CREATE POLICY "Members" ON public.members_only FOR SELECT USING (auth.role() = 'authenticated');
 CREATE MATERIALIZED VIEW public.post_counts AS SELECT user_id, count(*) AS n FROM public.posts GROUP BY user_id;
 CREATE INDEX post_counts_user_idx ON public.post_counts (user_id);
 `
+
+// ── review fixes ─────────────────────────────────────────────────────
+
+// pg_dump writes SECURITY DEFINER between other attributes on one line;
+// removing it must not glue its neighbours together.
+func TestTranslate_SecurityDefinerBetweenAttributes(t *testing.T) {
+	for _, in := range []string{
+		"CREATE FUNCTION public.f() RETURNS boolean\n    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE\n    AS $$ SELECT true $$;",
+		"CREATE FUNCTION public.f() RETURNS boolean LANGUAGE sql SECURITY DEFINER AS $$ SELECT true $$;",
+		"CREATE FUNCTION public.f() RETURNS boolean\n    LANGUAGE sql SECURITY DEFINER LEAKPROOF COST 10\n    AS $$ SELECT true $$;",
+	} {
+		var code []string // the output without the explanatory comment
+		for _, ln := range strings.Split(Translate(in).sql, "\n") {
+			if !strings.HasPrefix(ln, "--") {
+				code = append(code, ln)
+			}
+		}
+		got := strings.Join(code, "\n")
+		for _, glued := range []string{"STABLEPARALLEL", "sqlAS", "sqlLEAKPROOF", "DEFINER"} {
+			if strings.Contains(got, glued) {
+				t.Errorf("%q in output:\n%s", glued, got)
+			}
+		}
+	}
+	got := strings.Join(strings.Fields(Translate("CREATE FUNCTION public.f() RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE AS $$ SELECT true $$;").sql), " ")
+	if !strings.Contains(got, "LANGUAGE sql STABLE PARALLEL SAFE AS $$ SELECT true $$;") {
+		t.Errorf("attributes mangled: %s", got)
+	}
+}
+
+// A restrictive policy only restricts the roles it names; callers
+// outside its TO list pass it.
+func TestTranslate_RestrictivePolicyRoles(t *testing.T) {
+	got := strings.Join(strings.Fields(Translate(
+		`CREATE POLICY r ON t AS RESTRICTIVE FOR SELECT TO authenticated USING ((owner = auth.uid()));`).sql), " ")
+	want := `CREATE POLICY r ON t AS RESTRICTIVE FOR SELECT USING (public.is_service_role() OR ((NOT (auth_uid() IS NOT NULL)) OR ((owner = auth_uid()))));`
+	if got != want {
+		t.Errorf("\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// Role / JWT-setting checks have no Eurobase meaning and can fail open.
+func TestTranslate_WarnsOnRoleChecks(t *testing.T) {
+	for _, in := range []string{
+		`CREATE POLICY p ON t USING ((CURRENT_USER <> 'anon'::name));`,
+		`CREATE POLICY p ON t USING ((COALESCE(current_setting('request.jwt.claim.role', true), '') <> 'anon'));`,
+		"CREATE FUNCTION public.f() RETURNS boolean LANGUAGE sql AS $$ SELECT session_user <> 'anon' $$;",
+	} {
+		if res := Translate(in); !hasWarning(res, "lets anonymous callers through") {
+			t.Errorf("no warning for %s: %+v", in, res.warnings)
+		}
+	}
+	if res := Translate(`CREATE POLICY p ON t USING ((owner = auth.uid()));`); hasWarning(res, "lets anonymous callers through") {
+		t.Errorf("false positive: %+v", res.warnings)
+	}
+}
+
+func TestTranslate_WarnsOnPublicAsName(t *testing.T) {
+	res := Translate(`CREATE POLICY p ON t USING ((EXISTS ( SELECT 1 FROM public.groups public WHERE (public.id = t.group_id))));`)
+	if !hasWarning(res, "uses `public` as a name") {
+		t.Errorf("no warning: %+v", res.warnings)
+	}
+	if res := Translate(`CREATE POLICY p ON public.t USING (public.is_service_role());`); hasWarning(res, "uses `public` as a name") {
+		t.Errorf("false positive: %+v", res.warnings)
+	}
+}
+
+// Only the function body (the dollar quote after AS) is translated; a
+// dollar-quoted parameter default is data.
+func TestTranslate_DollarQuotedDefaultIsData(t *testing.T) {
+	got := Translate("CREATE FUNCTION public.f(p text DEFAULT $$public.secret$$) RETURNS text LANGUAGE sql AS $$ SELECT p FROM public.t $$;").sql
+	if !strings.Contains(got, "DEFAULT $$public.secret$$") {
+		t.Errorf("default changed:\n%s", got)
+	}
+	if !strings.Contains(got, "AS $$ SELECT p FROM t $$") {
+		t.Errorf("body not translated:\n%s", got)
+	}
+}
+
+// Comments, indexes and views that depend on a skipped materialized
+// view are skipped with it (otherwise the apply fails on the missing
+// relation); unrelated objects aren't.
+func TestTranslate_SkipsMatviewDependents(t *testing.T) {
+	in := `--
+-- Name: mv; Type: MATERIALIZED VIEW; Schema: public; Owner: -
+--
+
+CREATE MATERIALIZED VIEW public.mv AS SELECT 1 AS a WITH NO DATA;
+
+
+--
+-- Name: COLUMN mv.a; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mv.a IS 'x';
+
+
+--
+-- Name: on_mv; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.on_mv AS SELECT a FROM public.mv;
+
+
+--
+-- Name: on_on_mv; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.on_on_mv AS SELECT a FROM public.on_mv;
+
+
+--
+-- Name: mvx; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.mvx AS SELECT 1 AS mv;
+`
+	res := Translate(in)
+	var live []string
+	for _, line := range strings.Split(res.sql, "\n") {
+		if tr := strings.TrimSpace(line); tr != "" && !strings.HasPrefix(tr, "--") {
+			live = append(live, tr)
+		}
+	}
+	if len(live) != 1 || !strings.HasPrefix(live[0], "CREATE VIEW mvx") {
+		t.Errorf("live statements = %q", live)
+	}
+}
+
+// A line inside a function body that looks like a pg_dump header must
+// not split the dump there.
+func TestTranslate_HeaderLookalikeInBody(t *testing.T) {
+	in := `--
+-- Name: f(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql AS $$
+BEGIN
+-- Name: x; Type: EXTENSION; Schema: -;
+  RETURN 1;
+END $$;
+`
+	got := Translate(in).sql
+	if !strings.Contains(got, "\n  RETURN 1;\nEND $$;") || strings.Contains(got, "not imported") {
+		t.Errorf("body commented out:\n%s", got)
+	}
+}
+
+// A literal that happens to contain the wrap text doesn't stop the
+// service-key wrap.
+func TestTranslate_WrapIdempotenceIsPerClause(t *testing.T) {
+	got := Translate(`CREATE POLICY p ON t USING ((note <> 'public.is_service_role() OR ('::text));`).sql
+	if !strings.Contains(got, "USING (public.is_service_role() OR ((note <>") {
+		t.Errorf("not wrapped:\n%s", got)
+	}
+	twice := Translate(got).sql
+	// One wrap plus the copy inside the literal.
+	if twice != got || strings.Count(twice, "public.is_service_role() OR (") != 2 {
+		t.Errorf("wrapped twice on rerun:\n%s", twice)
+	}
+}
+
+// A function's own settings stay; search_path / role settings are
+// removed (the platform refuses them).
+func TestTranslate_FunctionSettings(t *testing.T) {
+	in := "CREATE FUNCTION public.f() RETURNS integer\n    LANGUAGE sql\n    SET statement_timeout TO '5s'\n    SET search_path TO ''\n    AS $$ SELECT 1 $$;"
+	got := Translate(in).sql
+	if !strings.Contains(got, "SET statement_timeout TO '5s'") {
+		t.Errorf("function setting removed:\n%s", got)
+	}
+	if strings.Contains(got, "search_path") {
+		t.Errorf("search_path setting kept:\n%s", got)
+	}
+}

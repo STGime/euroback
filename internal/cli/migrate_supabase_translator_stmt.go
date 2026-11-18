@@ -132,14 +132,18 @@ func codeMatches(s string, re *regexp.Regexp) [][]int {
 var (
 	rePolicyClause = regexp.MustCompile(`(?i)\b(USING|WITH\s+CHECK)\s*\(`)
 	rePolicyTo     = regexp.MustCompile(`(?i)\bTO\b`)
+	reRestrictive  = regexp.MustCompile(`(?i)\bAS\s+RESTRICTIVE\b`)
 )
 
 func translatePolicy(s string, res *translationResult) string {
 	s = rewritePolicyRoles(s, res)
-	if strings.Contains(s, "public.is_service_role() OR (") {
-		return s // already translated (rerun on translated input)
-	}
 	out, n := mapPolicyBodies(s, func(body string) string {
+		// Already translated (a rerun on translated input): the
+		// clause's code starts with the wrap. Checked per clause, on
+		// the body text itself — a literal elsewhere can't suppress it.
+		if strings.HasPrefix(strings.TrimSpace(body), "public.is_service_role() OR (") {
+			return body
+		}
 		return "public.is_service_role() OR (" + body + ")"
 	})
 	if n > 0 {
@@ -233,12 +237,18 @@ func rewritePolicyRoles(s string, res *translationResult) string {
 	case svc:
 		cond = "false" // the service-key wrap admits service calls
 	}
+	restrictive := reRestrictive.MatchString(statementCodeHead(s[:to[0]]))
 	s = s[:to[0]] + s[headEnd:]
 	res.rewrites["rewrite:policy TO <role> → condition"]++
 	if cond == "" {
 		return s
 	}
 	out, _ := mapPolicyBodies(s, func(body string) string {
+		if restrictive {
+			// A restrictive policy only restricts the roles it names;
+			// everyone else passes it.
+			return "(NOT (" + cond + ")) OR (" + body + ")"
+		}
 		return "(" + cond + ") AND (" + body + ")"
 	})
 	return out
@@ -255,13 +265,18 @@ func policyName(s string) string {
 
 // ── functions ────────────────────────────────────────────────────────
 
-var reSecurityDefiner = regexp.MustCompile(`(?i)[ \t]*\bSECURITY\s+DEFINER\b[ \t]*\n?`)
+var (
+	reSecurityDefiner = regexp.MustCompile(`(?i)[ \t]*\bSECURITY\s+DEFINER\b[ \t]*`)
+	reEndsWithAS      = regexp.MustCompile(`(?i)\bAS\s*$`)
+)
 
 func translateFunction(s, name string, res *translationResult) string {
 	// SECURITY DEFINER sits outside the body, in code.
 	if ms := codeMatches(s, reSecurityDefiner); len(ms) > 0 {
+		// A space, not nothing: pg_dump writes
+		// `LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE`.
 		for i := len(ms) - 1; i >= 0; i-- {
-			s = s[:ms[i][0]] + s[ms[i][1]:]
+			s = s[:ms[i][0]] + " " + s[ms[i][1]:]
 		}
 		res.rewrites["rewrite:SECURITY DEFINER removed"]++
 		res.warnings = append(res.warnings, translationWarning{
@@ -270,16 +285,26 @@ func translateFunction(s, name string, res *translationResult) string {
 		s = "\n-- eurobase: " + name + " was SECURITY DEFINER in Supabase; it now runs with the caller's rights.\n" + strings.TrimLeft(s, "\n")
 	}
 
-	// Translate the body: every dollar-quoted segment of a CREATE
-	// FUNCTION statement is its body (or, rarely, a default value).
+	// Translate the body: the dollar-quoted segment right after AS. A
+	// dollar-quoted parameter default is data and stays as it is.
 	segs, _ := splitCodeAndLiterals(s)
 	var b strings.Builder
 	b.Grow(len(s))
+	var code strings.Builder // code so far, to see what precedes a segment
 	for _, seg := range segs {
-		if seg.code || !strings.HasPrefix(seg.text, "$") {
+		if seg.code {
+			code.WriteString(seg.text)
 			b.WriteString(seg.text)
 			continue
 		}
+		if !strings.HasPrefix(seg.text, "$") || !reEndsWithAS.MatchString(code.String()) {
+			if !strings.HasPrefix(seg.text, "--") && !strings.HasPrefix(seg.text, "/*") {
+				code.WriteString(" _ ") // a literal: no longer right after AS
+			}
+			b.WriteString(seg.text)
+			continue
+		}
+		code.WriteString(" _ ")
 		tag, tagLen, ok := parseDollarTag(seg.text, 0)
 		if !ok || len(seg.text) < 2*tagLen || !strings.HasSuffix(seg.text, tag) {
 			b.WriteString(seg.text)

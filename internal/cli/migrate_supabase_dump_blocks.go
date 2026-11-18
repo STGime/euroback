@@ -31,7 +31,23 @@ type dumpBlock struct {
 // splitDumpBlocks cuts a pg_dump body at each object header. The `--`
 // line above a header belongs to the block it introduces.
 func splitDumpBlocks(sql string) []dumpBlock {
-	locs := reDumpHeader.FindAllStringSubmatchIndex(sql, -1)
+	// A header is a line comment in code — not text inside a function
+	// body or string that happens to look like one.
+	commentStarts := map[int]bool{}
+	segs, _ := splitCodeAndLiterals(sql)
+	off := 0
+	for _, seg := range segs {
+		if !seg.code && strings.HasPrefix(seg.text, "--") {
+			commentStarts[off] = true
+		}
+		off += len(seg.text)
+	}
+	var locs [][]int
+	for _, l := range reDumpHeader.FindAllStringSubmatchIndex(sql, -1) {
+		if commentStarts[l[0]] {
+			locs = append(locs, l)
+		}
+	}
 	if len(locs) == 0 {
 		return []dumpBlock{{text: sql}}
 	}
@@ -62,7 +78,9 @@ func splitDumpBlocks(sql string) []dumpBlock {
 }
 
 // unsupportedReason says why a block can't be imported, or "".
-func unsupportedReason(b dumpBlock, matviews map[string]bool) string {
+// skipped holds the relations already left out (materialized views and
+// what depends on them).
+func unsupportedReason(b dumpBlock, skipped map[string]bool) string {
 	if !b.hasHeader {
 		return ""
 	}
@@ -79,41 +97,75 @@ func unsupportedReason(b dumpBlock, matviews map[string]bool) string {
 		if strings.HasPrefix(b.name, "EXTENSION ") {
 			return "comment on an extension"
 		}
-		if strings.HasPrefix(b.name, "MATERIALIZED VIEW ") && matviews[strings.TrimPrefix(b.name, "MATERIALIZED VIEW ")] {
-			return "belongs to a materialized view that isn't imported"
-		}
 	case "SCHEMA":
 		if b.name != "public" {
 			return fmt.Sprintf("schema %s — Eurobase imports into one project schema", b.name)
-		}
-	case "INDEX":
-		for mv := range matviews {
-			if regexp.MustCompile(`(?i)\bON\s+(ONLY\s+)?(public\.)?"?` + regexp.QuoteMeta(mv) + `"?\s`).MatchString(b.text) {
-				return "index on a materialized view that isn't imported"
-			}
 		}
 	}
 	if b.schema != "public" && b.schema != "-" {
 		return fmt.Sprintf("object in schema %s — only the public schema is imported", b.schema)
 	}
+	if refersToSkipped(b, skipped) {
+		return "depends on a materialized view that isn't imported"
+	}
 	return ""
+}
+
+// refersToSkipped reports whether the block's code names a relation in
+// skipped (an index, comment, view, trigger, policy or constraint on or
+// reading it).
+func refersToSkipped(b dumpBlock, skipped map[string]bool) bool {
+	if len(skipped) == 0 {
+		return false
+	}
+	segs, _ := splitCodeAndLiterals(b.text)
+	var code strings.Builder
+	for _, seg := range segs {
+		if seg.code || strings.HasPrefix(seg.text, `"`) {
+			code.WriteString(seg.text)
+		} else {
+			code.WriteByte(' ')
+		}
+	}
+	text := code.String()
+	for name := range skipped {
+		re := regexp.MustCompile(`(?i)\b(ON|FROM|JOIN|COLUMN|VIEW|TABLE|ONLY)\s+(public\.)?("` +
+			regexp.QuoteMeta(name) + `"|` + regexp.QuoteMeta(name) + `\b)`)
+		if re.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }
 
 // commentOutUnsupportedObjects turns every unsupported block into SQL
 // comments and records one warning per reason.
 func commentOutUnsupportedObjects(sql string, res *translationResult) string {
 	blocks := splitDumpBlocks(sql)
-	matviews := map[string]bool{}
-	for _, b := range blocks {
-		if b.typ == "MATERIALIZED VIEW" {
-			matviews[b.name] = true
+	// Decide what to skip first, to a fixed point: a view reading a
+	// skipped materialized view is skipped, and so is what reads it.
+	skipped := map[string]bool{}
+	reasons := make([]string, len(blocks))
+	for changed := true; changed; {
+		changed = false
+		for i, b := range blocks {
+			if reasons[i] != "" {
+				continue
+			}
+			if r := unsupportedReason(b, skipped); r != "" {
+				reasons[i] = r
+				changed = true
+				if b.typ == "MATERIALIZED VIEW" || b.typ == "VIEW" {
+					skipped[b.name] = true
+				}
+			}
 		}
 	}
 	byReason := map[string][]string{}
 	var out strings.Builder
 	out.Grow(len(sql) + len(sql)/16)
-	for _, b := range blocks {
-		reason := unsupportedReason(b, matviews)
+	for i, b := range blocks {
+		reason := reasons[i]
 		if reason == "" {
 			out.WriteString(b.text)
 			continue
@@ -133,12 +185,12 @@ func commentOutUnsupportedObjects(sql string, res *translationResult) string {
 			out.WriteString("-- " + ln)
 		}
 	}
-	reasons := make([]string, 0, len(byReason))
+	reasonList := make([]string, 0, len(byReason))
 	for r := range byReason {
-		reasons = append(reasons, r)
+		reasonList = append(reasonList, r)
 	}
-	sort.Strings(reasons)
-	for _, r := range reasons {
+	sort.Strings(reasonList)
+	for _, r := range reasonList {
 		res.warnings = append(res.warnings, translationWarning{
 			note: fmt.Sprintf("not imported (%s): %s — %s", plural(len(byReason[r]), "object"), nameSample(byReason[r]), r),
 		})
