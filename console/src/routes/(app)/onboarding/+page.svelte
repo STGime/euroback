@@ -694,7 +694,7 @@ EUROBASE_SECRET_KEY=${secretKey}`);
 									</li>
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
-										25 edge functions, unlimited cron &amp; webhooks
+										500 edge functions, unlimited cron &amp; webhooks
 									</li>
 									<li class="flex items-center gap-1.5">
 										<svg class="h-3.5 w-3.5 text-eurobase-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>

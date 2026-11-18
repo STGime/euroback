@@ -158,7 +158,7 @@
 		{ label: 'Project RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
-		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 25), team: limitOrUnlimited(teamPlan?.edge_function_limit, '250'), legal: limitOrUnlimited(legalPlan?.edge_function_limit, '250') },
+		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 500), team: limitOrUnlimited(teamPlan?.edge_function_limit, 'Unlimited'), legal: limitOrUnlimited(legalPlan?.edge_function_limit, 'Unlimited') },
 		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Unlimited', legal: 'Unlimited' },
 		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: limitOrUnlimited(proPlan?.webhook_limit, 'Unlimited'), team: limitOrUnlimited(teamPlan?.webhook_limit, 'Unlimited'), legal: limitOrUnlimited(legalPlan?.webhook_limit, 'Unlimited') },
 		{ label: 'Custom email templates', free: false, pro: true, team: !!(teamPlan?.custom_templates ?? true), legal: !!(legalPlan?.custom_templates ?? true) },
@@ -331,7 +331,7 @@
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{fmt(proPlan?.db_size_mb, '5 GB')} database, {fmt(proPlan?.storage_mb, '50 GB')} file storage</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{kmau(proPlan?.mau_limit, '100k')} MAU, {(proPlan?.rate_limit_rps ?? 1000)} rps</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{kmau(proPlan?.ws_connections, '10k')} realtime connections</span></li>
-					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.edge_function_limit ?? 25} edge functions, unlimited cron &amp; webhooks</span></li>
+					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.edge_function_limit ?? 500} edge functions, unlimited cron &amp; webhooks</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>{proPlan?.log_retention_days ?? 30}-day log retention, custom email templates</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span>BYO SMTP for auth mail</span></li>
 					<li class="flex gap-2"><span class="text-eurobase-500">✓</span><span><strong>Never pauses</strong> — Free projects idle-pause after 30 days</span></li>
