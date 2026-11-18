@@ -62,6 +62,9 @@ type report struct {
 	storage    []item
 	functions  []item
 	extensions []item
+	dbCode     []item // database functions + triggers
+	views      []item // views, enums, sequences
+	realtime   []item
 	blockers   []item // any ❌ found anywhere, hoisted for the summary
 }
 
@@ -96,6 +99,8 @@ Output: ./supabase-migration-report-<UTC-timestamp>.md by default so a
 rerun doesn't overwrite the previous report. Pass --output to override
 (use '-' for stdout).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// From here on errors are about the run, not the flags.
+			cmd.SilenceUsage = true
 			dbURL := os.Getenv("SUPABASE_DB_URL")
 			if dbURL == "" {
 				return fmt.Errorf("SUPABASE_DB_URL is required (postgres:// URL of the Supabase project)")
@@ -106,13 +111,13 @@ rerun doesn't overwrite the previous report. Pass --output to override
 
 			conn, err := pgx.Connect(ctx, dbURL)
 			if err != nil {
-				return fmt.Errorf("connect to Supabase: %w", err)
+				return fmt.Errorf("connect to Supabase: %w%s", err, supabaseConnectHint(err))
 			}
 			defer conn.Close(ctx)
 
 			r := &report{
 				sourceURL:   redactURL(dbURL),
-				targetHint:  "(run `eurobase import supabase schema` next after reviewing this report)",
+				targetHint:  "Run `eurobase import supabase schema` next, after addressing the blockers above.",
 				generatedAt: time.Now().UTC(),
 			}
 
@@ -125,7 +130,14 @@ rerun doesn't overwrite the previous report. Pass --output to override
 			if err := assessAuthUsers(ctx, conn, r); err != nil {
 				return fmt.Errorf("enumerate auth users: %w", err)
 			}
-			if err := assessExtensions(ctx, conn, r); err != nil {
+			code, err := readSupabaseCode(ctx, conn)
+			if err != nil {
+				return fmt.Errorf("enumerate functions, triggers and views: %w", err)
+			}
+			r.dbCode = append(gradeFunctions(code.functions), gradeTriggers(code.triggers)...)
+			r.views = gradeViews(code.views, code.enumCount, code.sequenceCount)
+			r.realtime = gradeRealtime(code.realtimeAll, code.realtimeTabs)
+			if err := assessExtensions(ctx, conn, r, code); err != nil {
 				return fmt.Errorf("enumerate extensions: %w", err)
 			}
 			// Storage buckets live in the Postgres `storage` schema, so
@@ -141,7 +153,7 @@ rerun doesn't overwrite the previous report. Pass --output to override
 			}
 
 			// Hoist all blockers into the summary section.
-			for _, group := range [][]item{r.tables, r.policies, r.authUsers, r.extensions, r.storage, r.functions} {
+			for _, group := range [][]item{r.tables, r.views, r.policies, r.dbCode, r.authUsers, r.storage, r.realtime, r.functions, r.extensions} {
 				for _, it := range group {
 					if it.grade == gradeBlocker {
 						r.blockers = append(r.blockers, it)
@@ -195,13 +207,21 @@ func assessTables(ctx context.Context, conn *pgx.Conn, r *report) error {
 	rows, err := conn.Query(ctx, `
 		SELECT c.relname AS table_name,
 		       COALESCE(s.n_live_tup, 0) AS row_count,
-		       pg_total_relation_size(c.oid) AS bytes
+		       pg_total_relation_size(c.oid) AS bytes,
+		       c.relrowsecurity,
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')
+		            THEN ARRAY(SELECT p FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) p
+		                       WHERE has_table_privilege('anon', c.oid, p))
+		            ELSE ARRAY[]::text[] END AS anon_privs
 		FROM   pg_class c
 		JOIN   pg_namespace n ON n.oid = c.relnamespace
 		LEFT   JOIN pg_stat_user_tables s
 		         ON s.schemaname = n.nspname AND s.relname = c.relname
 		WHERE  n.nspname = 'public'
 		  AND  c.relkind = 'r'
+		  AND  NOT EXISTS (SELECT 1 FROM pg_depend d
+		                   WHERE d.classid = 'pg_class'::regclass
+		                     AND d.objid = c.oid AND d.deptype = 'e')
 		ORDER BY c.relname
 	`)
 	if err != nil {
@@ -212,16 +232,36 @@ func assessTables(ctx context.Context, conn *pgx.Conn, r *report) error {
 		var name string
 		var rowCount int64
 		var bytes int64
-		if err := rows.Scan(&name, &rowCount, &bytes); err != nil {
+		var rls bool
+		var anonPrivs []string
+		if err := rows.Scan(&name, &rowCount, &bytes, &rls, &anonPrivs); err != nil {
 			return err
 		}
-		r.tables = append(r.tables, item{
-			name:  fmt.Sprintf("public.%s", name),
-			grade: gradeOK,
-			note:  fmt.Sprintf("%s rows · %s", formatCount(rowCount), formatBytes(bytes)),
-		})
+		r.tables = append(r.tables, gradeTable(name, rowCount, bytes, rls, anonPrivs))
 	}
 	return rows.Err()
+}
+
+// gradeTable grades one public table. A table without RLS is a ⚠: on
+// Eurobase every request with the project's API keys could read and
+// write it, and on Supabase the anon key usually can already.
+func gradeTable(name string, rowCount, bytes int64, rls bool, anonPrivs []string) item {
+	it := item{
+		name:  fmt.Sprintf("public.%s", name),
+		grade: gradeOK,
+		note:  fmt.Sprintf("%s rows · %s", formatCount(rowCount), formatBytes(bytes)),
+	}
+	if !rls {
+		it.grade = gradeWarn
+		it.note += " · RLS is disabled: enable it and add policies before your app uses this table on Eurobase"
+		if len(anonPrivs) > 0 {
+			it.note += fmt.Sprintf(". On Supabase today, anyone with your anon key can %s this table; worth fixing there now", strings.Join(anonPrivs, " / "))
+			if q, ok := sqlName("public", name); ok {
+				it.note += " (`ALTER TABLE " + q + " ENABLE ROW LEVEL SECURITY`)"
+			}
+		}
+	}
+	return it
 }
 
 func assessPolicies(ctx context.Context, conn *pgx.Conn, r *report) error {
@@ -256,6 +296,9 @@ func assessPolicies(ctx context.Context, conn *pgx.Conn, r *report) error {
 			return err
 		}
 		note, grade := gradePolicy(usingClause, withCheck)
+		if strings.HasPrefix(onTable, "storage.") {
+			note, grade = storagePolicyNote, gradeWarn
+		}
 		r.policies = append(r.policies, item{
 			name:  fmt.Sprintf("%s :: %s", onTable, polname),
 			grade: grade,
@@ -281,14 +324,22 @@ func assessPoliciesSimple(ctx context.Context, conn *pgx.Conn, r *report) error 
 		if err := rows.Scan(&onTable, &name); err != nil {
 			return err
 		}
+		note := "policy body not readable from this Postgres role; check its translation in the `schema` step's output"
+		if strings.HasPrefix(onTable, "storage.") {
+			note = storagePolicyNote
+		}
 		r.policies = append(r.policies, item{
 			name:  fmt.Sprintf("%s :: %s", onTable, name),
 			grade: gradeWarn,
-			note:  "policy body not readable from this Postgres role — will be translated in #269",
+			note:  note,
 		})
 	}
 	return rows.Err()
 }
+
+// storagePolicyNote is the grade note for policies on Supabase's
+// storage tables: Eurobase doesn't use storage policies.
+const storagePolicyNote = "storage policies aren't migrated: Eurobase gives each end user their own files automatically, plus shared folders (authenticated or public) you set in the console. Remove this policy from the `schema` step's output and set up shared folders where you need them"
 
 func gradePolicy(usingClause, withCheck *string) (string, string) {
 	// Collapse both clauses into one lower-cased blob for grading.
@@ -307,20 +358,23 @@ func gradePolicy(usingClause, withCheck *string) (string, string) {
 		return "empty policy body — check post-migration", gradeWarn
 	}
 	if strings.Contains(lower, "auth.jwt()") && strings.Contains(lower, "app_metadata") {
-		return "policy reads app_metadata from JWT — verify translation manually (#269 will translate common shapes)", gradeWarn
+		return "policy reads app_metadata from the JWT: Eurobase tokens don't carry it, so check the `schema` step's output and rewrite it (e.g. a role column on a profile table)", gradeWarn
 	}
 	if strings.Contains(lower, "auth.jwt()") && strings.Contains(lower, "user_metadata") {
-		return "policy reads user_metadata from JWT — verify translation manually", gradeWarn
+		return "policy reads user_metadata from the JWT: Eurobase tokens don't carry it, so check the `schema` step's output and rewrite it", gradeWarn
+	}
+	if strings.Contains(lower, "auth.jwt()") {
+		return "policy reads auth.jwt(): Eurobase doesn't expose the raw token to SQL. Rewrite it with auth.uid() / auth.email() / auth.role() or a lookup in your own tables", gradeWarn
 	}
 	if strings.Contains(lower, "auth.email()") {
-		return "policy uses auth.email() — Eurobase equivalent auth_email() is per-tenant, will translate in #269", gradeOK
+		return "auth.email() is translated to Eurobase's auth_email() by the `schema` step", gradeOK
 	}
 	if strings.Contains(lower, "auth.uid()") || strings.Contains(lower, "auth.role()") {
-		return "standard auth.uid()/auth.role() — will translate cleanly in #269", gradeOK
+		return "auth.uid() / auth.role() are translated by the `schema` step", gradeOK
 	}
 	// A policy body that touches neither auth.* nor storage.* is
 	// likely fine but worth a look.
-	return "no auth.* references — will translate as-is", gradeOK
+	return "no auth.* references; copied as-is by the `schema` step", gradeOK
 }
 
 func assessAuthUsers(ctx context.Context, conn *pgx.Conn, r *report) error {
@@ -426,7 +480,7 @@ func assessAuthUsers(ctx context.Context, conn *pgx.Conn, r *report) error {
 	return nil
 }
 
-func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
+func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report, code *sbCode) error {
 	rows, err := conn.Query(ctx, `
 		SELECT extname FROM pg_extension WHERE extname NOT IN ('plpgsql', 'plpython3u') ORDER BY extname
 	`)
@@ -434,79 +488,115 @@ func assessExtensions(ctx context.Context, conn *pgx.Conn, r *report) error {
 		return err
 	}
 	defer rows.Close()
-	// Extensions Eurobase's tenant Postgres supports out of the box.
-	// Anything outside this set is worth flagging.
-	supported := map[string]bool{
-		"pg_stat_statements": true,
-		"pgcrypto":           true,
-		"uuid-ossp":          true, // legacy; gen_random_uuid() from pgcrypto is preferred
-		"pg_trgm":            true,
-		"unaccent":           true,
-		"btree_gin":          true,
-		"btree_gist":         true,
-		"citext":             true,
-		"hstore":             true,
-		"tablefunc":          true,
-	}
-	// Extensions we specifically don't support and can't migrate
-	// as-is. Note about `vector`: Supabase ships pgvector as default,
-	// and it's the single most common reason people can't move to a
-	// backend that lacks it. We flag it as a blocker (not a warn) so
-	// the report can't be misread as "vector is fine".
-	blockers := map[string]string{
-		"pg_graphql":     "Eurobase does not offer GraphQL over Postgres; rewrite callers to use the SDK",
-		"pg_net":         "Eurobase does not expose pg_net; use an edge function to call HTTP from SQL",
-		"pg_cron":        "Eurobase has its own cron surface (`eurobase cron`); reproduce schedules there",
-		"pg_jsonschema":  "not available; validate JSON in application code or edge functions",
-		"pgjwt":          "Eurobase issues its own JWTs; direct usage inside SQL not supported",
-		"pgsodium":       "not available; use the vault or edge functions for cryptography",
-		"supabase_vault": "Supabase-proprietary vault schema; use `eurobase vault` for the equivalent",
-		"vector":         "pgvector-style vector similarity search not currently enabled by default — contact support before migrating a project that depends on it",
-		"http":           "pg http extension not available for the same reason as pg_net",
-		"plv8":           "V8 procedural language not available on Eurobase's Postgres",
-		"timescaledb":    "TimescaleDB not enabled; needs support conversation before migration",
-		"wrappers":       "Foreign-data-wrapper framework (used by supabase_vault etc.) not available",
-	}
-	// Supabase ships these; we don't lose data by migrating without
-	// them, but we also don't provide equivalent functionality
-	// out-of-the-box. Warn so the tenant knows to redesign around
-	// the gap.
-	warns := map[string]string{
-		"pgaudit":   "Postgres audit logging — Eurobase's audit_log covers admin actions but does not replay pgaudit output",
-		"pg_tle":    "trusted-language extensions framework — not available; move any TLE-installed extensions to app code",
-		"pgmq":      "Postgres message queue — reproduce with an application queue or edge-function poller",
-		"pg_repack": "online table rewriter — not needed on Eurobase (managed vacuum), but check any dependent scripts",
-		"postgis":   "PostGIS is not enabled by default — contact support if you rely on it; migration is feasible but manual",
-	}
+	var exts []string
 	for rows.Next() {
 		var ext string
 		if err := rows.Scan(&ext); err != nil {
 			return err
 		}
-		if reason, isBlocker := blockers[ext]; isBlocker {
-			r.extensions = append(r.extensions, item{name: ext, grade: gradeBlocker, note: reason})
-			continue
-		}
-		if reason, isWarn := warns[ext]; isWarn {
-			r.extensions = append(r.extensions, item{name: ext, grade: gradeWarn, note: reason})
-			continue
-		}
-		if supported[ext] {
-			note := "supported on Eurobase's Postgres"
-			// Small nudge for the deprecated uuid-ossp on top of the
-			// support note.
-			if ext == "uuid-ossp" {
-				note = "supported, but gen_random_uuid() from pgcrypto is preferred over uuid-ossp for new columns"
-			}
-			r.extensions = append(r.extensions, item{name: ext, grade: gradeOK, note: note})
-			continue
-		}
-		r.extensions = append(r.extensions, item{
-			name: ext, grade: gradeWarn,
-			note: "not in Eurobase's default-supported list — check with support before relying on it post-migration",
-		})
+		exts = append(exts, ext)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	r.extensions = gradeExtensions(exts, code)
+	return nil
+}
+
+// gradeExtensions grades installed extensions. Supabase installs several
+// in every project (pg_net, supabase_vault, pg_graphql, ...), so those
+// are graded by whether the project actually uses them, not by being
+// installed.
+func gradeExtensions(exts []string, code *sbCode) []item {
+	if code == nil {
+		code = &sbCode{vaultSecrets: -1}
+	}
+	pgNetUse, vaultUse, sodiumUse := code.extensionUse()
+	notUsed := "installed by Supabase by default and not used by your functions, triggers or cron jobs; nothing to migrate"
+
+	// Available on Eurobase's shared database.
+	available := map[string]string{
+		"pgcrypto":  "available on Eurobase",
+		"uuid-ossp": "available on Eurobase (gen_random_uuid(), built into Postgres, is preferred for new columns)",
+	}
+	// Not available, no workaround inside the database.
+	blockers := map[string]string{
+		"vector":      "pgvector is not available on Eurobase today; contact support before migrating a project that depends on it",
+		"http":        "Eurobase has no HTTP from SQL; call external services from an edge function",
+		"plv8":        "the V8 procedural language is not available; rewrite these functions in plpgsql or as edge functions",
+		"timescaledb": "TimescaleDB is not available; contact support before migrating",
+		"wrappers":    "foreign data wrappers are not available",
+	}
+	warns := map[string]string{
+		"pg_graphql":    "installed by Supabase by default. Only matters if your app calls the GraphQL endpoint (/graphql/v1); Eurobase has no GraphQL, so rewrite those calls with the SDK",
+		"pgjwt":         "installed by default on older Supabase projects. Only matters if your SQL calls sign() / verify(); Eurobase issues its own tokens",
+		"pg_jsonschema": "not available; validate JSON in application code or edge functions",
+		"pgaudit":       "Eurobase's audit log covers platform actions but there's no pgaudit output",
+		"pg_tle":        "trusted-language extensions are not available; move that logic to app code",
+		"pgmq":          "no Postgres message queue on Eurobase; use an application queue or a cron-driven edge function",
+		"pg_repack":     "not needed on Eurobase (managed maintenance); check any scripts that call it",
+		"postgis":       "PostGIS is not available by default; contact support if you rely on it",
+	}
+	var out []item
+	for _, ext := range exts {
+		it := item{name: ext}
+		switch {
+		case ext == "pg_net":
+			// Database webhooks are already listed as blockers of their
+			// own; only other uses make pg_net itself one.
+			var other []string
+			for _, u := range pgNetUse {
+				if !strings.HasPrefix(u, "database webhook ") {
+					other = append(other, u)
+				}
+			}
+			switch {
+			case len(other) > 0:
+				it.grade, it.note = gradeBlocker, "Eurobase has no HTTP from SQL. Used by: "+nameList(other)+". Use Eurobase webhooks / function triggers, or call an edge function from your app"
+			case len(pgNetUse) > 0:
+				it.grade, it.note = gradeOK, "used only by the database webhooks listed above; nothing else to migrate"
+			default:
+				it.grade, it.note = gradeOK, notUsed
+			}
+		case ext == "supabase_vault":
+			switch {
+			case len(vaultUse) > 0:
+				it.grade, it.note = gradeBlocker, "Eurobase Vault can't be read from SQL. Used by: "+nameList(vaultUse)+". Move that code into an edge function, which can read Vault secrets"
+			case code.vaultSecrets > 0:
+				it.grade, it.note = gradeWarn, fmt.Sprintf("%d secret(s) in Supabase Vault: copy them to Eurobase Vault (`eurobase vault set`); they aren't migrated automatically", code.vaultSecrets)
+			case code.vaultSecrets == 0:
+				it.grade, it.note = gradeOK, "installed by Supabase by default, no secrets stored; nothing to migrate"
+			default:
+				it.grade, it.note = gradeWarn, "couldn't read vault.secrets; if you store secrets there, copy them to Eurobase Vault (`eurobase vault set`)"
+			}
+		case ext == "pgsodium":
+			if len(sodiumUse) > 0 {
+				it.grade, it.note = gradeBlocker, "pgsodium is not available. Used by: "+nameList(sodiumUse)+". Use Eurobase Vault or do the cryptography in an edge function"
+			} else {
+				it.grade, it.note = gradeOK, "installed by default on older Supabase projects and not used by your functions; nothing to migrate"
+			}
+		case ext == "pg_cron":
+			if code.cronUnknown {
+				it.grade, it.note = gradeWarn, "couldn't read cron.job with this login; if you have cron jobs, recreate them as Eurobase cron jobs (SQL or a database function)"
+			} else if len(code.cronJobs) > 0 {
+				it.grade, it.note = gradeWarn, fmt.Sprintf("%d cron job(s) (%s): recreate them as Eurobase cron jobs (SQL or a database function); they aren't migrated automatically", len(code.cronJobs), nameList(code.cronJobs))
+			} else {
+				it.grade, it.note = gradeOK, "no cron jobs visible to this login (jobs created by another database role don't show); nothing to migrate"
+			}
+		case ext == "pg_stat_statements":
+			it.grade, it.note = gradeOK, "Supabase's query statistics; not needed on Eurobase, nothing to migrate"
+		case available[ext] != "":
+			it.grade, it.note = gradeOK, available[ext]
+		case blockers[ext] != "":
+			it.grade, it.note = gradeBlocker, blockers[ext]
+		case warns[ext] != "":
+			it.grade, it.note = gradeWarn, warns[ext]
+		default:
+			it.grade, it.note = gradeWarn, "not installed on Eurobase by default; ask support before relying on it"
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 // assessStorage enumerates the project's storage buckets from the
@@ -663,9 +753,9 @@ func writeReport(w io.Writer, r *report) error {
 
 	if len(r.blockers) > 0 {
 		fmt.Fprintf(buf, "## %s Blockers — %d found\n\n", gradeBlocker, len(r.blockers))
-		fmt.Fprintf(buf, "Address these before running the migration steps. They are things Eurobase can't do today.\n\n")
+		fmt.Fprintf(buf, "Change these before importing: the import refuses them, or they don't carry over.\n\n")
 		for _, it := range r.blockers {
-			fmt.Fprintf(buf, "- **%s** — %s\n", mdEscape(it.name), mdEscape(it.note))
+			fmt.Fprintf(buf, "- **%s** — %s\n", mdEscape(it.name), mdNote(it.note))
 		}
 		fmt.Fprintf(buf, "\n")
 	} else {
@@ -673,9 +763,12 @@ func writeReport(w io.Writer, r *report) error {
 	}
 
 	writeSection(buf, "Tables", r.tables)
+	writeSection(buf, "Views and types", r.views)
 	writeSection(buf, "RLS policies", r.policies)
+	writeSection(buf, "Database functions and triggers", r.dbCode)
 	writeSection(buf, "Auth users + providers", r.authUsers)
 	writeSection(buf, "Storage", r.storage)
+	writeSection(buf, "Realtime", r.realtime)
 	writeSection(buf, "Edge functions", r.functions)
 	writeSection(buf, "Postgres extensions", r.extensions)
 
@@ -692,7 +785,7 @@ func writeSection(buf *strings.Builder, title string, items []item) {
 		return
 	}
 	for _, it := range items {
-		fmt.Fprintf(buf, "- %s **%s** — %s\n", it.grade, mdEscape(it.name), mdEscape(it.note))
+		fmt.Fprintf(buf, "- %s **%s** — %s\n", it.grade, mdEscape(it.name), mdNote(it.note))
 	}
 	fmt.Fprintf(buf, "\n")
 }
@@ -783,6 +876,42 @@ func mdEscape(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// mdNote renders a grade note. Notes are written by assess itself and
+// may contain `code spans`; identifiers inside them go through ident()
+// (no backticks), so everything except backticks is escaped as in
+// mdEscape.
+func mdNote(s string) string {
+	parts := strings.Split(s, "`")
+	for i := range parts {
+		if i%2 == 1 {
+			// Inside a code span: keep as-is apart from line breaks.
+			parts[i] = strings.NewReplacer("\n", " ", "\r", " ").Replace(parts[i])
+			continue
+		}
+		parts[i] = mdEscape(parts[i])
+	}
+	if len(parts)%2 == 0 {
+		// Unbalanced backtick: escape the whole note instead.
+		return mdEscape(s)
+	}
+	return strings.Join(parts, "`")
+}
+
+// supabaseConnectHint adds a hint for the connection errors people hit
+// with Supabase URLs. It never repeats the URL.
+func supabaseConnectHint(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "tenant/user") && strings.Contains(msg, "not found"):
+		return "\nHint: the pooler doesn't know this project. Copy the Session pooler URL from the Supabase dashboard (Connect): the user is postgres.<project-ref> and the host is aws-0-… or aws-1-…<region>.pooler.supabase.com"
+	case strings.Contains(msg, "28p01") || strings.Contains(msg, "password authentication failed"):
+		return "\nHint: wrong database password (Supabase dashboard → Project Settings → Database). URL-encode special characters in it"
+	case strings.Contains(msg, "supabase.co") && (strings.Contains(msg, "no such host") || strings.Contains(msg, "lookup") || strings.Contains(msg, "network is unreachable")):
+		return "\nHint: the direct db.<ref>.supabase.co host is IPv6-only. Use the Session pooler URL from the Supabase dashboard (Connect) instead"
+	}
+	return ""
 }
 
 // isFallbackWorthy reports whether an error from the primary
