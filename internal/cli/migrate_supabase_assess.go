@@ -219,6 +219,9 @@ func assessTables(ctx context.Context, conn *pgx.Conn, r *report) error {
 		         ON s.schemaname = n.nspname AND s.relname = c.relname
 		WHERE  n.nspname = 'public'
 		  AND  c.relkind = 'r'
+		  AND  NOT EXISTS (SELECT 1 FROM pg_depend d
+		                   WHERE d.classid = 'pg_class'::regclass
+		                     AND d.objid = c.oid AND d.deptype = 'e')
 		ORDER BY c.relname
 	`)
 	if err != nil {
@@ -252,7 +255,10 @@ func gradeTable(name string, rowCount, bytes int64, rls bool, anonPrivs []string
 		it.grade = gradeWarn
 		it.note += " · RLS is disabled: enable it and add policies before your app uses this table on Eurobase"
 		if len(anonPrivs) > 0 {
-			it.note += fmt.Sprintf(". On Supabase today, anyone with your anon key can %s this table; worth fixing there now (`ALTER TABLE public.%s ENABLE ROW LEVEL SECURITY`)", strings.Join(anonPrivs, " / "), ident(name))
+			it.note += fmt.Sprintf(". On Supabase today, anyone with your anon key can %s this table; worth fixing there now", strings.Join(anonPrivs, " / "))
+			if q, ok := sqlName("public", name); ok {
+				it.note += " (`ALTER TABLE " + q + " ENABLE ROW LEVEL SECURITY`)"
+			}
 		}
 	}
 	return it
@@ -356,6 +362,9 @@ func gradePolicy(usingClause, withCheck *string) (string, string) {
 	}
 	if strings.Contains(lower, "auth.jwt()") && strings.Contains(lower, "user_metadata") {
 		return "policy reads user_metadata from the JWT: Eurobase tokens don't carry it, so check the `schema` step's output and rewrite it", gradeWarn
+	}
+	if strings.Contains(lower, "auth.jwt()") {
+		return "policy reads auth.jwt(): Eurobase doesn't expose the raw token to SQL. Rewrite it with auth.uid() / auth.email() / auth.role() or a lookup in your own tables", gradeWarn
 	}
 	if strings.Contains(lower, "auth.email()") {
 		return "auth.email() is translated to Eurobase's auth_email() by the `schema` step", gradeOK
@@ -567,10 +576,12 @@ func gradeExtensions(exts []string, code *sbCode) []item {
 				it.grade, it.note = gradeOK, "installed by default on older Supabase projects and not used by your functions; nothing to migrate"
 			}
 		case ext == "pg_cron":
-			if len(code.cronJobs) > 0 {
+			if code.cronUnknown {
+				it.grade, it.note = gradeWarn, "couldn't read cron.job with this login; if you have cron jobs, recreate them as Eurobase cron jobs (SQL or a database function)"
+			} else if len(code.cronJobs) > 0 {
 				it.grade, it.note = gradeWarn, fmt.Sprintf("%d cron job(s) (%s): recreate them as Eurobase cron jobs (SQL or a database function); they aren't migrated automatically", len(code.cronJobs), nameList(code.cronJobs))
 			} else {
-				it.grade, it.note = gradeOK, "no cron jobs defined; nothing to migrate"
+				it.grade, it.note = gradeOK, "no cron jobs visible to this login (jobs created by another database role don't show); nothing to migrate"
 			}
 		case ext == "pg_stat_statements":
 			it.grade, it.note = gradeOK, "Supabase's query statistics; not needed on Eurobase, nothing to migrate"

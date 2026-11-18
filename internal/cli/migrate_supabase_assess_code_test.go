@@ -23,38 +23,68 @@ func findItem(t *testing.T, items []item, namePart string) item {
 
 func TestGradeFunctions_SecurityDefinerIsBlocker(t *testing.T) {
 	items := gradeFunctions([]sbFunction{
-		{Name: "handle_new_user", SecDef: true},
-		{Name: "touch_updated_at"},
-		{Name: "apply_delta"},
+		{Schema: "public", Name: "handle_new_user", SecDef: true},
+		{Schema: "public", Name: "touch_updated_at"},
+		{Schema: "public", Name: "apply_delta"},
+		{Schema: "private", Name: "is_admin", SecDef: true},
+		{Schema: "private", Name: "helper"},
 	})
 	if it := findItem(t, items, "handle_new_user"); it.grade != gradeBlocker || !strings.Contains(it.note, "SECURITY INVOKER") {
 		t.Errorf("definer function: %+v", it)
 	}
-	if it := findItem(t, items, "2 function(s)"); it.grade != gradeOK || !strings.Contains(it.note, "apply_delta, touch_updated_at") {
+	if it := findItem(t, items, "2 function(s) in public"); it.grade != gradeOK || !strings.Contains(it.note, "apply_delta, touch_updated_at") {
 		t.Errorf("invoker summary: %+v", it)
+	}
+	if it := findItem(t, items, "private.is_admin"); it.grade != gradeBlocker || !strings.Contains(it.note, "doesn't copy") {
+		t.Errorf("definer in own schema: %+v", it)
+	}
+	if it := findItem(t, items, "private.helper"); it.grade != gradeWarn {
+		t.Errorf("invoker in own schema: %+v", it)
 	}
 }
 
 func TestGradeTriggers(t *testing.T) {
+	ins := []string{"INSERT"}
 	items := gradeTriggers([]sbTrigger{
-		{TableSchema: "auth", Table: "users", Name: "on_auth_user_created", FuncSchema: "public", FuncName: "handle_new_user"},
-		{TableSchema: "auth", Table: "users", Name: "notify_slack", FuncSchema: "supabase_functions", FuncName: "http_request"},
-		{TableSchema: "public", Table: "orders", Name: "audit_orders", FuncSchema: "supabase_functions", FuncName: "http_request"},
-		{TableSchema: "storage", Table: "objects", Name: "update_objects_updated_at", FuncSchema: "storage", FuncName: "update_updated_at_column"},
-		{TableSchema: "storage", Table: "objects", Name: "on_upload", FuncSchema: "public", FuncName: "index_file"},
-		{TableSchema: "public", Table: "posts", Name: "touch_posts", FuncSchema: "public", FuncName: "touch"},
+		{TableSchema: "auth", Table: "users", Name: "on_auth_user_created", FuncSchema: "public", FuncName: "handle_new_user", Events: ins},
+		{TableSchema: "auth", Table: "users", Name: "notify_slack", FuncSchema: "supabase_functions", FuncName: "http_request", Events: ins},
+		{TableSchema: "auth", Table: "users", Name: "user_changed", FuncSchema: "supabase_functions", FuncName: "http_request", Events: []string{"UPDATE", "DELETE"}},
+		{TableSchema: "public", Table: "orders", Name: "audit_orders", FuncSchema: "supabase_functions", FuncName: "http_request", Events: []string{"INSERT", "UPDATE"}},
+		{TableSchema: "storage", Table: "objects", Name: "file_hook", FuncSchema: "supabase_functions", FuncName: "http_request", Events: []string{"INSERT", "DELETE"}},
+		{TableSchema: "storage", Table: "objects", Name: "update_objects_updated_at", FuncSchema: "storage", FuncName: "update_updated_at_column", Events: []string{"UPDATE"}},
+		{TableSchema: "storage", Table: "objects", Name: "on_upload", FuncSchema: "public", FuncName: "index_file", Events: ins},
+		{TableSchema: "public", Table: "posts", Name: "handle_updated_at", FuncSchema: "extensions", FuncName: "moddatetime", Events: []string{"UPDATE"}},
+		{TableSchema: "public", Table: "posts", Name: "touch_posts", FuncSchema: "public", FuncName: "touch", Events: []string{"UPDATE"}},
 	})
-	if it := findItem(t, items, "on_auth_user_created"); it.grade != gradeBlocker || !strings.Contains(it.note, "auth.signup") {
+	all := ""
+	for _, it := range items {
+		all += it.note + "\n"
+	}
+	for _, bad := range []string{"auth.signup", "auth.signin", "function trigger"} {
+		if strings.Contains(all, bad) {
+			t.Errorf("report suggests %q, which Eurobase doesn't have", bad)
+		}
+	}
+	if it := findItem(t, items, "on_auth_user_created"); it.grade != gradeBlocker || !strings.Contains(it.note, "auth.user.created") {
 		t.Errorf("auth.users trigger: %+v", it)
 	}
-	if it := findItem(t, items, "webhook: notify_slack"); it.grade != gradeBlocker || !strings.Contains(it.note, "auth.signup") {
+	if it := findItem(t, items, "webhook: notify_slack"); it.grade != gradeBlocker || !strings.Contains(it.note, "webhook on auth.user.created") {
 		t.Errorf("signup webhook: %+v", it)
 	}
-	if it := findItem(t, items, "webhook: audit_orders"); !strings.Contains(it.note, "db.insert") {
+	if it := findItem(t, items, "webhook: user_changed"); !strings.Contains(it.note, "auth.user.deleted") || !strings.Contains(it.note, "no event for update") {
+		t.Errorf("update/delete webhook on users: %+v", it)
+	}
+	if it := findItem(t, items, "webhook: audit_orders"); !strings.Contains(it.note, "db.insert / db.update") {
 		t.Errorf("table webhook: %+v", it)
+	}
+	if it := findItem(t, items, "webhook: file_hook"); !strings.Contains(it.note, "storage.upload / storage.delete") || strings.Contains(it.note, "db.") {
+		t.Errorf("storage webhook: %+v", it)
 	}
 	if it := findItem(t, items, "on_upload"); it.grade != gradeWarn {
 		t.Errorf("own storage trigger: %+v", it)
+	}
+	if it := findItem(t, items, "handle_updated_at"); it.grade != gradeBlocker || !strings.Contains(it.note, "moddatetime") {
+		t.Errorf("trigger on non-public function: %+v", it)
 	}
 	for _, it := range items {
 		if strings.Contains(it.name, "update_objects_updated_at") {
@@ -119,9 +149,9 @@ func TestGradeExtensions_DefaultsGradedByUse(t *testing.T) {
 	used := gradeExtensions(exts, &sbCode{
 		vaultSecrets: 2,
 		functions: []sbFunction{
-			{Name: "call_api", Body: "select net.http_post(url := 'x')"},
-			{Name: "get_key", Body: "select decrypted_secret from vault.decrypted_secrets"},
-			{Name: "enc", Body: "select pgsodium.crypto_aead_det_encrypt(...)"},
+			{Schema: "public", Name: "call_api", Body: "select net.http_post(url := 'x')"},
+			{Schema: "public", Name: "get_key", Body: "select decrypted_secret from vault.decrypted_secrets"},
+			{Schema: "public", Name: "enc", Body: "select pgsodium.crypto_aead_det_encrypt(...)"},
 		},
 		triggers: []sbTrigger{{TableSchema: "auth", Table: "users", Name: "hook", FuncSchema: "supabase_functions", FuncName: "http_request"}},
 	})
@@ -154,6 +184,12 @@ func TestGradeTable_RLSOff(t *testing.T) {
 	if it := gradeTable("posts", 1, 1, true, []string{"SELECT"}); it.grade != gradeOK {
 		t.Errorf("rls on: %+v", it)
 	}
+	if it := gradeTable("MyTable", 1, 1, false, []string{"SELECT"}); !strings.Contains(it.note, `ALTER TABLE public."MyTable"`) {
+		t.Errorf("mixed-case name must be quoted: %+v", it)
+	}
+	if it := gradeTable("a`b", 1, 1, false, []string{"SELECT"}); strings.Contains(it.note, "ALTER TABLE") {
+		t.Errorf("name with a backtick gets no SQL suggestion: %+v", it)
+	}
 }
 
 func TestMdNote_KeepsCodeSpans(t *testing.T) {
@@ -169,7 +205,7 @@ func TestMdNote_KeepsCodeSpans(t *testing.T) {
 
 func TestReportHasNoInternalIssueNumbers(t *testing.T) {
 	notes := []string{storagePolicyNote}
-	for _, u := range []string{"auth.uid() = id", "auth.email() = x", "true", ""} {
+	for _, u := range []string{"auth.uid() = id", "auth.email() = x", "auth.jwt() ->> 'email' = x", "true", ""} {
 		u := u
 		n, _ := gradePolicy(&u, nil)
 		notes = append(notes, n)
@@ -178,6 +214,13 @@ func TestReportHasNoInternalIssueNumbers(t *testing.T) {
 		if strings.Contains(n, "#2") {
 			t.Errorf("internal issue number in customer-facing note: %q", n)
 		}
+	}
+}
+
+func TestGradePolicy_AuthJWTIsWarning(t *testing.T) {
+	u := "(auth.jwt() ->> 'email') = owner_email"
+	if note, grade := gradePolicy(&u, nil); grade != gradeWarn || !strings.Contains(note, "auth.jwt()") {
+		t.Errorf("got %s %q", grade, note)
 	}
 }
 
@@ -202,13 +245,13 @@ func (e errString) Error() string { return string(e) }
 // TestReadSupabaseCode_Fixture runs the enumerators against a Postgres
 // database shaped like a Supabase project (auth / storage / vault
 // schemas, anon role, a database webhook, definer functions, an
-// owner-run view). Set SUPABASE_ASSESS_TEST_URL to an empty database you
-// can create roles and schemas in (the test builds and drops its own
-// fixture schemas, roles excepted).
+// owner-run view). Set ASSESS_SCRATCH_DB_URL to a throwaway local
+// database: the test DROPs and rebuilds auth / storage / vault schemas.
+// It refuses to run on anything that looks like a real Supabase project.
 func TestReadSupabaseCode_Fixture(t *testing.T) {
-	dsn := os.Getenv("SUPABASE_ASSESS_TEST_URL")
+	dsn := os.Getenv("ASSESS_SCRATCH_DB_URL")
 	if dsn == "" {
-		t.Skip("SUPABASE_ASSESS_TEST_URL not set")
+		t.Skip("ASSESS_SCRATCH_DB_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -217,6 +260,22 @@ func TestReadSupabaseCode_Fixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
+	// Guard: a real project has Supabase's realtime schema, or users.
+	var looksReal bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname IN ('realtime', '_realtime', 'supabase_migrations'))
+		    OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('supabase_admin', 'authenticator'))`).Scan(&looksReal); err != nil {
+		t.Fatal(err)
+	}
+	if !looksReal {
+		var n int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM auth.users`).Scan(&n); err == nil && n > 1 {
+			looksReal = true
+		}
+	}
+	if looksReal {
+		t.Fatal("ASSESS_SCRATCH_DB_URL points at what looks like a real Supabase project; refusing to drop its schemas")
+	}
 	if _, err := conn.Exec(ctx, supabaseFixtureSQL); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
@@ -232,8 +291,14 @@ func TestReadSupabaseCode_Fixture(t *testing.T) {
 	if it := findItem(t, dbCode, "trigger: on_auth_user_created"); it.grade != gradeBlocker {
 		t.Errorf("auth trigger: %+v", it)
 	}
-	if it := findItem(t, dbCode, "webhook: signup_hook"); it.grade != gradeBlocker {
+	if it := findItem(t, dbCode, "webhook: signup_hook"); it.grade != gradeBlocker || !strings.Contains(it.note, "auth.user.created") {
 		t.Errorf("webhook: %+v", it)
+	}
+	if it := findItem(t, dbCode, "private.is_admin"); it.grade != gradeBlocker {
+		t.Errorf("definer in own schema: %+v", it)
+	}
+	if it := findItem(t, dbCode, "trigger: set_updated_at"); it.grade != gradeBlocker {
+		t.Errorf("trigger on extensions function: %+v", it)
 	}
 	for _, it := range dbCode {
 		if strings.Contains(it.note, "hooks.example") || strings.Contains(it.name, "hooks.example") {
@@ -246,6 +311,11 @@ func TestReadSupabaseCode_Fixture(t *testing.T) {
 	}
 	findItem(t, views, "view: public.safe_posts")
 	findItem(t, views, "1 enum type(s)")
+	for _, it := range views {
+		if strings.Contains(it.name, "pg_stat_statements") {
+			t.Errorf("extension-owned view graded: %+v", it)
+		}
+	}
 	if code.vaultSecrets != 0 {
 		t.Errorf("vault secrets = %d, want 0", code.vaultSecrets)
 	}
@@ -279,7 +349,8 @@ const supabaseFixtureSQL = `
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
 END $$;
-DROP SCHEMA IF EXISTS auth, storage, vault, supabase_functions CASCADE;
+DROP EXTENSION IF EXISTS pg_stat_statements;
+DROP SCHEMA IF EXISTS auth, storage, vault, supabase_functions, private, extensions CASCADE;
 DROP VIEW IF EXISTS public.latest_posts, public.safe_posts;
 DROP TABLE IF EXISTS public.posts, public.api_tokens CASCADE;
 DROP FUNCTION IF EXISTS public.handle_new_user(), public.touch() CASCADE;
@@ -310,6 +381,15 @@ CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXEC
 CREATE TRIGGER signup_hook AFTER INSERT ON auth.users FOR EACH ROW
   EXECUTE FUNCTION supabase_functions.http_request('https://hooks.example/secret-path', 'POST', '{}', '{}', '5000');
 CREATE TRIGGER touch_posts BEFORE UPDATE ON public.posts FOR EACH ROW EXECUTE FUNCTION public.touch();
+
+CREATE SCHEMA private;
+CREATE FUNCTION private.is_admin() RETURNS boolean LANGUAGE sql SECURITY DEFINER AS $f$ SELECT true $f$;
+CREATE SCHEMA extensions;
+CREATE FUNCTION extensions.moddatetime() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$;
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.posts FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime();
+
+-- An extension that puts views in public (like PostGIS does).
+CREATE EXTENSION pg_stat_statements SCHEMA public;
 
 CREATE VIEW public.latest_posts AS SELECT * FROM public.posts;
 CREATE VIEW public.safe_posts WITH (security_invoker = true) AS SELECT * FROM public.posts;
