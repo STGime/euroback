@@ -188,10 +188,10 @@ func TestTranslate_ViewsBecomeSecurityInvoker(t *testing.T) {
 func TestTranslate_Moddatetime(t *testing.T) {
 	in := `CREATE TRIGGER handle_updated_at BEFORE UPDATE ON public.posts FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('updated_at');`
 	res := Translate(in)
-	if !strings.Contains(res.sql, "EXECUTE FUNCTION moddatetime('updated_at')") || !strings.Contains(res.sql, "CREATE FUNCTION moddatetime()") {
+	if !strings.Contains(res.sql, "EXECUTE FUNCTION eurobase_moddatetime('updated_at')") || !strings.Contains(res.sql, "CREATE FUNCTION eurobase_moddatetime()") {
 		t.Errorf("moddatetime not replaced:\n%s", res.sql)
 	}
-	if strings.Count(Translate(in+"\n"+in).sql, "CREATE FUNCTION moddatetime()") != 1 {
+	if strings.Count(Translate(in+"\n"+in).sql, "CREATE FUNCTION eurobase_moddatetime()") != 1 {
 		t.Error("moddatetime() added more than once")
 	}
 }
@@ -481,7 +481,7 @@ ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 	for _, want := range []string{
 		"SELECT EXISTS (SELECT 1 FROM profiles WHERE id = auth_uid() AND role = 'admin'::user_role);",
 		"WITH (security_invoker='true')",
-		"EXECUTE FUNCTION moddatetime('updated_at')",
+		"EXECUTE FUNCTION eurobase_moddatetime('updated_at')",
 		"REFERENCES users(id)",
 		"user_id uuid DEFAULT auth_uid()",
 	} {
@@ -534,7 +534,8 @@ func TestSchemaImport_Fixture(t *testing.T) {
 	for _, g := range grants {
 		grantLines = append(grantLines, g.String())
 	}
-	wantGrant := "table profiles: anon has no SELECT; column grants: SELECT (id, role)"
+	wantGrant := "table profiles: anon has no SELECT; column grants: SELECT (id, role)\n" +
+		"function is_admin(): anon has no EXECUTE"
 	if strings.Join(grantLines, "\n") != wantGrant {
 		t.Errorf("narrowed grants:\n%s\nwant:\n%s", strings.Join(grantLines, "\n"), wantGrant)
 	}
@@ -745,6 +746,11 @@ CREATE TABLE public.members_only (id integer PRIMARY KEY);
 ALTER TABLE public.members_only ENABLE ROW LEVEL SECURITY;
 CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $f$ SELECT 'anon' $f$;
 CREATE POLICY "Members" ON public.members_only FOR SELECT USING (auth.role() = 'authenticated');
+-- EXECUTE revoked: a trigger function (not callable directly anyway —
+-- not reported) and a helper closed to anon (reported).
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.is_admin() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
 -- Column-level security: anon may read only id and role.
 REVOKE SELECT ON public.profiles FROM anon;
 GRANT SELECT (id, role) ON public.profiles TO anon;
@@ -1060,5 +1066,82 @@ CREATE POLICY "Read" ON public.posts FOR SELECT USING (true);
 	}
 	if err := query.ValidateTenantMigrationSQL(got); err != nil {
 		t.Errorf("platform would refuse: %v", err)
+	}
+}
+
+// ── third review ─────────────────────────────────────────────────────
+
+// A function that calls a former definer function is as affected as
+// the definer itself; so are views, column defaults and CHECK
+// constraints that call either.
+func TestTranslate_DefinerUseIsTransitive(t *testing.T) {
+	in := `CREATE FUNCTION public.can_post() RETURNS boolean LANGUAGE sql AS $$ SELECT NOT public.is_banned() $$;
+CREATE FUNCTION public.is_banned() RETURNS boolean LANGUAGE sql SECURITY DEFINER AS $$ SELECT EXISTS (SELECT 1 FROM public.banned WHERE id = auth.uid()) $$;
+CREATE FUNCTION public.unrelated() RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+CREATE TABLE public.docs (id integer, ok boolean DEFAULT public.can_post(), CONSTRAINT c CHECK (public.unrelated()));
+CREATE VIEW public.v AS SELECT id FROM public.docs WHERE public.is_banned();
+CREATE POLICY p ON public.docs FOR INSERT WITH CHECK (public.can_post());
+CREATE POLICY q ON public.docs FOR SELECT USING (public.unrelated());`
+	notes := accessNotes(Translate(in))
+	want := []string{"table docs calls can_post", "view v calls is_banned", "policy p calls can_post"}
+	if len(notes) != len(want) {
+		t.Fatalf("access notes = %q", notes)
+	}
+	for i, w := range want {
+		if !strings.Contains(notes[i], w) {
+			t.Errorf("note %d = %q, want it to contain %q", i, notes[i], w)
+		}
+	}
+}
+
+// A SQL-standard body (BEGIN ATOMIC … END) stays one statement: its
+// calls count for the definer check, and SECURITY DEFINER is removed.
+func TestTranslate_BeginAtomicIsOneStatement(t *testing.T) {
+	in := "CREATE FUNCTION public.is_banned() RETURNS boolean LANGUAGE sql SECURITY DEFINER AS $$ SELECT true $$;\n" +
+		"CREATE FUNCTION public.gate() RETURNS boolean\n    LANGUAGE sql\n    BEGIN ATOMIC\n SELECT 1;\n SELECT (NOT public.is_banned());\nEND;\n" +
+		"CREATE POLICY p ON public.t FOR INSERT WITH CHECK (public.gate());"
+	res := Translate(in)
+	if notes := accessNotes(res); len(notes) != 1 || !strings.Contains(notes[0], "policy p calls gate") {
+		t.Errorf("access notes = %q", notes)
+	}
+	if !strings.Contains(res.sql, " SELECT (NOT is_banned());\nEND;") {
+		t.Errorf("atomic body changed:\n%s", res.sql)
+	}
+}
+
+// Only column-0 SET lines (pg_dump's preamble) are stripped; the SET
+// of a multi-line UPDATE stays, whatever the column is called.
+func TestTranslate_IndentedSetLinesStay(t *testing.T) {
+	in := "CREATE RULE r AS\n    ON UPDATE TO public.v DO INSTEAD  UPDATE public.t\n  SET role = new.role\n  WHERE (t.id = old.id);"
+	got := Translate(in).sql
+	if !strings.Contains(got, "\n  SET role = new.role\n") {
+		t.Errorf("UPDATE's SET line removed:\n%s", got)
+	}
+}
+
+// ENABLE ROW LEVEL SECURITY text inside a function body isn't a
+// statement of the migration.
+func TestTranslate_ServiceOnlyPolicyIgnoresFunctionBodies(t *testing.T) {
+	in := "CREATE FUNCTION public.mk() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\nALTER TABLE secrets ENABLE ROW LEVEL SECURITY;\nEND $$;"
+	if got := Translate(in).sql; strings.Contains(got, "eurobase_service_role") {
+		t.Errorf("policy added for text in a function body:\n%s", got)
+	}
+}
+
+// The view check reads the statement, not pg_dump's comment header.
+func TestTranslate_ViewCheckIgnoresComments(t *testing.T) {
+	in := "--\n-- Name: security_invoker=on; Type: VIEW; Schema: public; Owner: -\n--\n\nCREATE VIEW public.\"security_invoker=on\" AS\n SELECT 1;"
+	if got := Translate(in).sql; !strings.Contains(got, "WITH (security_invoker='true')") {
+		t.Errorf("view left to run with its owner's rights:\n%s", got)
+	}
+}
+
+// An app's own moddatetime() isn't what the extension's triggers get.
+func TestTranslate_OwnModdatetimeIsUntouched(t *testing.T) {
+	in := `CREATE FUNCTION public.moddatetime() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER t BEFORE UPDATE ON public.p FOR EACH ROW EXECUTE FUNCTION extensions.moddatetime('updated_at');`
+	got := Translate(in).sql
+	if !strings.Contains(got, "EXECUTE FUNCTION eurobase_moddatetime('updated_at')") || !strings.Contains(got, "CREATE FUNCTION eurobase_moddatetime()") {
+		t.Errorf("trigger not pointed at the replacement:\n%s", got)
 	}
 }

@@ -89,6 +89,9 @@ func readNarrowedGrants(ctx context.Context, conn *pgx.Conn) ([]narrowedGrant, e
 		  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 		  CROSS JOIN (SELECT oid, rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')) r
 		 WHERE n.nspname = 'public' AND p.prokind IN ('f', 'p')
+		   -- Trigger functions can't be called directly, with or without
+		   -- EXECUTE (revoking it is what Supabase's advisor recommends).
+		   AND p.prorettype NOT IN ('trigger'::regtype, 'event_trigger'::regtype)
 		   AND NOT EXISTS (SELECT 1 FROM pg_depend d
 		                    WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
 		   AND NOT has_function_privilege(r.oid, p.oid, 'EXECUTE')

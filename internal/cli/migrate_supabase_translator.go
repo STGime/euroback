@@ -124,15 +124,15 @@ func Translate(input string) translationResult {
 	return res
 }
 
-const rewriteModdatetime = "rewrite:extensions.moddatetime() → moddatetime()"
+const rewriteModdatetime = "rewrite:extensions.moddatetime() → eurobase_moddatetime()"
 
 // moddatetimeShim does what the moddatetime extension's trigger does:
 // sets the column named by the trigger argument to the current time.
 const moddatetimeShim = `-- eurobase: replaces the moddatetime extension used by the triggers below.
-CREATE FUNCTION moddatetime() RETURNS trigger LANGUAGE plpgsql AS $eb$
+CREATE FUNCTION eurobase_moddatetime() RETURNS trigger LANGUAGE plpgsql AS $eb$
 BEGIN
   IF TG_NARGS <> 1 OR NOT (to_jsonb(NEW) ? TG_ARGV[0]) THEN
-    RAISE EXCEPTION 'moddatetime: % has no column %', TG_TABLE_NAME, TG_ARGV[0];
+    RAISE EXCEPTION 'eurobase_moddatetime: % has no column %', TG_TABLE_NAME, TG_ARGV[0];
   END IF;
   NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], now()));
   RETURN NEW;
@@ -194,17 +194,14 @@ func translatePass1(input string, mask []bool, res *translationResult) string {
 				}
 				res.rewrites["keep:SET LOCAL check_function_bodies = false"]++
 				dropped = true
-			case line != trimmed && !reSetForbidden.MatchString(trimmed):
-				// An indented SET is a function's own setting (pg_dump
-				// writes `    SET statement_timeout TO '5s'` in the
-				// function header) — keep it; only search_path / role
-				// settings are refused by the platform.
+			case line != trimmed:
+				// Only pg_dump's preamble (SET … at column 0) and the
+				// other whole-line rules below are stripped here. An
+				// indented line is part of a statement — a function's
+				// SET clause (handled in Pass 2), or the SET of a
+				// multi-line UPDATE in a rule or function body.
 			case reSetAny.MatchString(trimmed):
-				if line != trimmed {
-					res.rewrites["strip:function SET search_path / role"]++
-				} else {
-					res.rewrites["strip:SET <preamble>"]++
-				}
+				res.rewrites["strip:SET <preamble>"]++
 				dropped = true
 			case reMetaCommand.MatchString(trimmed):
 				// pg_dump ≥ 17.6 / 18 brackets the dump in psql
@@ -322,8 +319,9 @@ func translateCodeSpans(line string, mask []bool, lineNum int) (string, map[stri
 		}
 		// moddatetime (Supabase's "updated_at" trigger helper) isn't
 		// available in a project; Translate adds an equivalent
-		// moddatetime() to the migration when this fires.
-		if n := countAndReplace(&text, reExtensionsModdatetime, "moddatetime("); n > 0 {
+		// eurobase_moddatetime() to the migration when this fires (its
+		// own name, so an app function called moddatetime is untouched).
+		if n := countAndReplace(&text, reExtensionsModdatetime, "eurobase_moddatetime("); n > 0 {
 			fired[rewriteModdatetime] += n
 		}
 		if n := countAndReplacePublicQualifier(&text); n > 0 {
@@ -736,7 +734,6 @@ var (
 	// controls the session role and locale). The wider net is
 	// intentional. (#274 review M2, M6.)
 	reSetCheckFunctionBodies = regexp.MustCompile(`(?i)^\s*SET\s+check_function_bodies\s*=\s*false\s*;\s*$`)
-	reSetForbidden           = regexp.MustCompile(`(?i)^\s*SET\s+(LOCAL\s+|SESSION\s+)?(search_path|role|session_authorization)\b`)
 	reSetAny                 = regexp.MustCompile(`(?i)^\s*SET\s+\w+`)
 	reCreateSchemaPublic     = regexp.MustCompile(`(?i)^\s*CREATE\s+SCHEMA\s+(IF\s+NOT\s+EXISTS\s+)?public\b`)
 	reAlterSchemaOwner       = regexp.MustCompile(`(?i)^\s*ALTER\s+SCHEMA\s+\w+\s+OWNER\s+TO`)
@@ -771,7 +768,7 @@ var (
 	rePublicBareWord          = regexp.MustCompile(`(?i)\bpublic\b`)
 	reStripQualifiedPublic    = regexp.MustCompile(`(?i)\bpublic\s*\.`)
 	reExtensionsRef           = regexp.MustCompile(`(?i)\bextensions\s*\.\s*[A-Za-z_]`)
-	reDefinesModdatetime      = regexp.MustCompile(`(?i)\bCREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+moddatetime\s*\(`)
+	reDefinesModdatetime      = regexp.MustCompile(`(?i)\bCREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+eurobase_moddatetime\s*\(`)
 	reUUIDGenerateV4          = regexp.MustCompile(`(?i)\b(public\s*\.\s*)?uuid_generate_v4\s*\(\s*\)`)
 
 	// `public.` followed by a name (or by the end of the code span — a
@@ -817,6 +814,9 @@ var (
 // enable RLS but have no policy (matched at line starts, so commented-out
 // statements don't count).
 func serviceOnlyPolicies(sql string, res *translationResult) string {
+	// Match statements only: text in function bodies, strings and
+	// comments is blanked (quoted names are kept).
+	sql = statementCode(sql)
 	withPolicy := map[string]bool{}
 	for _, m := range rePolicyOnLine.FindAllStringSubmatch(sql, -1) {
 		withPolicy[normalizeName(m[1])] = true

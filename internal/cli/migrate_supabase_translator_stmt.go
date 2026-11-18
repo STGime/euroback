@@ -28,21 +28,34 @@ package cli
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
 // translateStatements runs the statement-level rewrites over sql.
 func translateStatements(sql string, res *translationResult) string {
-	segments, _ := splitCodeAndLiterals(sql)
+	stmts := splitStatements(sql)
+	markDefinerFunctions(stmts, res)
 	var out strings.Builder
 	out.Grow(len(sql) + len(sql)/8)
+	for _, st := range stmts {
+		out.WriteString(translateStatement(st, res))
+	}
+	return out.String()
+}
+
+// splitStatements cuts sql at each `;` in code. A SQL-standard function
+// body (BEGIN ATOMIC … END) has its statements' `;` in code too; those
+// pieces are joined back so the function stays one statement.
+func splitStatements(sql string) []string {
+	segments, _ := splitCodeAndLiterals(sql)
+	var raw []string
 	var stmt strings.Builder
 	flush := func() {
-		if stmt.Len() == 0 {
-			return
+		if stmt.Len() > 0 {
+			raw = append(raw, stmt.String())
+			stmt.Reset()
 		}
-		out.WriteString(translateStatement(stmt.String(), res))
-		stmt.Reset()
 	}
 	for _, seg := range segments {
 		if !seg.code {
@@ -62,7 +75,68 @@ func translateStatements(sql string, res *translationResult) string {
 		}
 	}
 	flush()
-	return out.String()
+
+	var out []string
+	for i := 0; i < len(raw); i++ {
+		st := raw[i]
+		if reHeadFunction.MatchString(statementCodeHead(st)) && reBeginAtomic.MatchString(statementCode(st)) {
+			for i+1 < len(raw) && !reAtomicEnd.MatchString(statementCode(st)) {
+				i++
+				st += raw[i]
+			}
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+var (
+	reBeginAtomic = regexp.MustCompile(`(?i)\bBEGIN\s+ATOMIC\b`)
+	reAtomicEnd   = regexp.MustCompile(`(?i)\bEND\s*;\s*$`)
+)
+
+// markDefinerFunctions fills res.definers before anything is rewritten:
+// every SECURITY DEFINER function, and every function that calls one
+// (directly or through other functions). Run with the caller's rights,
+// all of them can answer differently than they did on Supabase.
+func markDefinerFunctions(stmts []string, res *translationResult) {
+	type fn struct {
+		name string
+		text string // lower-cased statement, body included
+	}
+	var fns []fn
+	for _, st := range stmts {
+		m := reHeadFunction.FindStringSubmatch(statementCodeHead(st))
+		if m == nil {
+			continue
+		}
+		name := normalizeName(m[3])
+		fns = append(fns, fn{name: name, text: strings.ToLower(st)})
+		if len(codeMatches(st, reSecurityDefiner)) > 0 {
+			res.definers[name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, f := range fns {
+			if res.definers[f.name] {
+				continue
+			}
+			for d := range res.definers {
+				if callsFunction(f.text, d) {
+					res.definers[f.name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+}
+
+// callsFunction reports whether lower-cased text calls fn (optionally
+// schema-qualified or quoted).
+func callsFunction(text, fn string) bool {
+	return regexp.MustCompile(`(^|[^a-z0-9_$"])("?` + regexp.QuoteMeta(strings.ToLower(fn)) + `"?)\s*\(`).MatchString(text)
 }
 
 var (
@@ -90,12 +164,15 @@ func translateStatement(s string, res *translationResult) string {
 				note: fmt.Sprintf("table %s has the name of a table every Eurobase project already has — rename it in Supabase (and in your app) before importing, or the migration fails", name),
 			})
 		}
+		// Column defaults and CHECK constraints.
+		flagDefinerUse(s, "table "+name, res)
 		return s
 	case reHeadFunction.MatchString(head):
 		name := reHeadFunction.FindStringSubmatch(head)[3]
 		return translateFunction(s, name, res)
 	case reHeadView.MatchString(head):
 		name := reHeadView.FindStringSubmatch(head)[3]
+		flagDefinerUse(s, "view "+name, res)
 		return translateView(s, name, res)
 	}
 	return s
@@ -283,6 +360,8 @@ func policyName(s string) string {
 var (
 	reSecurityDefiner = regexp.MustCompile(`(?i)[ \t]*\bSECURITY\s+DEFINER\b[ \t]*`)
 	reEndsWithAS      = regexp.MustCompile(`(?i)\bAS\s*$`)
+	// A whole header line, as pg_dump writes it.
+	reFunctionSetForbidden = regexp.MustCompile(`(?im)^[ \t]*SET\s+(?:search_path|role|session_authorization)\s+(?:TO|=)[^\n]*\n`)
 )
 
 func translateFunction(s, name string, res *translationResult) string {
@@ -299,6 +378,16 @@ func translateFunction(s, name string, res *translationResult) string {
 			note: fmt.Sprintf("function %s was SECURITY DEFINER; it now runs with the caller's rights, so it only sees rows the caller's RLS allows. Eurobase doesn't run functions with their owner's rights — if it did work the caller can't (e.g. a trigger writing to another table), move that work to an edge function or a webhook (see the assess report)", name),
 		})
 		s = "\n-- eurobase: " + name + " was SECURITY DEFINER in Supabase; it now runs with the caller's rights.\n" + strings.TrimLeft(s, "\n")
+	}
+
+	// A function's own `SET search_path …` (or role) clause: the platform
+	// refuses it, and the function runs with the project's search_path.
+	// Other SET clauses (statement_timeout, …) stay.
+	if ms := codeMatches(s, reFunctionSetForbidden); len(ms) > 0 {
+		for i := len(ms) - 1; i >= 0; i-- {
+			s = s[:ms[i][0]] + s[ms[i][1]:]
+		}
+		res.rewrites["strip:function SET search_path / role"] += len(ms)
 	}
 
 	// Translate the body: the dollar-quoted segment right after AS. A
@@ -369,21 +458,27 @@ func normalizeName(n string) string {
 	return strings.ToLower(n)
 }
 
-// flagDefinerUse reports a policy or trigger that calls a function
-// which was SECURITY DEFINER. Running with the caller's rights, such a
-// function sees only the rows the caller may see — a check for the
-// absence of rows (`NOT is_banned()`, `NOT EXISTS (…)`) then passes
-// for callers it used to stop.
+// flagDefinerUse reports a policy, trigger, table (defaults, CHECK
+// constraints) or view that calls a function which was SECURITY DEFINER
+// or calls one. Running with the caller's rights, such a function sees
+// only the rows the caller may see — a check for the absence of rows
+// (`NOT is_banned()`, `NOT EXISTS (…)`) then passes for callers it used
+// to stop.
 func flagDefinerUse(stmt, what string, res *translationResult) {
 	if len(res.definers) == 0 {
 		return
 	}
 	code := strings.ToLower(statementCode(stmt))
+	names := make([]string, 0, len(res.definers))
 	for fn := range res.definers {
-		if regexp.MustCompile(`(^|[^a-z0-9_$."])("?` + regexp.QuoteMeta(strings.ToLower(fn)) + `"?)\s*\(`).MatchString(code) {
+		names = append(names, fn)
+	}
+	sort.Strings(names)
+	for _, fn := range names {
+		if callsFunction(code, fn) {
 			res.warnings = append(res.warnings, translationWarning{
 				access: true,
-				note:   fmt.Sprintf("%s calls %s, which was SECURITY DEFINER and now runs with the caller's rights: it only sees rows the caller may see, so a check for the absence of rows (e.g. NOT is_banned(), NOT EXISTS …) can now let callers through. Rewrite the check so the caller's own policies allow what it reads, or move it out of the database", what, fn),
+				note:   fmt.Sprintf("%s calls %s, which was SECURITY DEFINER (or calls a function that was) and now runs with the caller's rights: it only sees rows the caller may see. A check for the absence of rows (e.g. NOT is_banned(), NOT EXISTS …) can now let callers through, and a helper that reads the table its own policy protects now fails with a recursion error. Rewrite the check so the caller's own policies allow what it reads, or move it out of the database", what, fn),
 			})
 		}
 	}
@@ -422,16 +517,18 @@ func translateView(s, name string, res *translationResult) string {
 	}
 	headEnd := as[0][0]
 	head := s[:headEnd]
-	if reViewSecurityInvoker.MatchString(head) {
+	// Options are matched where they start in code — not in pg_dump's
+	// comment header or the view's own (possibly quoted) name.
+	if len(codeMatches(head, reViewSecurityInvoker)) > 0 {
 		return s
 	}
-	switch {
-	case reViewSecurityOff.MatchString(head):
-		head = reViewSecurityOff.ReplaceAllString(head, "security_invoker='true'")
-	case reViewWith.MatchString(head):
-		loc := reViewWith.FindStringIndex(head)
-		head = head[:loc[1]] + "security_invoker='true', " + head[loc[1]:]
-	default:
+	if off := codeMatches(head, reViewSecurityOff); len(off) > 0 {
+		for i := len(off) - 1; i >= 0; i-- {
+			head = head[:off[i][0]] + "security_invoker='true'" + head[off[i][1]:]
+		}
+	} else if with := codeMatches(head, reViewWith); len(with) > 0 {
+		head = head[:with[0][1]] + "security_invoker='true', " + head[with[0][1]:]
+	} else {
 		head = strings.TrimRight(head, " \t\n") + " WITH (security_invoker='true') "
 	}
 	res.rewrites["rewrite:view → security_invoker"]++
