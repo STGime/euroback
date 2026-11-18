@@ -79,7 +79,7 @@ var uuidGenerateV4Re = regexp.MustCompile(`(?i)\b(public\s*\.\s*)?uuid_generate_
 // so qualification is never needed; forbidding it keeps the regex free
 // of per-request state).
 var forbiddenMigSchemaRe = regexp.MustCompile(
-	`(?i)\b(public|pg_catalog|information_schema|tenant_[a-z0-9_]+)\s*\.`,
+	`(?i)\b(public|pg_catalog|information_schema|tenant_[a-z0-9_]+)\s*\.(\s*[a-z_][a-z0-9_]*)?`,
 )
 
 // forbiddenMigStatementRes are escape hatches rejected outright. The
@@ -129,8 +129,9 @@ func ValidateTenantMigrationSQL(sql string) error {
 	// Blank the allowlisted public helpers, then scan for any remaining
 	// qualified reference to a forbidden schema.
 	scanned := publicHelperAllowRe.ReplaceAllString(stripped, "ALLOWED_HELPER")
-	if loc := forbiddenMigSchemaRe.FindString(scanned); loc != "" {
-		return fmt.Errorf("migration references a forbidden schema (%s...): only unqualified names in your project schema are allowed (RLS helpers like public.is_service_role() are exempt)", strings.TrimSpace(loc))
+	if m := forbiddenMigSchemaRe.FindStringSubmatch(scanned); m != nil {
+		return fmt.Errorf("migration references a forbidden schema (%s....): only unqualified names in your project schema are allowed (RLS helpers like public.is_service_role() are exempt)%s",
+			m[1], hintSuffix(catalogRefHint(m[1], strings.TrimSpace(m[2]))))
 	}
 	for _, f := range forbiddenMigStatementRes {
 		if f.re.MatchString(scanned) {

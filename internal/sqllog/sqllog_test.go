@@ -2,6 +2,7 @@ package sqllog
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -117,7 +118,7 @@ func TestRefusalAlert_FiresOncePerWindowEvenWhenDropped(t *testing.T) {
 	w := &fakeWriter{}
 	l := NewWithWriter(w)
 	fired := make(chan int, 4)
-	l.OnRefusals = func(projectID string, count int) {
+	l.OnRefusals = func(projectID string, count int, _ []string) {
 		if projectID != "p1" {
 			t.Errorf("hook got %q", projectID)
 		}
@@ -176,7 +177,7 @@ func TestRecordBatch_OneInsertAndNotRunIsNoRefusal(t *testing.T) {
 	w := &fakeWriter{}
 	l := NewWithWriter(w)
 	fired := 0
-	l.OnRefusals = func(string, int) { fired++ }
+	l.OnRefusals = func(string, int, []string) { fired++ }
 	items := make([]Item, 40)
 	for i := range items {
 		items[i] = Item{Statement: "SELECT 1", Entry: Entry{Via: ViaConsole, Source: SourceSQLTransaction, Outcome: OutcomeNotRun}}
@@ -208,5 +209,85 @@ func TestRecordBatch_PartialBudget(t *testing.T) {
 	}
 	if n := len(w.rows[0]) / 15; n < logBurst || n > logBurst+5 {
 		t.Errorf("wrote %d entries, want about the burst (%d)", n, logBurst)
+	}
+}
+
+func TestRefusalAlert_TopReasons(t *testing.T) {
+	l := NewWithWriter(&fakeWriter{})
+	got := make(chan []string, 1)
+	l.OnRefusals = func(_ string, _ int, reasons []string) { got <- reasons }
+	refuse := func(detail string) {
+		l.Record(context.Background(), "p1", "SELECT 1", Entry{Via: ViaToken, Source: SourceSQL, Outcome: OutcomeRefused, Detail: detail})
+	}
+	// Same reason with and without the transaction prefix and the hint
+	// must group together.
+	for i := 0; i < 4; i++ {
+		refuse(`statement 2: references to PostgreSQL system catalog objects ("pg_proc") are not allowed. Hint: use getDbFunction`)
+	}
+	for i := 0; i < 3; i++ {
+		refuse(`references to PostgreSQL system catalog objects ("pg_proc") are not allowed`)
+	}
+	refuse(`references to PostgreSQL system catalog objects ("pg_roles") are not allowed`)
+	refuse(`changing role is not allowed`)
+	refuse(`a`)
+	select {
+	case reasons := <-got:
+		want := []string{
+			`references to PostgreSQL system catalog objects ("pg_proc") are not allowed (×7)`,
+			`a (×1)`,
+			`changing role is not allowed (×1)`,
+		}
+		if strings.Join(reasons, "|") != strings.Join(want, "|") {
+			t.Errorf("reasons = %q, want %q", reasons, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("alert hook not called")
+	}
+}
+
+func TestRefusalAlert_TrackedReasonsBounded(t *testing.T) {
+	l := NewWithWriter(&fakeWriter{})
+	for i := 0; i < maxTrackedReasons*3; i++ {
+		l.countRefusal("p1", fmt.Sprintf("reason %d", i))
+	}
+	l.mu.Lock()
+	n := len(l.refusals["p1"].reasons)
+	l.mu.Unlock()
+	if n != maxTrackedReasons {
+		t.Errorf("tracked %d distinct reasons, want %d", n, maxTrackedReasons)
+	}
+}
+
+func TestRefusalAlertDescription(t *testing.T) {
+	d := refusalAlertDescription("p1", 10, []string{`references to schema "x" are not allowed (×3)`})
+	for _, want := range []string{"**10**", "Top reasons:", "• `references to schema \"x\" are not allowed (×3)`", "SQL log in /admin"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("description missing %q:\n%s", want, d)
+		}
+	}
+	if strings.Contains(refusalAlertDescription("p1", 10, nil), "Top reasons") {
+		t.Error("no reasons must not print the heading")
+	}
+}
+
+// The alert leaves the SQL log's admin-only boundary: developer-typed text
+// must not reach it, and nothing in it may render as markdown, a link or
+// a mention.
+func TestAlertReason_NoDeveloperText(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`statement 3: references to PostgreSQL system catalog objects ("pg_proc") are not allowed. Hint: use getDbFunction`,
+			`references to PostgreSQL system catalog objects ("pg_proc") are not allowed`},
+		{`test run: references to PostgreSQL system catalog objects ("pg_roles") are not allowed`,
+			`references to PostgreSQL system catalog objects ("pg_roles") are not allowed`},
+		{`references to PostgreSQL system catalog objects ("pg_[ok](https://evil.example)") are not allowed`,
+			`references to PostgreSQL system catalog objects ("…") are not allowed`},
+		{`references to schema "a\"b @everyone" are not allowed`, `references to schema "…" are not allowed`},
+		{"line\nbreak `tick`", "linebreak tick"},
+		{"", "(no reason recorded)"},
+	}
+	for _, tc := range cases {
+		if got := alertReason(tc.in); got != tc.want {
+			t.Errorf("alertReason(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

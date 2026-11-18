@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +113,9 @@ type Logger struct {
 
 	// OnRefusals is called (in its own goroutine) when a project reaches
 	// RefusalAlertThreshold refused statements inside RefusalAlertWindow.
-	OnRefusals func(projectID string, count int)
+	// reasons are the most frequent refusal reasons of the window so far
+	// (at most maxAlertReasons, most frequent first, "reason (×n)").
+	OnRefusals func(projectID string, count int, reasons []string)
 
 	mu       sync.Mutex
 	limiters map[string]*rate.Limiter
@@ -138,6 +142,81 @@ type refusalWindow struct {
 	start   time.Time
 	count   int
 	alerted bool
+	// normalised refusal reason → count. At most maxTrackedReasons keys:
+	// reasons first seen after that aren't tracked, so many distinct
+	// reasons early in a window can keep a later frequent one out of the
+	// alert (the count is still exact).
+	reasons map[string]int
+}
+
+const (
+	maxAlertReasons   = 3   // reasons shown in the alert
+	maxTrackedReasons = 20  // distinct reasons kept per window (bounds memory)
+	maxReasonLen      = 160 // characters of one reason in the alert
+)
+
+// reasonPrefixRe matches the prefixes callers put on a refusal ("statement
+// N: " from the transaction endpoint, "test run: " from cron's dry run), so
+// the same reason groups together.
+var reasonPrefixRe = regexp.MustCompile(`^(statement \d+: |test run: )+`)
+
+// quotedRe matches a double-quoted segment of a refusal message: the
+// guards quote what the developer typed (%q).
+var quotedRe = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// plainNameRe is a quoted segment kept in the alert: a plain SQL name.
+var plainNameRe = regexp.MustCompile(`^"[A-Za-z0-9_.]{1,63}"$`)
+
+// alertReason normalises a refusal detail for the alert. The alert goes to
+// an ops channel outside the SQL log's admin-only boundary, so it must not
+// carry developer-typed text: quoted segments are kept only when they are a
+// plain SQL name (the refused object, useful to ops) and replaced by "…"
+// otherwise, and anything that isn't a plain printable character is
+// dropped. No statement index, no hint, bounded length.
+func alertReason(detail string) string {
+	r := reasonPrefixRe.ReplaceAllString(strings.TrimSpace(detail), "")
+	if i := strings.Index(r, ". Hint: "); i >= 0 {
+		r = r[:i]
+	}
+	r = quotedRe.ReplaceAllStringFunc(r, func(q string) string {
+		if plainNameRe.MatchString(q) {
+			return q
+		}
+		return `"…"`
+	})
+	r = strings.Map(func(c rune) rune {
+		if c < 0x20 || c == 0x7f || c == '`' {
+			return -1
+		}
+		return c
+	}, r)
+	if r == "" {
+		r = "(no reason recorded)"
+	}
+	return truncate(r, maxReasonLen)
+}
+
+// topReasons returns up to maxAlertReasons reasons, most frequent first
+// (ties by text, so the order is stable).
+func topReasons(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] != m[keys[j]] {
+			return m[keys[i]] > m[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	if len(keys) > maxAlertReasons {
+		keys = keys[:maxAlertReasons]
+	}
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = fmt.Sprintf("%s (×%d)", k, m[k])
+	}
+	return out
 }
 
 // New returns a logger; a nil pool gives a no-op logger.
@@ -201,7 +280,7 @@ func (l *Logger) RecordBatch(ctx context.Context, projectID string, items []Item
 	}
 	for _, it := range items {
 		if it.Entry.Outcome == OutcomeRefused {
-			l.countRefusal(projectID)
+			l.countRefusal(projectID, it.Entry.Detail)
 		}
 	}
 	items = items[:l.allowN(projectID, len(items))]
@@ -261,26 +340,34 @@ func (l *Logger) allowN(projectID string, n int) int {
 // countRefusal tracks refused statements per project and calls OnRefusals
 // once per window when the threshold is reached. Counted before the write
 // budget, so dropped entries still count.
-func (l *Logger) countRefusal(projectID string) {
+func (l *Logger) countRefusal(projectID, detail string) {
 	l.mu.Lock()
 	w := l.refusals[projectID]
 	now := time.Now()
 	if w == nil || now.Sub(w.start) > RefusalAlertWindow {
-		w = &refusalWindow{start: now}
+		w = &refusalWindow{start: now, reasons: map[string]int{}}
 		l.refusals[projectID] = w
 	}
 	w.count++
+	reason := alertReason(detail)
+	if _, seen := w.reasons[reason]; seen || len(w.reasons) < maxTrackedReasons {
+		w.reasons[reason]++
+	}
 	fire := !w.alerted && w.count >= RefusalAlertThreshold
 	if fire {
 		w.alerted = true
 	}
 	count := w.count
+	var reasons []string
+	if fire {
+		reasons = topReasons(w.reasons)
+	}
 	hook := l.OnRefusals
 	l.mu.Unlock()
 	if fire {
 		slog.Warn("sql log: many refused statements", "project_id", projectID, "count", count, "window", RefusalAlertWindow.String())
 		if hook != nil {
-			go hook(projectID, count)
+			go hook(projectID, count, reasons)
 		}
 	}
 }

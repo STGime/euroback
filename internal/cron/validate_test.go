@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -105,5 +106,14 @@ func TestValidateCronRPCName(t *testing.T) {
 		if err := validateCronRPCName(n); err == nil {
 			t.Errorf("validateCronRPCName(%q) returned nil, want error", n)
 		}
+	}
+}
+
+// Cron SQL is developer-written: a refused catalog read names the tool to
+// use instead, like the SQL editor.
+func TestValidateCronSQLAction_CatalogHint(t *testing.T) {
+	err := validateCronSQLAction("SELECT proname FROM pg_proc", "tenant_x")
+	if err == nil || !strings.Contains(err.Error(), "Hint:") || !strings.Contains(err.Error(), "getDbFunction") {
+		t.Errorf("want a hint naming getDbFunction, got %v", err)
 	}
 }

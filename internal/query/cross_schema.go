@@ -95,7 +95,8 @@ func ValidateNoCrossSchemaRefsOpts(sql, allowedSchema string, opts CrossSchemaOp
 			}
 		}
 		if schemaIsForbidden(schema) {
-			return fmt.Errorf("references to schema %q are not allowed (only the caller's tenant schema is in scope)", idents[i].value)
+			return fmt.Errorf("references to schema %q are not allowed (only the caller's tenant schema is in scope)%s",
+				idents[i].value, hintSuffix(catalogRefHint(schema, idents[i+2].value)))
 		}
 	}
 	return nil
@@ -243,7 +244,8 @@ func ValidateNoCatalogRefs(sql string) error {
 		if catalogAllowedNames[name] {
 			continue
 		}
-		return fmt.Errorf("references to PostgreSQL system catalog objects (%q) are not allowed", tok.value)
+		return fmt.Errorf("references to PostgreSQL system catalog objects (%q) are not allowed%s",
+			tok.value, hintSuffix(catalogRefHint("", name)))
 	}
 	return nil
 }

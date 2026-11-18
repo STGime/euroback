@@ -234,6 +234,11 @@ func handleSQLInternal(engine *QueryEngine, forceReadOnly bool) http.HandlerFunc
 			}
 		}
 		refuse := func(msg string) {
+			if forceReadOnly {
+				// SDK callers are app users, not the developer: the hint
+				// names console / MCP tools that are no use to them.
+				msg = withoutHint(msg)
+			}
 			logSQL(sqllog.OutcomeRefused, msg, nil, nil)
 			jsonError(w, msg, http.StatusBadRequest)
 		}
