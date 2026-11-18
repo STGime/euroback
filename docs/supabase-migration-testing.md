@@ -124,28 +124,58 @@ eurobase import supabase schema --output ./migrations/1000_from_supabase.sql
 
 ### 3.1 Assertions
 
-- [ ] Exits 0. Migration file lands where expected.
+`schema` dumps the `public` schema only (Supabase's `storage` schema is
+not copied) and also reads the `anon` / `authenticated` privileges from
+the source.
+
+- [ ] If the source has access changes (GRANT / REVOKE restrictions,
+      `current_user` / `current_setting('role')` / `request.jwt.*`
+      checks, policies / triggers / views / defaults calling a former
+      SECURITY DEFINER function, a policy or trigger that had to be
+      left out), the command lists them, exits non-zero and writes
+      **no file**. With `--accept-access-changes` it writes the file
+      and lists them in its header.
+- [ ] Otherwise exits 0. Migration file lands where expected.
 - [ ] Stderr shows a "translator warnings" list only for genuine
-      unknowns (e.g. `auth.jwt()`, custom-schema references).
-- [ ] Every `CREATE TABLE public.<t>` becomes `CREATE TABLE <t>` (no
-      `public.` qualifier on the object).
+      unknowns (e.g. `auth.jwt()`, custom-schema references) and for
+      what was changed (SECURITY DEFINER removed, views switched to
+      `security_invoker`, objects commented out).
+- [ ] No `public.` qualifier is left except on the platform helpers
+      (`public.is_service_role()`, `public.current_end_user_id()`),
+      including in function bodies and `nextval('…'::regclass)`.
 - [ ] Every `REFERENCES auth.users(id)` becomes `REFERENCES users(id)`.
-- [ ] Every `auth.uid()` becomes `auth_uid()`.
-- [ ] Every `auth.role()` becomes the `CASE WHEN public.is_service_role() …`
-      block.
+- [ ] Every `auth.uid()` becomes `auth_uid()`, in function bodies too.
+- [ ] Every `auth.role()` becomes a `CASE` that returns
+      `'service_role'`, `'anon'` (no signed-in user) or `'authenticated'`.
+- [ ] `TO anon` / `TO authenticated` / `TO service_role` are gone:
+      each became an `auth_uid()` condition in the policy body
+      (`NOT (…) OR (…)` for `AS RESTRICTIVE`).
 - [ ] Every CREATE POLICY body is wrapped in
-      `public.is_service_role() OR (…)`. Count the wraps: should be
-      one per policy clause (USING + WITH CHECK count separately).
-- [ ] The preamble `SET statement_timeout`, `SET client_encoding`,
-      `SET search_path`, etc. are all **stripped**.
+      `public.is_service_role() OR (…)`. Count the wraps: one per
+      policy clause (USING + WITH CHECK count separately).
+- [ ] A table with RLS on and no policies gets an
+      `eurobase_service_role` policy at the end of the file.
+- [ ] The preamble (`SET statement_timeout`, `SET search_path`,
+      `set_config`, pg_dump 18's `\restrict` lines) is stripped; one
+      `SET LOCAL check_function_bodies = false;` remains.
 - [ ] `CREATE SCHEMA public`, `ALTER SCHEMA public OWNER TO`,
       `COMMENT ON SCHEMA public` — all stripped.
-- [ ] `extensions.uuid_generate_v4()` becomes `public.uuid_generate_v4()`;
-      `extensions.gen_random_uuid()` becomes `gen_random_uuid()`.
-- [ ] Rerun idempotence: run `eurobase import supabase schema` a
-      second time against the same input; policies must NOT double-
-      wrap (`public.is_service_role() OR (public.is_service_role() OR …`
+- [ ] No `SECURITY DEFINER` is left outside comments; views carry
+      `security_invoker='true'`.
+- [ ] `uuid_generate_v4()` in any spelling becomes `gen_random_uuid()`;
+      `extensions.moddatetime(…)` triggers call `eurobase_moddatetime(…)`,
+      defined at the top of the file.
+- [ ] Extensions, Realtime publications, materialized views (and what
+      depends on them) are commented out with a reason.
+- [ ] Rerun idempotence: feed the output back through the translator;
+      policies must NOT double-wrap
+      (`public.is_service_role() OR (public.is_service_role() OR …`
       would be the regression).
+
+Automated: `go test ./internal/cli/` (rule tests + a pg_dump 18 sample
+through the server's validator) and, with `ASSESS_SCRATCH_DB_URL` set
+to a throwaway Postgres 16, `TestSchemaImport_Fixture` (real pg_dump,
+apply into a project-like schema, policies checked as a non-owner role).
 
 ### 3.2 Apply the file
 

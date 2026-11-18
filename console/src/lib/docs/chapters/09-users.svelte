@@ -88,7 +88,7 @@ curl -X DELETE "$API/$USER_ID" -H "$AUTH"</pre>
 # &rarr; {'{'}"created": 2, "exists": 0, "invalid": 0, "results": [{'{'}"index": 0, "email": "ann@example.com", "status": "created", "id": "&hellip;"{'}'}, &hellip;]{'}'}</pre>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					Coming from Supabase, the migration CLI's <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">import supabase</code> (in the next CLI release) does this for you, OAuth identities included.
+					Coming from Supabase, the migration CLI's <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">import supabase data</code> does this for you, OAuth identities included.
 				</p>
 
 				<div class="rounded-lg border border-eurobase-200 bg-eurobase-50/50 px-4 py-3 flex gap-3">
