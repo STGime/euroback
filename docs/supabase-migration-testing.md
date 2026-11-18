@@ -234,8 +234,11 @@ by its sequence positions. Apply all of them.
 - [ ] `user_identities` holds the OAuth links only (no `email` /
       `phone` rows), each with an `id`, under Eurobase's provider
       names: `azure` becomes `microsoft`, `linkedin_oidc` becomes
-      `linkedin`. Links for a provider Eurobase doesn't offer are left
-      out and listed.
+      `linkedin`. A Microsoft link is written with the object id
+      (`oid`) from Supabase's `identity_data`, which is what Eurobase
+      knows a Microsoft user by; without one the link is left out.
+      Links for a provider Eurobase doesn't offer are left out too.
+      Both are listed.
 - [ ] Values are plain quoted literals without casts (`'1234.5678'`,
       `'NaN'`, `'{a,b}'`), `NULL` for nulls.
 - [ ] A table with a `GENERATED ALWAYS AS IDENTITY` column is inserted
@@ -271,9 +274,10 @@ by its sequence positions. Apply all of them.
       their **original password**.
 - [ ] A user with an OAuth link: their next sign-in with that provider
       lands on the existing `users` row. The project must use the same
-      OAuth app (client ID) as on Supabase: Microsoft and Apple give a
-      user a different id per app. Tested so far with Google and
-      GitHub ids only.
+      OAuth app (client ID) as on Supabase. Check one sign-in per
+      provider: only Google and GitHub ids have been tested, and
+      whether a Microsoft link carries an `oid` depends on what
+      Supabase stored.
 - [ ] A user whose ban on Supabase had run out can sign in; a user
       with a running ban can't.
 - [ ] An RLS policy from step 2 gates rows correctly — a user only

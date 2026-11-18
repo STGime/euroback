@@ -65,8 +65,8 @@ func TestDataImport_Fixture(t *testing.T) {
 	}
 	// 5 of 7: not the deleted user, not the SSO user. 3 links: not the
 	// "email" identity, not the deleted user's, not the Discord one.
-	if nUsers != 5 || nLinks != 3 || nTables != 5 {
-		t.Errorf("users=%d links=%d tables=%d, want 5 / 3 / 5", nUsers, nLinks, nTables)
+	if nUsers != 5 || nLinks != 3 || nTables != 8 {
+		t.Errorf("users=%d links=%d tables=%d, want 5 / 3 / 8", nUsers, nLinks, nTables)
 	}
 	notes := strings.Join(append(authNotes, rowNotes...), "\n")
 	for _, want := range []string{"1 user(s) deleted", "1 SSO user(s)", "neither email nor phone", "banned until a date", "triggers are switched off while rows are inserted into: orders", "table tree refers to itself", "discord (1)"} {
@@ -109,7 +109,7 @@ func TestDataImport_Fixture(t *testing.T) {
 	// Every table arrives row for row — including the audit rows (the
 	// insert trigger didn't write a second set) and updated_at (the
 	// touch trigger didn't overwrite it).
-	for _, table := range []string{"categories", "kitchen_sink", "orders", "audit_log", "tree"} {
+	for _, table := range []string{"categories", "kitchen_sink", "orders", "audit_log", "tree", "special_items", "scratch"} {
 		var src, dst string
 		q := `SELECT count(*) || ' rows ' || md5(coalesce(string_agg(x::text, E'\n' ORDER BY x::text), '')) FROM `
 		if err := tx.QueryRow(ctx, q+"public."+table+" x").Scan(&src); err != nil {
@@ -121,6 +121,11 @@ func TestDataImport_Fixture(t *testing.T) {
 		if src != dst || strings.HasPrefix(src, "0 rows") {
 			t.Errorf("%s differs: source %s, imported %s", table, src, dst)
 		}
+	}
+	// A table others inherit from is copied without their rows.
+	var baseOnly int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ONLY tenant_dataimport.base_items`).Scan(&baseOnly); err != nil || baseOnly != 1 {
+		t.Errorf("base_items holds %d own row(s), want 1 (err %v)", baseOnly, err)
 	}
 	// The self-referencing foreign key, dropped for the load, is back.
 	var selfFKDef string
@@ -179,7 +184,7 @@ func TestDataImport_Fixture(t *testing.T) {
 	if err := tx.QueryRow(ctx, `SELECT string_agg(provider || ':' || provider_user_id, ',' ORDER BY provider) FROM user_identities`).Scan(&links); err != nil {
 		t.Fatal(err)
 	}
-	if links != "github:gh-42,google:google-sub-123,microsoft:ms-sub-7" {
+	if links != "github:gh-42,google:google-sub-123,microsoft:ms-oid-7" {
 		t.Errorf("OAuth links: %s", links)
 	}
 }
@@ -215,7 +220,7 @@ INSERT INTO auth.identities (id, provider_id, user_id, identity_data, provider, 
  (gen_random_uuid(), 'google-sub-123', '22222222-2222-2222-2222-222222222222', '{"sub":"google-sub-123"}', 'google', '2025-02-01+00'),
  (gen_random_uuid(), 'gh-42', '22222222-2222-2222-2222-222222222222', NULL, 'github', '2025-02-03+00'),
  (gen_random_uuid(), 'gh-99', '66666666-6666-6666-6666-666666666666', '{}', 'github', '2025-06-01+00'),
- (gen_random_uuid(), 'ms-sub-7', '22222222-2222-2222-2222-222222222222', '{}', 'azure', '2025-02-04+00'),
+ (gen_random_uuid(), 'ms-sub-7', '22222222-2222-2222-2222-222222222222', '{"oid":"ms-oid-7"}', 'azure', '2025-02-04+00'),
  (gen_random_uuid(), 'discord-5', '22222222-2222-2222-2222-222222222222', '{}', 'discord', '2025-02-05+00');
 `
 
@@ -250,6 +255,9 @@ ALTER TABLE orders DISABLE TRIGGER orders_off;
 CREATE TABLE tree (
   id int PRIMARY KEY, parent_id int CONSTRAINT tree_parent_fk REFERENCES tree(id) ON DELETE CASCADE,
   category_id bigint REFERENCES categories(id) DEFERRABLE INITIALLY DEFERRED, touched timestamptz);
+CREATE TABLE base_items (id int PRIMARY KEY, label text);
+CREATE TABLE special_items (extra text) INHERITS (base_items);
+CREATE UNLOGGED TABLE scratch (id serial PRIMARY KEY, v text);
 CREATE FUNCTION touch_tree() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN NEW.touched = clock_timestamp(); RETURN NEW; END $f$;
 CREATE TRIGGER tree_touch BEFORE INSERT ON tree FOR EACH ROW EXECUTE FUNCTION touch_tree();
 `
@@ -276,6 +284,9 @@ UPDATE orders SET updated_at = '2024-01-01+00';
 ALTER TABLE orders ENABLE TRIGGER USER;
 ALTER TABLE orders DISABLE TRIGGER orders_off;
 SELECT nextval('ticket_no'), nextval('ticket_no');
+INSERT INTO base_items VALUES (1, 'base');
+INSERT INTO special_items VALUES (2, 'special', 'x');
+INSERT INTO scratch (v) VALUES ('kept');
 -- More rows than one INSERT holds, each referring to the next one: no
 -- order of statements satisfies the foreign key row by row.
 INSERT INTO tree (id, parent_id, category_id) SELECT g, CASE WHEN g < 2500 THEN g + 1 END, 1 FROM generate_series(1, 2500) g;

@@ -387,7 +387,8 @@ func TestPlanAuthImport(t *testing.T) {
 		{UserID: "alice", Provider: "email", ProviderID: "alice"},
 		{UserID: "oauth", Provider: "google", ProviderID: "sub-1"},
 		{UserID: "gone", Provider: "github", ProviderID: "gh-1"},
-		{UserID: "oauth", Provider: "azure", ProviderID: "ms-1", ID: "0b0e7c5e-7a3c-4c57-9a52-2f1b1d0f5a11"},
+		{UserID: "oauth", Provider: "azure", ProviderID: "ms-sub", ID: "0b0e7c5e-7a3c-4c57-9a52-2f1b1d0f5a11", IdentityData: `{"custom_claims":{"oid":"ms-oid"}}`},
+		{UserID: "oauth", Provider: "azure", ProviderID: "ms-sub-2", IdentityData: `{"sub":"ms-sub-2"}`},
 		{UserID: "oauth", Provider: "linkedin_oidc", ProviderID: "li-1"},
 		{UserID: "oauth", Provider: "discord", ProviderID: "d-1"},
 	}
@@ -414,13 +415,13 @@ func TestPlanAuthImport(t *testing.T) {
 		}
 		got = append(got, l.Provider+":"+l.ProviderUserID)
 	}
-	if strings.Join(got, ",") != "google:sub-1,microsoft:ms-1,linkedin:li-1" {
+	if strings.Join(got, ",") != "google:sub-1,microsoft:ms-oid,linkedin:li-1" {
 		t.Errorf("imported links = %v", got)
 	}
 	if plan.identities[1].ID != "0b0e7c5e-7a3c-4c57-9a52-2f1b1d0f5a11" {
 		t.Errorf("a uuid id from Supabase should be kept, got %s", plan.identities[1].ID)
 	}
-	if n := strings.Join(plan.notes, "\n"); !strings.Contains(n, "discord (1)") || !strings.Contains(n, "3 OAuth link(s) imported") {
+	if n := strings.Join(plan.notes, "\n"); !strings.Contains(n, "discord (1)") || !strings.Contains(n, "3 OAuth link(s) imported") || !strings.Contains(n, "1 Microsoft link(s) are not imported") {
 		t.Errorf("notes lack the provider notes:\n%s", n)
 	}
 	notes := strings.Join(plan.notes, "\n")

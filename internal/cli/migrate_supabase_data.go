@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 )
 
@@ -321,7 +320,7 @@ func listPublicTables(ctx context.Context, q sourceQuerier) ([]tableRef, error) 
 		 WHERE n.nspname = 'public'
 		   AND c.relkind = 'r'
 		   AND c.relname NOT LIKE 'pg\_%'
-		   AND c.relpersistence = 'p'
+		   AND c.relpersistence IN ('p', 'u')
 		 ORDER BY c.relname
 	`)
 	if err != nil {
@@ -747,14 +746,17 @@ func emitAuthData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, n
 	if err != nil {
 		return 0, 0, nil, fmt.Errorf("read auth.users: %w", err)
 	}
-	identities, idNotes, err := readAuthIdentities(ctx, q)
+	// Looked up first: a failed query would end the snapshot.
+	identityCols, err := authColumnPresent(ctx, q, "identities")
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
-			return 0, 0, nil, fmt.Errorf("read auth.identities: %w", err)
-		}
-		idNotes = append(idNotes, "auth.identities not found on source — OAuth links skipped")
-		identities = nil
+		return 0, 0, nil, fmt.Errorf("read auth.identities: %w", err)
+	}
+	var identities []supabaseIdentity
+	var idNotes []string
+	if !identityCols["provider_id"] {
+		idNotes = append(idNotes, "auth.identities has no provider_id column (or doesn't exist) on the source — OAuth links are not imported")
+	} else if identities, idNotes, err = readAuthIdentities(ctx, q); err != nil {
+		return 0, 0, nil, fmt.Errorf("read auth.identities: %w", err)
 	}
 	plan, err := planAuthImport(users, identities, now)
 	if err != nil {

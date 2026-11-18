@@ -548,6 +548,7 @@ func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now tim
 
 	var orphanLinks int
 	unsupported := map[string]int{}
+	msNoOID := 0
 	for _, i := range identities {
 		// Supabase also keeps an "identity" for email and phone
 		// sign-in; on Eurobase those are the user row itself.
@@ -562,6 +563,16 @@ func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now tim
 		if !ok {
 			unsupported[i.Provider]++
 			continue
+		}
+		if i.Provider == "azure" {
+			// Eurobase knows a Microsoft user by the directory object id
+			// ("oid"); Supabase's provider id is the per-app subject.
+			oid := microsoftObjectID(i.IdentityData)
+			if oid == "" {
+				msNoOID++
+				continue
+			}
+			i.ProviderID = oid
 		}
 		i.Provider = provider
 		plan.identities = append(plan.identities, translateAuthIdentity(i))
@@ -587,8 +598,9 @@ func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now tim
 		sort.Strings(parts)
 		plan.notes = append(plan.notes, fmt.Sprintf("OAuth links for providers Eurobase doesn't offer are not imported: %s — these users sign in with a magic link or \"forgot password\" on their email address", strings.Join(parts, ", ")))
 	}
+	add(msNoOID, "%d Microsoft link(s) are not imported: Supabase stored no object id (\"oid\") for them, which is what Eurobase knows a Microsoft user by — these users sign in with a magic link or \"forgot password\" on their email address")
 	if len(plan.identities) > 0 {
-		plan.notes = append(plan.notes, fmt.Sprintf("%d OAuth link(s) imported: set each provider up in the project with the same OAuth app (client ID) as on Supabase — Microsoft and Apple give a user a different id per app, so with a new app those users aren't recognised", len(plan.identities)))
+		plan.notes = append(plan.notes, fmt.Sprintf("%d OAuth link(s) imported: set each provider up in the project with the same OAuth app (client ID) as on Supabase — Apple gives a user a different id per developer team. Try one sign-in per provider before you switch your app over", len(plan.identities)))
 	}
 	return plan, nil
 }
@@ -603,6 +615,25 @@ var eurobaseProviderFor = map[string]string{
 	"apple":         "apple",
 	"azure":         "microsoft",
 	"linkedin_oidc": "linkedin",
+}
+
+// microsoftObjectID returns the "oid" claim from a Supabase azure
+// identity's identity_data, at the top level or under custom_claims, or
+// "" when Supabase didn't keep it.
+func microsoftObjectID(identityData string) string {
+	data, ok := parseJSONObject(identityData)
+	if !ok {
+		return ""
+	}
+	if oid, _ := data["oid"].(string); oid != "" {
+		return oid
+	}
+	if claims, _ := data["custom_claims"].(map[string]interface{}); claims != nil {
+		if oid, _ := claims["oid"].(string); oid != "" {
+			return oid
+		}
+	}
+	return ""
 }
 
 // translateAuthIdentity maps one Supabase auth.identities row to a
