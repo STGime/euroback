@@ -39,6 +39,7 @@ package cli
 //      the statement).
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -98,6 +99,13 @@ func Translate(input string) translationResult {
 
 	// ── Pass 2: statement-level (policies, functions, views) ──
 	final := translateStatements(pass1, &res)
+
+	// Supabase's service_role bypasses RLS, so a table with RLS on and
+	// no policies is closed to app users but open to the service key.
+	// On Eurobase the service key is subject to policies too — give
+	// such tables a service-key-only policy so server code keeps
+	// working. App users stay locked out, as before.
+	final += serviceOnlyPolicies(final, &res)
 
 	// Sequence defaults: pg_dump writes nextval('public.t_id_seq'::regclass);
 	// the name is in a string literal, which Pass 1 deliberately leaves
@@ -799,3 +807,35 @@ var (
 	// if it's a schema Supabase-only tenants would rely on.
 	reCustomSchemaRef = regexp.MustCompile(`\b(?:graphql|graphql_public|realtime|vault|net|cron|supabase_functions|_supabase|pgmq_public|private)\.\w+`)
 )
+
+var (
+	reEnableRLS    = regexp.MustCompile(`(?im)^ALTER\s+TABLE\s+(?:ONLY\s+)?("(?:[^"]|"")*"|\S+)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\s*;`)
+	rePolicyOnLine = regexp.MustCompile(`(?im)^CREATE\s+POLICY\s+(?:"(?:[^"]|"")*"|\S+)\s+ON\s+("(?:[^"]|"")*"|[^\s;]+)`)
+)
+
+// serviceOnlyPolicies returns policies for the tables in sql that
+// enable RLS but have no policy (matched at line starts, so commented-out
+// statements don't count).
+func serviceOnlyPolicies(sql string, res *translationResult) string {
+	withPolicy := map[string]bool{}
+	for _, m := range rePolicyOnLine.FindAllStringSubmatch(sql, -1) {
+		withPolicy[normalizeName(m[1])] = true
+	}
+	var b strings.Builder
+	seen := map[string]bool{}
+	for _, m := range reEnableRLS.FindAllStringSubmatch(sql, -1) {
+		name := normalizeName(m[1])
+		if withPolicy[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if b.Len() == 0 {
+			b.WriteString("\n-- eurobase: tables with RLS on and no policies were reachable only with Supabase's\n" +
+				"-- service_role key (it bypasses RLS). On Eurobase the service key follows policies too,\n" +
+				"-- so these policies keep it working. App users stay locked out.\n")
+		}
+		fmt.Fprintf(&b, "CREATE POLICY eurobase_service_role ON %s USING (public.is_service_role()) WITH CHECK (public.is_service_role());\n", m[1])
+		res.rewrites["add:service-key-only policy (RLS on, no policies)"]++
+	}
+	return b.String()
+}

@@ -621,6 +621,7 @@ func TestSchemaImport_Fixture(t *testing.T) {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO notes VALUES (1, 'a0000000-0000-0000-0000-000000000001'), (2, 'b0000000-0000-0000-0000-000000000002');
 		INSERT INTO members_only VALUES (1);
+		INSERT INTO server_only VALUES (1);
 		INSERT INTO posts (user_id) VALUES ('a0000000-0000-0000-0000-000000000001');
 	`); err != nil {
 		t.Fatal(err)
@@ -648,6 +649,9 @@ func TestSchemaImport_Fixture(t *testing.T) {
 		{"anonymous", "", "anon", "members_only", 0},
 		{"owner", "a0000000-0000-0000-0000-000000000001", "", "members_only", 1},
 		{"service key", "", "service", "members_only", 1},
+		{"anonymous", "", "anon", "server_only", 0},
+		{"owner", "a0000000-0000-0000-0000-000000000001", "", "server_only", 0},
+		{"service key", "", "service", "server_only", 1},
 		{"anonymous", "", "anon", "posts", 1},
 		{"other user", "b0000000-0000-0000-0000-000000000002", "", "posts", 1},
 	} {
@@ -705,7 +709,7 @@ DROP MATERIALIZED VIEW IF EXISTS public.post_counts;
 DROP TABLE IF EXISTS public.profiles CASCADE;
 DROP FUNCTION IF EXISTS public.is_admin() CASCADE;
 DROP TYPE IF EXISTS public.user_role;
-DROP TABLE IF EXISTS public.notes, public.members_only CASCADE;
+DROP TABLE IF EXISTS public.notes, public.members_only, public.server_only CASCADE;
 `
 
 // schemaImportFixtureSQL adds what a typical app has on top of
@@ -744,6 +748,10 @@ CREATE POLICY "Members" ON public.members_only FOR SELECT USING (auth.role() = '
 -- Column-level security: anon may read only id and role.
 REVOKE SELECT ON public.profiles FROM anon;
 GRANT SELECT (id, role) ON public.profiles TO anon;
+-- Server-only table: RLS on, no policies, closed to anon / authenticated.
+CREATE TABLE public.server_only (id integer PRIMARY KEY);
+ALTER TABLE public.server_only ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.server_only FROM anon, authenticated;
 CREATE MATERIALIZED VIEW public.post_counts AS SELECT user_id, count(*) AS n FROM public.posts GROUP BY user_id;
 CREATE INDEX post_counts_user_idx ON public.post_counts (user_id);
 `
@@ -1025,5 +1033,32 @@ CREATE POLICY p ON public.posts USING (private.is_org_member(org_id));`)
 	}
 	if !hasWarning(res, "schema other than") {
 		t.Errorf("no private-schema warning: %+v", res.warnings)
+	}
+}
+
+func TestTranslate_ServiceOnlyPolicyForTablesWithoutPolicies(t *testing.T) {
+	in := `CREATE TABLE public.tokens (id integer);
+CREATE TABLE public.posts (id integer);
+CREATE TABLE public."Mixed" (id integer);
+ALTER TABLE public.tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.posts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public."Mixed" ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Read" ON public.posts FOR SELECT USING (true);
+-- ALTER TABLE public.commented ENABLE ROW LEVEL SECURITY;
+`
+	got := Translate(in).sql
+	for _, want := range []string{
+		"CREATE POLICY eurobase_service_role ON tokens USING (public.is_service_role()) WITH CHECK (public.is_service_role());",
+		`CREATE POLICY eurobase_service_role ON "Mixed" USING`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "eurobase_service_role") != 2 {
+		t.Errorf("service policy added to a table that has policies, or to a commented-out one:\n%s", got)
+	}
+	if err := query.ValidateTenantMigrationSQL(got); err != nil {
+		t.Errorf("platform would refuse: %v", err)
 	}
 }

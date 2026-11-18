@@ -87,6 +87,7 @@ By default writes to ./migrations/<epoch>_from_supabase.sql — the
 tenant runs "eurobase migrations up" to apply. Pass --output to change
 the file path or --output - to write to stdout.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			dbURL := os.Getenv("SUPABASE_DB_URL")
 			if dbURL == "" {
 				return fmt.Errorf("SUPABASE_DB_URL is required (postgres:// URL of the Supabase project)")
@@ -177,7 +178,7 @@ the file path or --output - to write to stdout.`,
 				}
 				fmt.Fprintln(errw, "")
 				if !acceptAccess {
-					return fmt.Errorf("%d access change(s) need your review — nothing was written. Fix them on Supabase and rerun, or rerun with --accept-access-changes once you have a plan for each (they're also listed at the top of the migration file)", accessCount)
+					return fmt.Errorf("%d access change(s) need your review — nothing was written. Fix them on Supabase and rerun, or rerun with --accept-access-changes once you have a plan for each (the file then lists them at the top)", accessCount)
 				}
 			}
 

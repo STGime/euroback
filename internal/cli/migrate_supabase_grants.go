@@ -32,7 +32,8 @@ func (g narrowedGrant) String() string {
 
 // readNarrowedGrants returns the public tables, views and functions on
 // which Supabase's anon or authenticated role lacks a privilege. Objects
-// that belong to an extension are skipped. Returns nothing when the
+// that belong to an extension, and tables with RLS on and no policies
+// (closed to API callers either way), are skipped. Returns nothing when the
 // roles don't exist (not a Supabase database).
 func readNarrowedGrants(ctx context.Context, conn *pgx.Conn) ([]narrowedGrant, error) {
 	var out []narrowedGrant
@@ -43,6 +44,9 @@ func readNarrowedGrants(ctx context.Context, conn *pgx.Conn) ([]narrowedGrant, e
 		  SELECT c.oid, c.relname, c.relkind
 		    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		   WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+		     -- RLS on and no policies: closed to API callers on Eurobase
+		     -- too, so missing grants change nothing there.
+		     AND NOT (c.relrowsecurity AND NOT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.polrelid = c.oid))
 		     AND NOT EXISTS (SELECT 1 FROM pg_depend d
 		                      WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 		)
