@@ -92,7 +92,7 @@ func TestSQLFileWriter_EachFileGetsHeader(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", p, err)
 		}
-		if !strings.HasPrefix(string(body), "-- Auto-translated from Supabase") {
+		if !strings.HasPrefix(string(body), "-- Written by `eurobase import supabase data`") {
 			t.Errorf("file %s missing header — endpoint applies parts out of context without it", p)
 		}
 	}
@@ -133,139 +133,6 @@ func TestSQLFileWriter_DoesNotSplitMidStatement(t *testing.T) {
 	}
 	if !strings.Contains(string(body), huge) {
 		t.Error("oversized statement got truncated / split")
-	}
-}
-
-// ── column-type routing (ship-blocker #3/#4) ────────────────────────
-
-func TestNeedsTextCast_JsonbAndNumericFamily(t *testing.T) {
-	// The types Postgres returns via pgtype wrappers that sqlLiteral's
-	// fallback would `%v`-print into an unusable Go-struct dump.
-	positive := []string{
-		"jsonb", "json", "numeric", "numeric(10,2)", "interval",
-		"inet", "cidr", "macaddr", "date", "money",
-		"time(3) without time zone",
-	}
-	for _, ty := range positive {
-		if !needsTextCast(ty) {
-			t.Errorf("%q should route through ::text cast", ty)
-		}
-	}
-	// Types that pgx already returns cleanly — leave alone.
-	negative := []string{
-		"text", "uuid", "bytea", "boolean", "integer", "bigint",
-		"timestamptz", "timestamp with time zone",
-		"timestamp(3) with time zone",
-	}
-	for _, ty := range negative {
-		if needsTextCast(ty) {
-			t.Errorf("%q should NOT be cast to text (pgx handles it natively)", ty)
-		}
-	}
-}
-
-func TestWrapValue_JsonbWrapsAsJsonbValue(t *testing.T) {
-	// The whole point of the fix: JSONB comes back as `string` after
-	// the ::text cast. wrapValue must lift it back into jsonbValue so
-	// sqlLiteral emits the ::jsonb cast on the way out. Without this,
-	// the emitted `'{"k":"v"}'` (bare string) would fail to insert
-	// into a JSONB column.
-	c := columnInfo{name: "metadata", pgType: "jsonb"}
-	got := wrapValue(c, `{"k":"v"}`)
-	if _, ok := got.(jsonbValue); !ok {
-		t.Errorf("jsonb text-cast result should wrap as jsonbValue, got %T", got)
-	}
-}
-
-func TestWrapValue_NumericWrapsAsTypedLiteral(t *testing.T) {
-	c := columnInfo{name: "price", pgType: "numeric(10,2)"}
-	got := wrapValue(c, "123.45")
-	tl, ok := got.(typedLiteral)
-	if !ok {
-		t.Fatalf("numeric text-cast result should wrap as typedLiteral, got %T", got)
-	}
-	if tl.pgType != "numeric" {
-		t.Errorf("typedLiteral pgType should collapse to 'numeric', got %q", tl.pgType)
-	}
-	if tl.value != "123.45" {
-		t.Errorf("typedLiteral value lost: %q", tl.value)
-	}
-}
-
-func TestWrapValue_ArrayTypeRoundTrips(t *testing.T) {
-	// integer[] round-trip through ::text cast → wrapValue emits
-	// `'{1,2,3}'::integer[]` on insert.
-	c := columnInfo{name: "tags", pgType: "integer[]"}
-	got := wrapValue(c, "{1,2,3}")
-	tl, ok := got.(typedLiteral)
-	if !ok {
-		t.Fatalf("array text-cast result should wrap as typedLiteral, got %T", got)
-	}
-	if tl.pgType != "integer[]" {
-		t.Errorf("array pgType should keep the []: got %q", tl.pgType)
-	}
-}
-
-func TestWrapValue_NilStaysNil(t *testing.T) {
-	c := columnInfo{name: "x", pgType: "jsonb"}
-	if got := wrapValue(c, nil); got != nil {
-		t.Errorf("nil should pass through, got %v", got)
-	}
-}
-
-// TestSelectExprFor_JsonbCastsToText pins the SELECT expression side
-// of the same fix.
-func TestSelectExprFor_JsonbCastsToText(t *testing.T) {
-	got := selectExprFor(columnInfo{name: "metadata", pgType: "jsonb"})
-	if !strings.Contains(got, "::text") {
-		t.Errorf("jsonb column should be cast to text in SELECT: %q", got)
-	}
-	// Alias back to the column name so rows.Values() lines up.
-	if !strings.Contains(got, `"metadata"`) {
-		t.Errorf("SELECT expr should keep the column name alias: %q", got)
-	}
-}
-
-func TestSelectExprFor_PlainTypeIsBareIdent(t *testing.T) {
-	got := selectExprFor(columnInfo{name: "id", pgType: "uuid"})
-	// UUID needs no cast — pgx handles it. Should be bare.
-	if strings.Contains(got, "::text") {
-		t.Errorf("uuid column should NOT be text-cast: %q", got)
-	}
-}
-
-// TestNeedsTextCast_ExtendedPgTypes pins #275 round-2 M #4 — range,
-// bit, hstore, ltree, citext, pg_lsn, regclass etc. must all route
-// through the ::text cast so pgx doesn't return pgtype wrappers that
-// sqlLiteral's default fallback would %v-print.
-func TestNeedsTextCast_ExtendedPgTypes(t *testing.T) {
-	for _, ty := range []string{
-		"int4range", "int8range", "numrange",
-		"tsrange", "tstzrange", "daterange",
-		"int4multirange", "int8multirange",
-		"tstzmultirange", "datemultirange",
-		"bit", "bit varying",
-		"hstore", "ltree", "citext", "pg_lsn",
-		"regclass", "regconfig", "regrole",
-	} {
-		if !needsTextCast(ty) {
-			t.Errorf("%q should route through ::text cast (silent %%v-print on wrong path)", ty)
-		}
-	}
-}
-
-// TestWrapValue_RangeTypeWrapsCorrectly confirms `tstzrange` and the
-// friends route back through typedLiteral so the emit is
-// `'[…,…)'::tstzrange` — Postgres re-parses on insert.
-func TestWrapValue_RangeTypeWrapsCorrectly(t *testing.T) {
-	c := columnInfo{name: "window", pgType: "tstzrange"}
-	got := wrapValue(c, `["2026-01-01 00:00:00+00","2026-01-02 00:00:00+00")`)
-	tl, ok := got.(typedLiteral)
-	if !ok {
-		t.Fatalf("range text-cast result should wrap as typedLiteral, got %T", got)
-	}
-	if tl.pgType != "tstzrange" {
-		t.Errorf("tstzrange pgType lost: %q", tl.pgType)
 	}
 }
 

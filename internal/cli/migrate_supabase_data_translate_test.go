@@ -249,9 +249,14 @@ func TestEmitInsertBatch_MultiRowShape(t *testing.T) {
 
 // ── auth translation ────────────────────────────────────────────────
 
+var testNow = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+// A bcrypt hash in the shape Supabase stores (cost 10).
+const testBcryptHash = "$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5BWX4Z1Z3MZ5uG1h1uG1h1uG1h1uG"
+
 func TestTranslateAuthUser_HappyPath(t *testing.T) {
 	email := "alice@example.com"
-	pw := "$2b$12$abcdefghijklmnopqrstuv" // bcrypt-shape
+	pw := testBcryptHash
 	confirmed := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 	updated := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
 	in := supabaseUser{
@@ -263,9 +268,9 @@ func TestTranslateAuthUser_HappyPath(t *testing.T) {
 		CreatedAt:         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		UpdatedAt:         &updated,
 	}
-	got, notes := translateAuthUser(in)
-	if len(notes) != 0 {
-		t.Errorf("unexpected notes on happy path: %v", notes)
+	got, flags := translateAuthUser(in, testNow)
+	if flags != (userFlags{}) {
+		t.Errorf("unexpected flags on happy path: %+v", flags)
 	}
 	if got.ID != in.ID {
 		t.Errorf("UUID not preserved: got %q want %q", got.ID, in.ID)
@@ -281,23 +286,55 @@ func TestTranslateAuthUser_HappyPath(t *testing.T) {
 	}
 }
 
-func TestTranslateAuthUser_NoPasswordEmitsNote(t *testing.T) {
-	email := "oauth@example.com"
-	in := supabaseUser{
-		ID:              "8e6a6b74-5a5f-45d2-9c2f-2d3a5b8e1a1c",
-		Email:           &email,
-		RawUserMetaData: "{}",
-		CreatedAt:       time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
-	_, notes := translateAuthUser(in)
-	found := false
-	for _, n := range notes {
-		if strings.Contains(n, "no password") {
-			found = true
+func TestTranslateAuthUser_Passwords(t *testing.T) {
+	email := "u@example.com"
+	high := "$2a$14$7EqJtq98hPqEX7fNZaFWoOhi5BWX4Z1Z3MZ5uG1h1uG1h1uG1h1uG"
+	notBcrypt := "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
+	empty := ""
+	ok := testBcryptHash
+	for _, c := range []struct {
+		name        string
+		pw          *string
+		kept        bool
+		noPw, dropd bool
+	}{
+		{"bcrypt cost 10", &ok, true, false, false},
+		{"no password", nil, false, true, false},
+		{"empty string", &empty, false, true, false},
+		{"bcrypt cost 14 (sign-in would refuse it)", &high, false, false, true},
+		{"not bcrypt", &notBcrypt, false, false, true},
+	} {
+		got, flags := translateAuthUser(supabaseUser{ID: "u1", Email: &email, EncryptedPassword: c.pw, RawUserMetaData: "{}"}, testNow)
+		if (got.PasswordHash != nil) != c.kept || flags.noPassword != c.noPw || flags.passwordDropped != c.dropd {
+			t.Errorf("%s: hash kept=%v flags=%+v", c.name, got.PasswordHash != nil, flags)
 		}
 	}
-	if !found {
-		t.Errorf("expected 'no password' note; got %v", notes)
+}
+
+func TestTranslateAuthUser_EmailPhoneAndProfile(t *testing.T) {
+	email, phone := "  Alice@Example.ORG ", "4915112345678"
+	got, flags := translateAuthUser(supabaseUser{
+		ID: "u1", Email: &email, Phone: &phone,
+		RawUserMetaData: `{"full_name":"Alice A","picture":"https://x.example/a.png"}`,
+	}, testNow)
+	if got.Email == nil || *got.Email != "alice@example.org" {
+		t.Errorf("email = %v, want lower case and trimmed", got.Email)
+	}
+	if got.Phone == nil || *got.Phone != "+4915112345678" {
+		t.Errorf("phone = %v, want E.164", got.Phone)
+	}
+	if got.DisplayName == nil || *got.DisplayName != "Alice A" || got.AvatarURL == nil || *got.AvatarURL != "https://x.example/a.png" {
+		t.Errorf("display_name / avatar_url not taken from the metadata: %v %v", got.DisplayName, got.AvatarURL)
+	}
+	if flags.noLogin {
+		t.Error("flagged as having no login")
+	}
+	plus := "+33612345678"
+	if got, _ := translateAuthUser(supabaseUser{ID: "u2", Phone: &plus, RawUserMetaData: "{}"}, testNow); *got.Phone != plus {
+		t.Errorf("phone with + changed: %s", *got.Phone)
+	}
+	if _, flags := translateAuthUser(supabaseUser{ID: "u3", RawUserMetaData: "{}"}, testNow); !flags.noLogin {
+		t.Error("a user without email and phone must be flagged")
 	}
 }
 
@@ -314,26 +351,94 @@ func TestTranslateAuthUser_NullMetadataNormalized(t *testing.T) {
 			RawUserMetaData: in,
 			CreatedAt:       time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		}
-		got, _ := translateAuthUser(u)
+		got, _ := translateAuthUser(u, testNow)
 		if got.Metadata != "{}" {
 			t.Errorf("metadata(%q) → %q, want {}", in, got.Metadata)
 		}
 	}
 }
 
-func TestTranslateAuthUser_BannedUntilMapsToBannedAt(t *testing.T) {
+func TestTranslateAuthUser_Bans(t *testing.T) {
 	email := "banned@example.com"
-	banned := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
-	in := supabaseUser{
-		ID:              "8e6a6b74-5a5f-45d2-9c2f-2d3a5b8e1a1c",
-		Email:           &email,
-		BannedUntil:     &banned,
-		RawUserMetaData: "{}",
-		CreatedAt:       time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	future, past := testNow.Add(24*time.Hour), testNow.Add(-24*time.Hour)
+	got, flags := translateAuthUser(supabaseUser{ID: "u1", Email: &email, BannedUntil: &future, RawUserMetaData: "{}"}, testNow)
+	if got.BannedAt == nil || !flags.temporaryBan {
+		t.Errorf("a running ban must carry over: banned_at=%v flags=%+v", got.BannedAt, flags)
 	}
-	got, _ := translateAuthUser(in)
-	if got.BannedAt == nil || !got.BannedAt.Equal(banned) {
-		t.Errorf("banned_until → banned_at mapping broken: %v", got.BannedAt)
+	// A ban that has run out must not lock the user out for good.
+	got, flags = translateAuthUser(supabaseUser{ID: "u1", Email: &email, BannedUntil: &past, RawUserMetaData: "{}"}, testNow)
+	if got.BannedAt != nil || flags.temporaryBan {
+		t.Errorf("an expired ban was imported as a ban: banned_at=%v", got.BannedAt)
+	}
+}
+
+func TestPlanAuthImport(t *testing.T) {
+	s := func(v string) *string { return &v }
+	deleted := testNow.Add(-time.Hour)
+	users := []supabaseUser{
+		{ID: "alice", Email: s("alice@example.org"), EncryptedPassword: s(testBcryptHash), RawUserMetaData: "{}"},
+		{ID: "oauth", Email: s("bob@example.org"), RawUserMetaData: "{}"},
+		{ID: "anon", IsAnonymous: true, RawUserMetaData: "{}"},
+		{ID: "gone", Email: s("gone@example.org"), DeletedAt: &deleted, RawUserMetaData: "{}"},
+		{ID: "sso", Email: s("alice@example.org"), IsSSOUser: true, RawUserMetaData: "{}"},
+	}
+	identities := []supabaseIdentity{
+		{UserID: "alice", Provider: "email", ProviderID: "alice"},
+		{UserID: "oauth", Provider: "google", ProviderID: "sub-1"},
+		{UserID: "gone", Provider: "github", ProviderID: "gh-1"},
+	}
+	plan, err := planAuthImport(users, identities, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, u := range plan.users {
+		ids = append(ids, u.ID)
+	}
+	// The anonymous user is kept (app rows refer to it); the deleted
+	// user and the SSO user (same email as alice) are not.
+	if strings.Join(ids, ",") != "alice,oauth,anon" {
+		t.Errorf("imported users = %v", ids)
+	}
+	// Only the real OAuth link of an imported user.
+	if len(plan.identities) != 1 || plan.identities[0].Provider != "google" {
+		t.Errorf("imported links = %+v", plan.identities)
+	}
+	notes := strings.Join(plan.notes, "\n")
+	for _, want := range []string{"1 user(s) deleted", "1 SSO user(s)", "1 user(s) have neither email nor phone", "1 user(s) have no password", "1 OAuth link(s) belong to users that are not imported"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("notes lack %q:\n%s", want, notes)
+		}
+	}
+}
+
+func TestPlanAuthImport_DuplicateEmailIsAnError(t *testing.T) {
+	a, b := "Same@example.org", "same@example.org"
+	_, err := planAuthImport([]supabaseUser{
+		{ID: "u1", Email: &a, RawUserMetaData: "{}"},
+		{ID: "u2", Email: &b, RawUserMetaData: "{}"},
+	}, nil, testNow)
+	if err == nil || !strings.Contains(err.Error(), "u1") || !strings.Contains(err.Error(), "u2") {
+		t.Errorf("want an error naming both users, got %v", err)
+	}
+}
+
+func TestEmitInsert_OverridingSystemValue(t *testing.T) {
+	var buf strings.Builder
+	emitInsert(&buf, "categories", []string{"id", "name"}, [][]interface{}{{"1", "root"}, {"2", nil}}, true)
+	want := "INSERT INTO \"categories\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE VALUES\n  ('1', 'root'),\n  ('2', NULL);\n"
+	if buf.String() != want {
+		t.Errorf("got:\n%s\nwant:\n%s", buf.String(), want)
+	}
+}
+
+func TestSetvalStatement(t *testing.T) {
+	if got := setvalStatement(sequenceState{name: "orders_id_seq", lastValue: 42, isCalled: true}); got != "SELECT setval('\"orders_id_seq\"', 42, true);\n" {
+		t.Errorf("got %q", got)
+	}
+	// A sequence that was never used hands out its start value next.
+	if got := setvalStatement(sequenceState{name: `odd"name's`, lastValue: 1, isCalled: false}); got != "SELECT setval('\"odd\"\"name''s\"', 1, false);\n" {
+		t.Errorf("got %q", got)
 	}
 }
 
@@ -414,31 +519,6 @@ func TestUserRowAsValues_ColumnOrderMatchesAuthUserColumns(t *testing.T) {
 }
 
 // ── #275 review fixes ────────────────────────────────────────────────
-
-// TestSQLLiteral_TypedLiteralEmitsCast pins ship-blocker #3/#4:
-// numeric / interval / inet columns come across as strings (the CLI
-// casts them to text at SELECT time) and must emit as
-// `'value'::type` so Postgres re-parses on insert. Without this,
-// silent apply-time failure ("column is of type numeric but
-// expression is of type text").
-func TestSQLLiteral_TypedLiteralEmitsCast(t *testing.T) {
-	cases := []struct {
-		v    typedLiteral
-		want string
-	}{
-		{typedLiteral{value: "123.45", pgType: "numeric"}, `'123.45'::numeric`},
-		{typedLiteral{value: "1 day", pgType: "interval"}, `'1 day'::interval`},
-		{typedLiteral{value: "10.0.0.0/24", pgType: "cidr"}, `'10.0.0.0/24'::cidr`},
-		{typedLiteral{value: "{1,2,3}", pgType: "integer[]"}, `'{1,2,3}'::integer[]`},
-		// Hostile value with a `'` — must double-escape.
-		{typedLiteral{value: "it's", pgType: "text"}, `'it''s'::text`},
-	}
-	for _, c := range cases {
-		if got := sqlLiteral(c.v); got != c.want {
-			t.Errorf("sqlLiteral(%+v) = %q, want %q", c.v, got, c.want)
-		}
-	}
-}
 
 // TestMergeUserAndAppMetadata_KeepsUserAtTopLevel pins H #6:
 // raw_app_meta_data used to be silently discarded. Now it nests
@@ -544,7 +624,7 @@ func TestTranslateAuthUser_MergesAppMetadata(t *testing.T) {
 		RawAppMetaData:  `{"provider":"google","providers":["google"]}`,
 		CreatedAt:       time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
-	got, _ := translateAuthUser(in)
+	got, _ := translateAuthUser(in, testNow)
 	if !strings.Contains(got.Metadata, `"display_name":"alice"`) {
 		t.Errorf("user meta discarded: %s", got.Metadata)
 	}

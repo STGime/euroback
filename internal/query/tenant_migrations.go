@@ -427,6 +427,14 @@ func (e *MigrationExecutor) Apply(ctx context.Context, projectID, schemaName str
 	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
 		return false, fmt.Errorf("set statement_timeout: %w", err)
 	}
+	// Service identity, as in the SQL editor on this same login: the
+	// platform-managed tables (users, user_identities, storage_objects)
+	// are under RLS for this role, and a migration that seeds or imports
+	// users needs their service branch. The credential tables stay closed
+	// (no privilege, and their policy doesn't admit the service role).
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.end_user_role', 'service', true)"); err != nil {
+		return false, fmt.Errorf("set service identity: %w", err)
+	}
 	if err := withOwnerRightsGuard(ctx, tx, schemaName, func() error {
 		if _, err := conn.PgConn().Exec(ctx, sqlText).ReadAll(); err != nil {
 			return fmt.Errorf("migration failed: %w", err)

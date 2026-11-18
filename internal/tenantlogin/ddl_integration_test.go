@@ -156,6 +156,19 @@ func TestDDLLoginIntegration(t *testing.T) {
 		t.Errorf("login switched off after a migration: %v %v", canLogin, err)
 	}
 
+	// A migration runs with the service identity (like the SQL editor on
+	// the same login), so it can import users — and still can't reach the
+	// credential tables.
+	if applied, err := exec.Apply(ctx, projectA, schemaA, 3, "users",
+		`INSERT INTO users (id, email) VALUES ('11111111-1111-1111-1111-111111111111', 'imported@example.org');
+		 INSERT INTO user_identities (user_id, provider, provider_user_id) VALUES ('11111111-1111-1111-1111-111111111111', 'google', 'sub-1');`); err != nil || !applied {
+		t.Fatalf("migration importing users: applied=%v err=%v", applied, err)
+	}
+	if _, err := exec.Apply(ctx, projectA, schemaA, 4, "tokens",
+		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ('11111111-1111-1111-1111-111111111111', 'x', now())`); err == nil {
+		t.Error("a migration wrote refresh_tokens")
+	}
+
 	// The keeper never touched tenant B's role.
 	var bLogin bool
 	if err := admin.QueryRow(ctx, `SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, tenantlogin.DDLRole(schemaB)).Scan(&bLogin); err != nil {
