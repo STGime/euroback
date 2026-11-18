@@ -101,6 +101,11 @@ function getCached(key: string): CachedFunction | null {
     codeCache.delete(key);
     return null;
   }
+  // Move to the end so eviction (oldest first) is least-recently-used,
+  // not first-inserted: a project invoking many different functions
+  // shouldn't push out code that other projects keep calling.
+  codeCache.delete(key);
+  codeCache.set(key, entry);
   return entry;
 }
 

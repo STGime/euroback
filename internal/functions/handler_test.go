@@ -3,6 +3,7 @@ package functions
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -50,5 +51,19 @@ func TestWriteGetError_OtherErrorSurfacesAs500(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "decrypt env_vars") {
 		t.Errorf("real error reason missing from response body: %q", w.Body.String())
+	}
+}
+
+func TestHandleCreateUpdate_BodyTooLarge(t *testing.T) {
+	big := `{"name":"f","code":"` + strings.Repeat("a", maxFunctionBody) + `"}`
+	for name, h := range map[string]http.HandlerFunc{
+		"create": HandleCreate(nil, nil),
+		"update": HandleUpdate(nil),
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(big)))
+		if rr.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: want 413, got %d: %s", name, rr.Code, rr.Body.String())
+		}
 	}
 }

@@ -108,14 +108,34 @@ func withholdEnvValues(fn *EdgeFunction) {
 	fn.EnvVars = nil
 }
 
+// maxFunctionBody caps a create / update request body: the function's
+// source plus its env vars. Code and its compiled form are stored per
+// function and per version, so with high per-project function counts the
+// size of each one needs a bound of its own.
+const maxFunctionBody = 10 << 20
+
+// decodeFunctionBody decodes a create / update body, answering 413 when
+// it is over maxFunctionBody. It reports whether decoding succeeded.
+func decodeFunctionBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxFunctionBody)).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(w, "function too large (max 10 MB including env vars)", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // HandleCreate creates a new edge function with plan limit enforcement.
 func HandleCreate(svc *Service, limitsSvc *plans.LimitsService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		projectID := chi.URLParam(r, "id")
 
 		var req CreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeFunctionBody(w, r, &req) {
 			return
 		}
 
@@ -151,8 +171,7 @@ func HandleUpdate(svc *Service) http.HandlerFunc {
 		name := chi.URLParam(r, "name")
 
 		var req UpdateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid request body", http.StatusBadRequest)
+		if !decodeFunctionBody(w, r, &req) {
 			return
 		}
 

@@ -173,12 +173,13 @@ export default handler</pre>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-gray-100">
-							<tr><td class="px-4 py-2 text-gray-700">Functions per project</td><td class="px-4 py-2">3</td><td class="px-4 py-2">25</td></tr>
+							<tr><td class="px-4 py-2 text-gray-700">Functions per project</td><td class="px-4 py-2">3</td><td class="px-4 py-2">500</td></tr>
 							<tr><td class="px-4 py-2 text-gray-700">Execution timeout</td><td class="px-4 py-2">10 seconds</td><td class="px-4 py-2">60 seconds</td></tr>
 							<tr><td class="px-4 py-2 text-gray-700">Memory per execution</td><td class="px-4 py-2">64 MB</td><td class="px-4 py-2">256 MB</td></tr>
 						</tbody>
 					</table>
 				</div>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">Team and Legal Team projects have no limit on the number of functions. A single function (its code plus env vars) can be up to 10 MB.</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Calling your database functions (RPC)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
