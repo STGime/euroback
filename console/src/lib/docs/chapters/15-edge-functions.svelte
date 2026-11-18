@@ -179,7 +179,7 @@ export default handler</pre>
 						</tbody>
 					</table>
 				</div>
-				<p class="text-sm text-gray-700 leading-relaxed mt-2">Team and Legal Team projects have no limit on the number of functions. A single function (its code plus env vars) can be up to 10 MB.</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">Team and Legal Team projects have no limit on the number of functions. A function's code can be up to 1 MB.</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Calling your database functions (RPC)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">

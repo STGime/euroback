@@ -64,6 +64,9 @@ const PORT = parseInt(Deno.env.get("PORT") ?? "8000");
 const MAX_CONCURRENT = parseInt(Deno.env.get("MAX_CONCURRENT_ISOLATES") ?? "50");
 const CODE_CACHE_SIZE = parseInt(Deno.env.get("CODE_CACHE_SIZE") ?? "200");
 const CODE_CACHE_TTL = parseInt(Deno.env.get("CODE_CACHE_TTL_SECONDS") ?? "300") * 1000;
+// Byte budget for cached code (UTF-16 strings: ~2 bytes per char), so
+// the cache stays bounded however large individual functions are.
+const CODE_CACHE_MAX_BYTES = parseInt(Deno.env.get("CODE_CACHE_MAX_BYTES") ?? String(128 * 1024 * 1024));
 
 // HMAC settings — closes GHSA-7428-mvpp-rhr7 layer 3.
 //
@@ -93,29 +96,49 @@ interface CachedFunction {
 }
 
 const codeCache = new Map<string, CachedFunction>();
+let codeCacheBytes = 0;
+
+function entryBytes(fn: CachedFunction): number {
+  let n = fn.code.length * 2;
+  for (const [k, v] of Object.entries(fn.env_vars ?? {})) n += (k.length + v.length) * 2;
+  return n;
+}
+
+function dropCached(key: string): void {
+  const entry = codeCache.get(key);
+  if (!entry) return;
+  codeCache.delete(key);
+  codeCacheBytes -= entryBytes(entry);
+}
 
 function getCached(key: string): CachedFunction | null {
   const entry = codeCache.get(key);
   if (!entry) return null;
   if (Date.now() - entry.cachedAt > CODE_CACHE_TTL) {
-    codeCache.delete(key);
+    dropCached(key);
     return null;
   }
-  // Move to the end so eviction (oldest first) is least-recently-used,
-  // not first-inserted: a project invoking many different functions
-  // shouldn't push out code that other projects keep calling.
+  // Move to the end so eviction (oldest first) is least-recently-used
+  // rather than first-inserted. (A project cycling through more
+  // functions than the cache holds still evicts others; the cache only
+  // saves a database load per invocation.)
   codeCache.delete(key);
   codeCache.set(key, entry);
   return entry;
 }
 
 function setCache(key: string, fn: CachedFunction): void {
-  // Evict oldest if at capacity
-  if (codeCache.size >= CODE_CACHE_SIZE) {
+  dropCached(key);
+  const size = entryBytes(fn);
+  if (size > CODE_CACHE_MAX_BYTES) return; // too big to cache; load on each call
+  // Evict least-recently-used until there's room by count and bytes.
+  while (codeCache.size > 0 && (codeCache.size >= CODE_CACHE_SIZE || codeCacheBytes + size > CODE_CACHE_MAX_BYTES)) {
     const oldest = codeCache.keys().next().value;
-    if (oldest) codeCache.delete(oldest);
+    if (oldest === undefined) break;
+    dropCached(oldest);
   }
   codeCache.set(key, fn);
+  codeCacheBytes += size;
 }
 
 // ── Concurrency limiter ──

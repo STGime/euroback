@@ -1,6 +1,7 @@
 package functions
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -51,6 +52,27 @@ func TestWriteGetError_OtherErrorSurfacesAs500(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "decrypt env_vars") {
 		t.Errorf("real error reason missing from response body: %q", w.Body.String())
+	}
+}
+
+func TestCheckCodeSize(t *testing.T) {
+	if err := checkCodeSize(strings.Repeat("a", MaxCodeBytes)); err != nil {
+		t.Errorf("exactly the limit: %v", err)
+	}
+	if err := checkCodeSize(strings.Repeat("a", MaxCodeBytes+1)); !errors.Is(err, ErrCodeTooLarge) {
+		t.Errorf("over the limit: %v", err)
+	}
+	if fnErrStatus(ErrCodeTooLarge) != http.StatusRequestEntityTooLarge || fnErrStatus(errors.New("x")) != http.StatusBadRequest {
+		t.Error("fnErrStatus mapping")
+	}
+}
+
+// Create refuses oversized code before it reaches esbuild or the database.
+func TestServiceCreate_CodeTooLarge(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.Create(context.Background(), "p", CreateRequest{Name: "f", Code: strings.Repeat("a", MaxCodeBytes+1)})
+	if !errors.Is(err, ErrCodeTooLarge) {
+		t.Fatalf("got %v", err)
 	}
 }
 

@@ -264,6 +264,9 @@ func (s *Service) Create(ctx context.Context, projectID string, req CreateReques
 	if req.Code == "" {
 		return nil, fmt.Errorf("code is required")
 	}
+	if err := checkCodeSize(req.Code); err != nil {
+		return nil, err
+	}
 
 	// TS/ESM source is compiled to runner-executable JS at deploy time
 	// (closes #189). `code` keeps the original source for editing;
@@ -320,6 +323,13 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	// source predates the transpile step and would no longer compile.
 	var compiled *string
 	if req.Code != nil {
+		// The console resends the unchanged source with a status
+		// toggle; only new source is held to the size cap.
+		if *req.Code != existing.Code {
+			if err := checkCodeSize(*req.Code); err != nil {
+				return nil, err
+			}
+		}
 		code = *req.Code
 		c, err := Transpile(code)
 		if err != nil {
