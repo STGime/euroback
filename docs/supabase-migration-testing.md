@@ -214,9 +214,9 @@ eurobase migrations up
 ```
 
 The command reads everything in one read-only snapshot and writes
-nothing to Supabase. Each file holds, in this order: users, OAuth
-links, then each table's rows (parents before children) followed by its
-sequence positions.
+nothing to Supabase. Together the files hold, in this order: users,
+OAuth links, then each table's rows (parents before children) followed
+by its sequence positions. Apply all of them.
 
 ### 4.1 Assertions on emission
 
@@ -232,7 +232,10 @@ sequence positions.
       `raw_app_meta_data` under `_app_metadata`; `display_name` /
       `avatar_url` are filled from the metadata when present.
 - [ ] `user_identities` holds the OAuth links only (no `email` /
-      `phone` rows).
+      `phone` rows), each with an `id`, under Eurobase's provider
+      names: `azure` becomes `microsoft`, `linkedin_oidc` becomes
+      `linkedin`. Links for a provider Eurobase doesn't offer are left
+      out and listed.
 - [ ] Values are plain quoted literals without casts (`'1234.5678'`,
       `'NaN'`, `'{a,b}'`), `NULL` for nulls.
 - [ ] A table with a `GENERATED ALWAYS AS IDENTITY` column is inserted
@@ -241,11 +244,15 @@ sequence positions.
       `SELECT setval(…)`.
 - [ ] A table that has triggers gets `ALTER TABLE … DISABLE TRIGGER
       USER` before and `ENABLE TRIGGER USER` after each INSERT.
+- [ ] A table that refers to itself and needs more than one INSERT:
+      its self-referencing foreign key is dropped before the first
+      INSERT and added back after the last one.
 - [ ] The "Read before applying" list names what was changed or left
       out: deleted users, SSO users, users without email and phone,
       users without a password, passwords that can't be used (not
-      bcrypt, or cost above 12), bans with an end date, tables whose
-      triggers are switched off.
+      bcrypt, or cost above 12), bans with an end date, OAuth links
+      that were left out, tables whose triggers are switched off, rows
+      too large for one file.
 
 ### 4.2 Assertions on apply
 
@@ -262,8 +269,11 @@ sequence positions.
       Supabase is still disabled.
 - [ ] A user from Supabase can sign in on the target project with
       their **original password**.
-- [ ] A user with an OAuth link: their next Google / GitHub sign-in
-      lands on the existing `users` row.
+- [ ] A user with an OAuth link: their next sign-in with that provider
+      lands on the existing `users` row. The project must use the same
+      OAuth app (client ID) as on Supabase: Microsoft and Apple give a
+      user a different id per app. Tested so far with Google and
+      GitHub ids only.
 - [ ] A user whose ban on Supabase had run out can sign in; a user
       with a running ban can't.
 - [ ] An RLS policy from step 2 gates rows correctly — a user only
@@ -280,8 +290,13 @@ the row-for-row comparison.
   quotes or NULLs, composite and domain types.
 - Rows inserted before the users or the parent rows they reference
   (foreign-key error on apply).
-- A foreign-key cycle between tables: should be a **loud error** on
-  emit, not a wrong order.
+- A foreign-key cycle between tables: a **loud error** on emit, not a
+  wrong order. There is no automatic way around it: drop one of the
+  foreign keys in the project, import the tables with `--table`, add
+  it back.
+- A source database with a day-first `DateStyle`: dates must still
+  arrive unchanged.
+- A table others inherit from: its rows must not arrive twice.
 - A batch over 512 KiB on a wide-row table.
 - Refresh tokens or sessions copied (they shouldn't be).
 

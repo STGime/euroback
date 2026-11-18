@@ -167,6 +167,10 @@ func TestDDLLoginIntegration(t *testing.T) {
 	if _, err := exec.Apply(ctx, projectA, schemaA, 4, "tokens",
 		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ('11111111-1111-1111-1111-111111111111', 'x', now())`); err == nil {
 		t.Error("a migration wrote refresh_tokens")
+	} else if !strings.Contains(err.Error(), "42501") {
+		// Only "permission denied" proves the table is closed; any other
+		// error (a wrong column, say) would pass for the wrong reason.
+		t.Errorf("refresh_tokens insert failed, but not with permission denied: %v", err)
 	}
 
 	// The keeper never touched tenant B's role.

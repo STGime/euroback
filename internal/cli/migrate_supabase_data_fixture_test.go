@@ -37,8 +37,14 @@ func TestDataImport_Fixture(t *testing.T) {
 	if _, err := tx.Exec(ctx, dataFixtureAuthSQL); err != nil {
 		t.Fatalf("auth fixture: %v", err)
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO public;"+strings.ReplaceAll(dataFixtureTablesSQL, "%USERS%", "auth.users")+dataFixtureRowsSQL); err != nil {
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO public; SET LOCAL DateStyle = 'SQL, DMY';"+strings.ReplaceAll(dataFixtureTablesSQL, "%USERS%", "auth.users")+dataFixtureRowsSQL); err != nil {
 		t.Fatalf("source tables: %v", err)
+	}
+
+	// As the command does before it reads: without it the day-first
+	// DateStyle above would write dates the target reads wrongly.
+	if _, err := tx.Exec(ctx, pinSourceOutputSQL); err != nil {
+		t.Fatalf("pin output: %v", err)
 	}
 
 	dir := t.TempDir()
@@ -57,13 +63,13 @@ func TestDataImport_Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 5 of 7: not the deleted user, not the SSO user. 2 links: not the
-	// "email" identity, not the deleted user's.
-	if nUsers != 5 || nLinks != 2 || nTables != 4 {
-		t.Errorf("users=%d links=%d tables=%d, want 5 / 2 / 4", nUsers, nLinks, nTables)
+	// 5 of 7: not the deleted user, not the SSO user. 3 links: not the
+	// "email" identity, not the deleted user's, not the Discord one.
+	if nUsers != 5 || nLinks != 3 || nTables != 5 {
+		t.Errorf("users=%d links=%d tables=%d, want 5 / 3 / 5", nUsers, nLinks, nTables)
 	}
 	notes := strings.Join(append(authNotes, rowNotes...), "\n")
-	for _, want := range []string{"1 user(s) deleted", "1 SSO user(s)", "neither email nor phone", "banned until a date", "triggers are switched off while rows are inserted into: orders"} {
+	for _, want := range []string{"1 user(s) deleted", "1 SSO user(s)", "neither email nor phone", "banned until a date", "triggers are switched off while rows are inserted into: orders", "table tree refers to itself", "discord (1)"} {
 		if !strings.Contains(notes, want) {
 			t.Errorf("notes lack %q:\n%s", want, notes)
 		}
@@ -73,13 +79,14 @@ func TestDataImport_Fixture(t *testing.T) {
 	if _, err := tx.Exec(ctx, `
 		CREATE SCHEMA tenant_dataimport;
 		SET LOCAL search_path TO tenant_dataimport;
+		SET LOCAL DateStyle = 'ISO, MDY';
 		CREATE TABLE users (
 			id uuid PRIMARY KEY, email text UNIQUE, phone text, password_hash text, display_name text, avatar_url text,
 			metadata jsonb DEFAULT '{}', provider text DEFAULT 'email', provider_user_id text,
 			email_confirmed_at timestamptz, phone_confirmed_at timestamptz, last_sign_in_at timestamptz,
 			banned_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
 		CREATE TABLE user_identities (
-			id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id),
+			id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id), -- no default: the import must write the id
 			provider text NOT NULL, provider_user_id text NOT NULL, identity_data jsonb DEFAULT '{}',
 			last_sign_in_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(),
 			UNIQUE (provider, provider_user_id));
@@ -102,7 +109,7 @@ func TestDataImport_Fixture(t *testing.T) {
 	// Every table arrives row for row — including the audit rows (the
 	// insert trigger didn't write a second set) and updated_at (the
 	// touch trigger didn't overwrite it).
-	for _, table := range []string{"categories", "kitchen_sink", "orders", "audit_log"} {
+	for _, table := range []string{"categories", "kitchen_sink", "orders", "audit_log", "tree"} {
 		var src, dst string
 		q := `SELECT count(*) || ' rows ' || md5(coalesce(string_agg(x::text, E'\n' ORDER BY x::text), '')) FROM `
 		if err := tx.QueryRow(ctx, q+"public."+table+" x").Scan(&src); err != nil {
@@ -114,6 +121,13 @@ func TestDataImport_Fixture(t *testing.T) {
 		if src != dst || strings.HasPrefix(src, "0 rows") {
 			t.Errorf("%s differs: source %s, imported %s", table, src, dst)
 		}
+	}
+	// The self-referencing foreign key, dropped for the load, is back.
+	var selfFKDef string
+	if err := tx.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'tree_parent_fk' AND conrelid = 'tenant_dataimport.tree'::regclass`).Scan(&selfFKDef); err != nil {
+		t.Errorf("tree_parent_fk is missing after the import: %v", err)
+	} else if !strings.Contains(selfFKDef, "ON DELETE CASCADE") {
+		t.Errorf("tree_parent_fk came back as %q", selfFKDef)
 	}
 	// Sequences stand where they stood, so new rows get new ids.
 	var seqDiff int
@@ -165,7 +179,7 @@ func TestDataImport_Fixture(t *testing.T) {
 	if err := tx.QueryRow(ctx, `SELECT string_agg(provider || ':' || provider_user_id, ',' ORDER BY provider) FROM user_identities`).Scan(&links); err != nil {
 		t.Fatal(err)
 	}
-	if links != "github:gh-42,google:google-sub-123" {
+	if links != "github:gh-42,google:google-sub-123,microsoft:ms-sub-7" {
 		t.Errorf("OAuth links: %s", links)
 	}
 }
@@ -200,7 +214,9 @@ INSERT INTO auth.identities (id, provider_id, user_id, identity_data, provider, 
  (gen_random_uuid(), '11111111-1111-1111-1111-111111111111', '11111111-1111-1111-1111-111111111111', '{}', 'email', '2025-01-01+00'),
  (gen_random_uuid(), 'google-sub-123', '22222222-2222-2222-2222-222222222222', '{"sub":"google-sub-123"}', 'google', '2025-02-01+00'),
  (gen_random_uuid(), 'gh-42', '22222222-2222-2222-2222-222222222222', NULL, 'github', '2025-02-03+00'),
- (gen_random_uuid(), 'gh-99', '66666666-6666-6666-6666-666666666666', '{}', 'github', '2025-06-01+00');
+ (gen_random_uuid(), 'gh-99', '66666666-6666-6666-6666-666666666666', '{}', 'github', '2025-06-01+00'),
+ (gen_random_uuid(), 'ms-sub-7', '22222222-2222-2222-2222-222222222222', '{}', 'azure', '2025-02-04+00'),
+ (gen_random_uuid(), 'discord-5', '22222222-2222-2222-2222-222222222222', '{}', 'discord', '2025-02-05+00');
 `
 
 // dataFixtureTablesSQL is run once as the source (public) and once as
@@ -231,6 +247,11 @@ CREATE TRIGGER orders_audit AFTER INSERT ON orders FOR EACH ROW EXECUTE FUNCTION
 CREATE TRIGGER orders_touch BEFORE INSERT OR UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION touch_updated();
 CREATE TRIGGER orders_off AFTER INSERT ON orders FOR EACH ROW EXECUTE FUNCTION log_order();
 ALTER TABLE orders DISABLE TRIGGER orders_off;
+CREATE TABLE tree (
+  id int PRIMARY KEY, parent_id int CONSTRAINT tree_parent_fk REFERENCES tree(id) ON DELETE CASCADE,
+  category_id bigint REFERENCES categories(id) DEFERRABLE INITIALLY DEFERRED, touched timestamptz);
+CREATE FUNCTION touch_tree() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN NEW.touched = clock_timestamp(); RETURN NEW; END $f$;
+CREATE TRIGGER tree_touch BEFORE INSERT ON tree FOR EACH ROW EXECUTE FUNCTION touch_tree();
 `
 
 // dataFixtureRowsSQL fills the source only.
@@ -255,4 +276,7 @@ UPDATE orders SET updated_at = '2024-01-01+00';
 ALTER TABLE orders ENABLE TRIGGER USER;
 ALTER TABLE orders DISABLE TRIGGER orders_off;
 SELECT nextval('ticket_no'), nextval('ticket_no');
+-- More rows than one INSERT holds, each referring to the next one: no
+-- order of statements satisfies the foreign key row by row.
+INSERT INTO tree (id, parent_id, category_id) SELECT g, CASE WHEN g < 2500 THEN g + 1 END, 1 FROM generate_series(1, 2500) g;
 `

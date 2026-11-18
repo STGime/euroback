@@ -182,15 +182,22 @@ func TestEstimateRowBytes_NoUnderestimateOnRealShapes(t *testing.T) {
 		&tm, &tm, &tm, (*time.Time)(nil), tm, tm,
 	}
 	est := estimateRowBytes(row)
-	// Actually render the row.
-	var buf strings.Builder
-	emitInsertBatch(&buf, "users", authUserColumns, [][]interface{}{row})
-	// The batch emits header + one row + trailing `;`. We're interested
-	// in the row's contribution — the header is at most 300 bytes for
-	// this column list. Estimate must cover row + wrapping.
-	actualForOneRow := buf.Len() - 100 // subtract rough header
+	// What one more row adds to the statement, measured exactly.
+	var one, two strings.Builder
+	emitInsertBatch(&one, "users", authUserColumns, [][]interface{}{row})
+	emitInsertBatch(&two, "users", authUserColumns, [][]interface{}{row, row})
+	actualForOneRow := two.Len() - one.Len()
 	if est < actualForOneRow {
-		t.Errorf("byte estimate underestimated a realistic row: est %d, actual ~%d",
+		t.Errorf("byte estimate underestimated a realistic row: est %d, actual %d",
 			est, actualForOneRow)
+	}
+	// Text that is all quotes doubles in size; the estimate must follow.
+	quotes := []interface{}{strings.Repeat("'", 1000)}
+	one.Reset()
+	two.Reset()
+	emitInsertBatch(&one, "t", []string{"c"}, [][]interface{}{quotes})
+	emitInsertBatch(&two, "t", []string{"c"}, [][]interface{}{quotes, quotes})
+	if est, actual := estimateRowBytes(quotes), two.Len()-one.Len(); est < actual {
+		t.Errorf("quote-heavy row: est %d, actual %d", est, actual)
 	}
 }

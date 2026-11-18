@@ -107,6 +107,9 @@ Flags:
 				return fmt.Errorf("start read-only snapshot: %w", err)
 			}
 			defer tx.Rollback(ctx) //nolint:errcheck
+			if _, err := tx.Exec(ctx, pinSourceOutputSQL); err != nil {
+				return fmt.Errorf("prepare snapshot: %w", err)
+			}
 
 			if err := os.MkdirAll(migrationsDir, 0o755); err != nil {
 				return fmt.Errorf("create %s: %w", migrationsDir, err)
@@ -336,12 +339,34 @@ func listPublicTables(ctx context.Context, q sourceQuerier) ([]tableRef, error) 
 	return out, rows.Err()
 }
 
+// pinSourceOutputSQL fixes how the source writes values as text, so the
+// target reads them the same way whatever the source database or role
+// has configured (a day-first DateStyle would otherwise swap day and
+// month without an error). The search path makes names inside values and
+// constraint definitions come out without a "public." prefix; the
+// project's schema has another name.
+const pinSourceOutputSQL = `
+	SET LOCAL DateStyle = 'ISO, YMD';
+	SET LOCAL IntervalStyle = 'postgres';
+	SET LOCAL bytea_output = 'hex';
+	SET LOCAL extra_float_digits = 1;
+	SET LOCAL search_path = public`
+
+// selfFK is a foreign key from a table to itself.
+type selfFK struct {
+	name string
+	def  string // as pg_get_constraintdef prints it
+}
+
 // listPublicFKEdges returns FK dependencies between public-schema
-// tables (parent → child). Cross-schema references are skipped.
-func listPublicFKEdges(ctx context.Context, q sourceQuerier) ([]fkEdge, error) {
+// tables (parent → child), and each table's foreign keys to itself.
+// Cross-schema references are skipped.
+func listPublicFKEdges(ctx context.Context, q sourceQuerier) ([]fkEdge, map[string][]selfFK, error) {
 	rows, err := q.Query(ctx, `
 		SELECT cl.relname   AS child,
-		       cp.relname   AS parent
+		       cp.relname   AS parent,
+		       con.conname,
+		       pg_get_constraintdef(con.oid)
 		  FROM pg_constraint con
 		  JOIN pg_class cl ON cl.oid = con.conrelid
 		  JOIN pg_class cp ON cp.oid = con.confrelid
@@ -350,20 +375,25 @@ func listPublicFKEdges(ctx context.Context, q sourceQuerier) ([]fkEdge, error) {
 		 WHERE con.contype = 'f'
 		   AND ncl.nspname = 'public'
 		   AND ncp.nspname = 'public'
+		 ORDER BY cl.relname, con.conname
 	`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var edges []fkEdge
+	self := map[string][]selfFK{}
 	for rows.Next() {
-		var child, parent string
-		if err := rows.Scan(&child, &parent); err != nil {
-			return nil, err
+		var child, parent, name, def string
+		if err := rows.Scan(&child, &parent, &name, &def); err != nil {
+			return nil, nil, err
 		}
 		edges = append(edges, fkEdge{from: child, to: parent})
+		if child == parent {
+			self[child] = append(self[child], selfFK{name: name, def: def})
+		}
 	}
-	return edges, rows.Err()
+	return edges, self, rows.Err()
 }
 
 // tableTriggers describes a table's own (non-internal) triggers.
@@ -473,7 +503,7 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 	if err != nil {
 		return 0, nil, fmt.Errorf("list tables: %w", err)
 	}
-	edges, err := listPublicFKEdges(ctx, q)
+	edges, selfFKs, err := listPublicFKEdges(ctx, q)
 	if err != nil {
 		return 0, nil, fmt.Errorf("list FK edges: %w", err)
 	}
@@ -492,6 +522,7 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 
 	var notes []string
 	var paused []string
+	written := map[string]bool{}
 	visited := 0
 	found := tableOnly == ""
 	for _, t := range ordered {
@@ -510,9 +541,16 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 		if len(cols) == 0 {
 			continue
 		}
-		n, err := emitOneTable(ctx, q, writer, t.name, cols, triggers[t.name])
+		n, res, err := emitOneTable(ctx, q, writer, t.name, cols, triggers[t.name], selfFKs[t.name])
 		if err != nil {
 			return visited, notes, fmt.Errorf("emit rows for %s: %w", t.name, err)
+		}
+		written[t.name] = true
+		if res.oversize > 0 {
+			notes = append(notes, fmt.Sprintf("table %s: %d row(s) are larger than one migration file may be (512 KB) — the file that holds them will be refused; delete those rows from the file and copy them another way", t.name, res.oversize))
+		}
+		if res.fkReadded {
+			notes = append(notes, fmt.Sprintf("table %s refers to itself and needs more than one INSERT: its self-referencing foreign key is dropped before the first rows and added back after the last — apply all files", t.name))
 		}
 		if n > 0 && triggers[t.name] != nil && triggers[t.name].enabled > 0 {
 			paused = append(paused, t.name)
@@ -536,12 +574,14 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 	if tableOnly == "" {
 		var standalone strings.Builder
 		for _, st := range sequences {
-			if st.ownerTab == "" {
+			// Also sequences whose table wasn't copied itself, such as
+			// a partitioned table (its rows are in the partitions).
+			if st.ownerTab == "" || (!written[st.ownerTab] && !platformTableNames[st.ownerTab]) {
 				standalone.WriteString(setvalStatement(st))
 			}
 		}
 		if standalone.Len() > 0 {
-			if err := writer.WriteStatement("-- Sequences not owned by a column\n" + standalone.String() + "\n"); err != nil {
+			if err := writer.WriteStatement("-- Other sequences\n" + standalone.String() + "\n"); err != nil {
 				return visited, notes, err
 			}
 		}
@@ -560,7 +600,17 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 // and the only one that round-trips every type (NaN, infinity, JSON
 // null, bit(n), composites, domains, extension types) without a list
 // of special cases.
-func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, table string, cols []columnInfo, trg *tableTriggers) (int64, error) {
+//
+// ONLY: a table that others inherit from would otherwise also return its
+// children's rows, and the children are copied as tables of their own.
+//
+// A table that refers to itself can't be copied in several INSERTs in
+// the order the rows are stored (a row may refer to one in a later
+// statement, or a later file), so when a second INSERT is needed the
+// self-referencing foreign keys are dropped with the first and added
+// back, which checks every row, after the last.
+func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, table string, cols []columnInfo, trg *tableTriggers, selfFKs []selfFK) (int64, tableResult, error) {
+	var res tableResult
 	selectParts := make([]string, len(cols))
 	colNames := make([]string, len(cols))
 	overriding := false
@@ -569,14 +619,14 @@ func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, t
 		colNames[i] = c.name
 		overriding = overriding || c.identityAlways
 	}
-	rows, err := q.Query(ctx, fmt.Sprintf("SELECT %s FROM public.%s", strings.Join(selectParts, ", "), quoteIdent(table)))
+	rows, err := q.Query(ctx, fmt.Sprintf("SELECT %s FROM ONLY public.%s", strings.Join(selectParts, ", "), quoteIdent(table)))
 	if err != nil {
-		return 0, err
+		return 0, res, err
 	}
 	defer rows.Close()
 
-	if err := writer.WriteStatement(fmt.Sprintf("-- Table: %s\n", table)); err != nil {
-		return 0, err
+	if err := writer.WriteStatement(fmt.Sprintf("-- Table: %s\n", commentSafe(table))); err != nil {
+		return 0, res, err
 	}
 
 	// User triggers stay off while a batch is inserted; triggers that
@@ -584,7 +634,9 @@ func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, t
 	var before, after string
 	if trg != nil && trg.enabled > 0 {
 		before = fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER USER;\n", quoteIdent(table))
-		after = fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER USER;\n", quoteIdent(table))
+		// A deferred foreign-key check still waiting would make the
+		// ALTER TABLE fail; run it now.
+		after = fmt.Sprintf("SET CONSTRAINTS ALL IMMEDIATE;\nALTER TABLE %s ENABLE TRIGGER USER;\n", quoteIdent(table))
 		for _, name := range trg.disabled {
 			after += fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER %s;\n", quoteIdent(table), quoteIdent(name))
 		}
@@ -593,11 +645,18 @@ func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, t
 	var batch [][]interface{}
 	var batchBytes int
 	var total int64
-	flushBatch := func() error {
+	dropped := false
+	flushBatch := func(more bool) error {
 		if len(batch) == 0 {
 			return nil
 		}
 		var buf strings.Builder
+		if more && !dropped && len(selfFKs) > 0 {
+			for _, fk := range selfFKs {
+				fmt.Fprintf(&buf, "ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;\n", quoteIdent(table), quoteIdent(fk.name))
+			}
+			dropped = true
+		}
 		buf.WriteString(before)
 		emitInsert(&buf, table, colNames, batch, overriding)
 		buf.WriteString(after)
@@ -615,7 +674,7 @@ func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, t
 			dest[i] = &vals[i]
 		}
 		if err := rows.Scan(dest...); err != nil {
-			return total, err
+			return total, res, err
 		}
 		row := make([]interface{}, len(cols))
 		for i, v := range vals {
@@ -624,12 +683,15 @@ func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, t
 			}
 		}
 		rowBytes := estimateRowBytes(row)
+		if rowBytes > maxPartBytes {
+			res.oversize++
+		}
 		// Flush BEFORE appending if this row would tip the batch over
 		// either ceiling: the byte cap is what the endpoint enforces,
 		// the row cap covers tables of tiny rows.
 		if len(batch) > 0 && (len(batch) >= dataBatchSize || batchBytes+rowBytes > maxBatchBytes) {
-			if err := flushBatch(); err != nil {
-				return total, err
+			if err := flushBatch(true); err != nil {
+				return total, res, err
 			}
 		}
 		batch = append(batch, row)
@@ -637,17 +699,39 @@ func emitOneTable(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, t
 		total++
 	}
 	if err := rows.Err(); err != nil {
-		return total, err
+		return total, res, err
 	}
-	if err := flushBatch(); err != nil {
-		return total, err
+	if err := flushBatch(false); err != nil {
+		return total, res, err
+	}
+	if dropped {
+		var buf strings.Builder
+		buf.WriteString("SET CONSTRAINTS ALL IMMEDIATE;\n")
+		for _, fk := range selfFKs {
+			fmt.Fprintf(&buf, "ALTER TABLE %s ADD CONSTRAINT %s %s;\n", quoteIdent(table), quoteIdent(fk.name), fk.def)
+		}
+		if err := writer.WriteStatement(buf.String()); err != nil {
+			return total, res, err
+		}
+		res.fkReadded = true
 	}
 	if total == 0 {
 		if err := writer.WriteStatement("-- (no rows)\n"); err != nil {
-			return total, err
+			return total, res, err
 		}
 	}
-	return total, nil
+	return total, res, nil
+}
+
+// tableResult is what emitOneTable reports besides the row count.
+type tableResult struct {
+	oversize  int  // rows too large for one migration file
+	fkReadded bool // self-referencing foreign keys dropped and added back
+}
+
+// commentSafe keeps a name on its comment line.
+func commentSafe(name string) string {
+	return strings.NewReplacer("\n", " ", "\r", " ").Replace(name)
 }
 
 // ── auth users ──────────────────────────────────────────────────────
@@ -769,6 +853,11 @@ func readAuthUsers(ctx context.Context, q sourceQuerier) ([]supabaseUser, error)
 		}
 		return fallback
 	}
+	// "infinity" is a valid ban end on Supabase; read it as a far date.
+	bannedUntil := "NULL::timestamptz"
+	if have["banned_until"] {
+		bannedUntil = "CASE WHEN banned_until = 'infinity' THEN '9999-01-01'::timestamptz WHEN banned_until = '-infinity' THEN NULL ELSE banned_until END"
+	}
 	rows, err := q.Query(ctx, fmt.Sprintf(`
 		SELECT id::text, email, encrypted_password,
 		       email_confirmed_at, %s, %s,
@@ -780,7 +869,7 @@ func readAuthUsers(ctx context.Context, q sourceQuerier) ([]supabaseUser, error)
 		  FROM auth.users
 		 ORDER BY created_at, id`,
 		opt("phone", "NULL::text"), opt("phone_confirmed_at", "NULL::timestamptz"),
-		opt("banned_until", "NULL::timestamptz"),
+		bannedUntil,
 		opt("deleted_at", "NULL::timestamptz"), opt("is_anonymous", "false"), opt("is_sso_user", "false")))
 	if err != nil {
 		return nil, err

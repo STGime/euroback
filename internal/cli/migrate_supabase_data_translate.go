@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -60,14 +61,13 @@ func estimateValueBytes(v interface{}) int {
 		// cap given our 350 KiB flush threshold, but not by much).
 		return len(t) + len(t)/4 + 12 // '' + ::jsonb + slack
 	case string:
-		// Assume up to ~25% of chars might be `'` needing doubling
-		// (worst-realistic case for JSON-ish payloads).
-		return len(t) + len(t)/4 + 2
+		// Exact: every `'` is doubled.
+		return len(t) + strings.Count(t, "'") + 2
 	case *string:
 		if t == nil {
 			return 4
 		}
-		return len(*t) + len(*t)/4 + 2
+		return len(*t) + strings.Count(*t, "'") + 2
 	case time.Time:
 		return 45 // RFC3339Nano + ::timestamptz + slack
 	case *time.Time:
@@ -126,9 +126,8 @@ type fkEdge struct {
 // parents (referenced tables) before children (referencing tables).
 // Returns an error listing the cycle members when a real FK cycle is
 // present, because emitting a wrong order would silently apply-time-
-// fail on FK violations. Self-references are tolerated (Postgres
-// accepts them within a single-statement multi-row INSERT if the
-// rows are consistent).
+// fail on FK violations. Self-references don't take part in the order;
+// emitOneTable handles them.
 //
 // Deterministic: given the same inputs, always returns the same
 // order. Sort is stable within an FK level via lexicographic
@@ -188,7 +187,7 @@ func sortTablesByFK(tables []tableRef, edges []fkEdge) ([]tableRef, error) {
 			// Build the sub-graph of unresolved nodes only, then run
 			// Tarjan's SCC on it.
 			cycle := findCycleMembers(indeg, deps, names)
-			return nil, fmt.Errorf("FK cycle among tables %v — resolve on Supabase (DEFERRABLE the constraint or drop one side) and rerun", cycle)
+			return nil, fmt.Errorf("foreign keys form a cycle among tables %v, so no order of tables satisfies them — import these with --table, one at a time, after dropping one of the foreign keys in the project, and add it back afterwards", cycle)
 		}
 		sort.Strings(ready)
 		for _, n := range ready {
@@ -336,7 +335,7 @@ type supabaseUser struct {
 // side table. One user can have many identities (a Google + a GitHub
 // login attached to the same account).
 type supabaseIdentity struct {
-	ID           string     // uuid — Eurobase generates its own, we drop this
+	ID           string     // uuid on current Supabase; kept as the link's id
 	UserID       string     // uuid — preserved so it lines up with users.id
 	Provider     string     // "google" / "github" / …
 	ProviderID   string     // opaque per-provider user identifier
@@ -367,6 +366,7 @@ type eurobaseUserRow struct {
 // eurobaseIdentityRow is what we emit into `user_identities`. Exposed
 // for tests.
 type eurobaseIdentityRow struct {
+	ID             string
 	UserID         string
 	Provider       string
 	ProviderUserID string
@@ -547,6 +547,7 @@ func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now tim
 	}
 
 	var orphanLinks int
+	unsupported := map[string]int{}
 	for _, i := range identities {
 		// Supabase also keeps an "identity" for email and phone
 		// sign-in; on Eurobase those are the user row itself.
@@ -557,6 +558,12 @@ func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now tim
 			orphanLinks++
 			continue
 		}
+		provider, ok := eurobaseProviderFor[i.Provider]
+		if !ok {
+			unsupported[i.Provider]++
+			continue
+		}
+		i.Provider = provider
 		plan.identities = append(plan.identities, translateAuthIdentity(i))
 	}
 
@@ -572,12 +579,42 @@ func planAuthImport(users []supabaseUser, identities []supabaseIdentity, now tim
 	add(pwDropped, "%d user(s) have a password hash Eurobase can't use (not bcrypt, or a cost above 12): imported without a password — they use \"forgot password\"")
 	add(tempBans, "%d user(s) are banned until a date on Supabase: imported as banned, without an end date — lift the ban in the console when it is due")
 	add(orphanLinks, "%d OAuth link(s) belong to users that are not imported; skipped")
+	if len(unsupported) > 0 {
+		var parts []string
+		for name, n := range unsupported {
+			parts = append(parts, fmt.Sprintf("%s (%d)", name, n))
+		}
+		sort.Strings(parts)
+		plan.notes = append(plan.notes, fmt.Sprintf("OAuth links for providers Eurobase doesn't offer are not imported: %s — these users sign in with a magic link or \"forgot password\" on their email address", strings.Join(parts, ", ")))
+	}
+	if len(plan.identities) > 0 {
+		plan.notes = append(plan.notes, fmt.Sprintf("%d OAuth link(s) imported: set each provider up in the project with the same OAuth app (client ID) as on Supabase — Microsoft and Apple give a user a different id per app, so with a new app those users aren't recognised", len(plan.identities)))
+	}
 	return plan, nil
+}
+
+// eurobaseProviderFor maps Supabase's provider names to the names
+// Eurobase's sign-in looks links up by. A provider that isn't listed has
+// no sign-in on Eurobase. Supabase's older "linkedin" provider is left
+// out on purpose: its user ids are not the OpenID Connect ones.
+var eurobaseProviderFor = map[string]string{
+	"google":        "google",
+	"github":        "github",
+	"apple":         "apple",
+	"azure":         "microsoft",
+	"linkedin_oidc": "linkedin",
 }
 
 // translateAuthIdentity maps one Supabase auth.identities row to a
 // Eurobase user_identities row. Pure — no DB access.
 func translateAuthIdentity(i supabaseIdentity) eurobaseIdentityRow {
+	// The id is always written: the column's default is a function the
+	// migration's database role may not be allowed to call. Older
+	// Supabase projects have a text id here; those get a stable uuid.
+	id := i.ID
+	if _, err := uuid.Parse(id); err != nil {
+		id = uuid.NewSHA1(uuid.NameSpaceOID, []byte(i.UserID+"\x00"+i.Provider+"\x00"+i.ProviderID)).String()
+	}
 	// Supabase's identity_data is the profile blob (name, email, avatar,
 	// scopes) — Eurobase's identity_data has the same purpose.
 	data := i.IdentityData
@@ -589,6 +626,7 @@ func translateAuthIdentity(i supabaseIdentity) eurobaseIdentityRow {
 		updatedAt = *i.UpdatedAt
 	}
 	return eurobaseIdentityRow{
+		ID:             id,
 		UserID:         i.UserID,
 		Provider:       i.Provider,
 		ProviderUserID: i.ProviderID,
@@ -735,7 +773,7 @@ var authUserColumns = []string{
 // authIdentityColumns is the fixed column order we emit for the
 // user_identities INSERT.
 var authIdentityColumns = []string{
-	"user_id", "provider", "provider_user_id", "identity_data",
+	"id", "user_id", "provider", "provider_user_id", "identity_data",
 	"last_sign_in_at", "created_at", "updated_at",
 }
 
@@ -766,6 +804,7 @@ func userRowAsValues(u eurobaseUserRow) []interface{} {
 // []interface{} tuple used by emitInsertBatch.
 func identityRowAsValues(i eurobaseIdentityRow) []interface{} {
 	return []interface{}{
+		i.ID,
 		i.UserID,
 		i.Provider,
 		i.ProviderUserID,
