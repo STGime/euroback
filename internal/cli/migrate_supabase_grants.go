@@ -115,4 +115,4 @@ func readNarrowedGrants(ctx context.Context, conn *pgx.Conn) ([]narrowedGrant, e
 }
 
 // grantsNote explains what a narrowed grant means after the import.
-const grantsNote = "Eurobase has no per-role grants: every API request can use every table, column and function of the project, and RLS alone decides which rows. Restrictions made with GRANT / REVOKE are not carried over. Protect these with RLS policies, a security_invoker view that leaves out the columns, or an edge function, before your app goes live on Eurobase."
+const grantsNote = "Eurobase has no per-role grants: every API request can use every table, column and function of the project, and RLS alone decides which rows. Restrictions made with GRANT / REVOKE are not carried over. RLS works on rows, not columns: before your app goes live on Eurobase, close a whole table with policies, move restricted columns into their own table with stricter policies, or serve them through an edge function. A view does not hide columns (callers can read the table it selects from)."
