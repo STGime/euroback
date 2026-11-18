@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 func findItem(t *testing.T, items []item, namePart string) item {
@@ -255,30 +253,8 @@ func TestReadSupabaseCode_Fixture(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := openSupabaseFixture(ctx, t, dsn)
 	defer conn.Close(ctx)
-	// Guard: a real project has Supabase's realtime schema, or users.
-	var looksReal bool
-	if err := conn.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname IN ('realtime', '_realtime', 'supabase_migrations'))
-		    OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('supabase_admin', 'authenticator'))`).Scan(&looksReal); err != nil {
-		t.Fatal(err)
-	}
-	if !looksReal {
-		var n int
-		if err := conn.QueryRow(ctx, `SELECT count(*) FROM auth.users`).Scan(&n); err == nil && n > 1 {
-			looksReal = true
-		}
-	}
-	if looksReal {
-		t.Fatal("ASSESS_SCRATCH_DB_URL points at what looks like a real Supabase project; refusing to drop its schemas")
-	}
-	if _, err := conn.Exec(ctx, supabaseFixtureSQL); err != nil {
-		t.Fatalf("fixture: %v", err)
-	}
 
 	code, err := readSupabaseCode(ctx, conn)
 	if err != nil {
@@ -348,7 +324,10 @@ func TestReadSupabaseCode_Fixture(t *testing.T) {
 const supabaseFixtureSQL = `
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
 END $$;
+-- Like Supabase: new public tables are open to anon / authenticated.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
 DROP EXTENSION IF EXISTS pg_stat_statements;
 DROP SCHEMA IF EXISTS auth, storage, vault, supabase_functions, private, extensions CASCADE;
 DROP VIEW IF EXISTS public.latest_posts, public.safe_posts;
