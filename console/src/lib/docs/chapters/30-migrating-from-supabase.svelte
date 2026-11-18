@@ -11,7 +11,21 @@
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">Can I import my existing users without password resets?</p>
-					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. We use bcrypt in the same format as Supabase, so password hashes import as-is and your users keep their passwords. The importer preserves user UUIDs (so RLS keeps working), email-confirmed status, metadata, and OAuth identities. Without the CLI, the users API's batch import takes the same bcrypt hashes and ids (see below).</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">Yes. We use bcrypt in the same format as Supabase, so password hashes import as-is and your users keep their passwords. The importer keeps user ids (so RLS keeps working), email-confirmed status, metadata, bans that are still running, and OAuth links. The one exception: a hash with a bcrypt cost above 12 is not imported, and that user sets a new password with &ldquo;forgot password&rdquo;. Without the CLI, the users API's batch import takes the same bcrypt hashes and ids (see below).</p>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">How do my users and data come over?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed">With <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase import supabase data</code> (CLI 0.6.5 or later), after the schema migration has been applied, into a project that has no data yet. It reads your Supabase database in one read-only snapshot and writes migration files; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase migrations up</code> applies them. Users come first, then each table's rows, parents before children. Values are copied as they are, sequences continue after the imported ids, and your triggers are off while rows are inserted, so audit rows and timestamps aren't written a second time.</p>
+					<p class="mt-2 text-sm text-gray-700 leading-relaxed">The command lists what it changed or left out. Read that list before you apply:</p>
+					<ul class="mt-1 list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
+						<li>Users deleted on Supabase and SSO users are not imported. Anonymous users are, so their rows stay valid, but they can't sign in again.</li>
+						<li>OAuth links come over for Google, GitHub, Apple, Microsoft and LinkedIn. Set each provider up in the project with the same OAuth app (client ID) as on Supabase, and try one sign-in per provider before you switch your app over. Links for other providers are left out; those users sign in with a magic link or a password reset.</li>
+						<li>Emails are stored in lower case, and phone numbers with a leading <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">+</code>.</li>
+						<li>Sessions and refresh tokens are not copied: every user signs in once on Eurobase.</li>
+						<li>A table whose name a Eurobase project already uses (such as <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">users</code> or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage_objects</code>) is skipped. Rename it in Supabase and in your app first.</li>
+						<li>Foreign keys that form a cycle between two or more tables stop the import. Drop one of them in the project, import those tables with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--table</code>, and add it back.</li>
+					</ul>
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
