@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/cli"
 	"github.com/eurobase/euroback/internal/cron"
 	"github.com/eurobase/euroback/internal/dbprovider"
 	"github.com/eurobase/euroback/internal/events"
@@ -2145,6 +2146,272 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if n := env.dedCount(t, "as_service_ledger", "note = 'service'"); n != 1 {
 			return fmt.Errorf("%d service rows in the project's database, want 1", n)
+		}
+		return nil
+	})
+
+	// A function written for Supabase, built by the CLI with its
+	// compatibility layer and run unchanged: Deno.serve, Deno.env.get from
+	// the Vault, the Authorization header, and createClient() queries as
+	// SQL on the project's database — with the service role key as the
+	// service role, with the anon key as the caller under RLS.
+	check(t, env, "function_supabase_compat", func() error {
+		if !env.runnerOn {
+			t.Skip("no deno (TEAM_TEST_DENO); CI runs this with TEAM_TEST_REQUIRE_RUNNER=1")
+		}
+		ctx := context.Background()
+		if err := env.ensureFuncLogins(ctx); err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`CREATE TABLE compat_items (id serial PRIMARY KEY, owner uuid, sku text UNIQUE, qty int, tags text[], meta jsonb, due timestamptz, note text DEFAULT 'default-note', active boolean DEFAULT true)`,
+			`ALTER TABLE compat_items ENABLE ROW LEVEL SECURITY`,
+			`CREATE POLICY compat_read ON compat_items FOR SELECT USING (public.is_service_role() OR owner = public.current_end_user_id())`,
+			`CREATE POLICY compat_write ON compat_items FOR ALL USING (public.is_service_role()) WITH CHECK (public.is_service_role())`,
+			`INSERT INTO compat_items (owner, sku, qty, active) VALUES (NULL, 'not-mine', 1, false)`,
+			`CREATE FUNCTION compat_total(p_min int) RETURNS int LANGUAGE sql STABLE AS 'SELECT coalesce(sum(qty), 0)::int FROM compat_items WHERE qty >= p_min'`,
+		} {
+			b, _ := json.Marshal(map[string]string{"sql": q})
+			if r := console("POST", "/data/sql", string(b)); r.code != 200 {
+				return fmt.Errorf("setup %q: %w", q, r)
+			}
+		}
+		dir := t.TempDir()
+		fnDir := filepath.Join(dir, "supabase", "functions")
+		if err := os.MkdirAll(filepath.Join(fnDir, "compat"), 0o755); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Join(fnDir, "_shared"), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(fnDir, "_shared", "cors.ts"), []byte("export const corsHeaders = { \"Access-Control-Allow-Origin\": \"*\" };\n"), 0o644); err != nil {
+			return err
+		}
+		source := `import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { corsHeaders } from "../_shared/cors.ts";
+
+// Read at the top of the file, as Supabase functions do.
+const SECRET = Deno.env.get("E2E_CONSOLE_SECRET");
+
+serve(async (req) => {
+  const out: Record<string, unknown> = { secret: SECRET };
+  const admin = createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
+  // A call with nobody signed in (the function is opened for this part).
+  if (new URL(req.url).searchParams.get("mode") === "open") {
+    const anon = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!);
+    const read = await anon.from("compat_items").select("sku");
+    const write = await anon.from("compat_items").insert({ sku: "by-nobody", qty: 1 });
+    const own = await admin.from("compat_items").select("sku").eq("sku", "not-mine");
+    const u = await anon.auth.getUser("made-up-token");
+    return new Response(JSON.stringify({
+      anonRead: read.error ? "refused" : "read " + (read.data ?? []).length,
+      anonWrite: write.error ? "refused" : "written",
+      serviceRead: (own.data ?? []).length,
+      user: u.data.user,
+      hasAuthHeader: req.headers.get("Authorization") !== null,
+      keyGuessed: new URL(req.url).searchParams.get("key") === Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+    }), { headers: { "Content-Type": "application/json" } });
+  }
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return new Response(JSON.stringify({ error: "no auth header" }), { status: 401, headers: corsHeaders });
+  const { data: userData, error: userError } = await admin.auth.getUser(authHeader.replace("Bearer ", ""));
+  if (userError || !userData.user) return new Response(JSON.stringify({ error: "no user" }), { status: 401 });
+  const user = userData.user;
+  out.user = user.id;
+  out.email = user.email;
+
+  const asUser = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: authHeader } } });
+  const denied = await asUser.from("compat_items").insert({ owner: user.id, sku: "by-user", qty: 1 });
+  out.userInsertError = denied.error ? "refused" : "inserted";
+
+  const ins = await admin.from("compat_items")
+    .insert({ owner: user.id, sku: "a-1", qty: 5, tags: ["x", "y z"], meta: { k: [1, { n: null }] }, due: "2026-01-02T03:04:05Z" })
+    .select().single();
+  out.insertError = ins.error?.message ?? null;
+  out.inserted = ins.data;
+
+  await admin.from("compat_items").insert([{ owner: user.id, sku: "b-2", qty: 7 }, { owner: user.id, sku: "c-3", qty: 9, note: "own" }]);
+  const up = await admin.from("compat_items").upsert({ sku: "b-2", qty: 70, owner: user.id }, { onConflict: "sku" }).select("sku, qty").single();
+  out.upserted = up.data;
+  // note is undefined, as a field missing from a request body would be:
+  // the column keeps its value.
+  const upd = await admin.from("compat_items").update({ qty: 6, meta: { changed: true }, note: undefined }).eq("sku", "a-1").select("qty, meta, note");
+  out.updated = upd.data;
+  // Text that arrives for a boolean column, as from a query string.
+  const active = await admin.from("compat_items").select("sku").eq("active", "true").order("sku");
+  out.active = active.data;
+  const others = await admin.from("compat_items").select("sku").not("sku", "in", "(a-1,b-2)").order("sku");
+  out.others = others.data;
+  // A key a caller could send is not the service role key.
+  const forged = await createClient("x", "eurobase-service-role").from("compat_items").insert({ owner: user.id, sku: "forged", qty: 1 });
+  out.forged = forged.error ? "refused" : "inserted";
+  const del = await admin.from("compat_items").delete().eq("sku", "c-3").select("sku");
+  out.deleted = del.data;
+
+  const mine = await asUser.from("compat_items").select("sku, qty").gte("qty", 1).order("qty", { ascending: false }).limit(10);
+  out.mine = mine.data;
+  const all = await admin.from("compat_items").select("sku", { count: "exact" }).in("sku", ["a-1", "b-2", "not-mine"]).order("sku");
+  out.all = all.data;
+  out.count = all.count;
+  const none = await admin.from("compat_items").select("*").eq("sku", "missing").single();
+  out.noneCode = none.error?.code;
+  const maybe = await admin.from("compat_items").select("*").eq("sku", "missing").maybeSingle();
+  out.maybe = maybe.data;
+  const bad = await admin.from("no_such_table").select("*");
+  out.badTable = bad.error ? "error" : "no error";
+  const total = await admin.rpc("compat_total", { p_min: 6 });
+  out.total = total.data;
+  out.totalError = total.error?.message ?? null;
+  return new Response(JSON.stringify(out), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+});
+`
+		entry := filepath.Join(fnDir, "compat", "index.ts")
+		if err := os.WriteFile(entry, []byte(source), 0o644); err != nil {
+			return err
+		}
+		code, err := cli.BundleSupabaseFunction(entry)
+		if err != nil {
+			return fmt.Errorf("bundle: %w", err)
+		}
+		body, _ := json.Marshal(map[string]any{"name": "e2e-compat", "code": code, "verify_jwt": true, "allow_service_role": true})
+		if r := console("POST", "/functions", string(body)); r.code >= 300 {
+			return fmt.Errorf("deploy: %w", r)
+		}
+		defer console("DELETE", "/functions/e2e-compat", "")
+
+		email := "compat@team.test"
+		sdk("POST", "/v1/auth/signup", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+		si := sdk("POST", "/v1/auth/signin", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+		var tok struct {
+			AccessToken string `json:"access_token"`
+			User        struct {
+				ID string `json:"id"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal([]byte(si.body), &tok); err != nil || tok.AccessToken == "" {
+			return fmt.Errorf("sign in: %w", si)
+		}
+		req := httptest.NewRequest("POST", "http://"+env.slug+".eurobase.test/v1/functions/e2e-compat", strings.NewReader(`{}`))
+		req.Header.Set("apikey", env.publicKey)
+		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return fmt.Errorf("invoke: %d %s", rec.Code, rec.Body.String())
+		}
+		var got struct {
+			Secret, User, Email, UserInsertError string
+			InsertError, TotalError              *string
+			Inserted                             struct {
+				ID    int
+				Owner string
+				SKU   string `json:"sku"`
+				Qty   int
+				Tags  []string
+				Meta  json.RawMessage
+				Due   string
+				Note  string
+			}
+			Upserted struct {
+				SKU string `json:"sku"`
+				Qty int
+			}
+			Updated []struct {
+				Qty  int
+				Meta json.RawMessage
+				Note string
+			}
+			Forged                             string
+			Deleted, Mine, All, Active, Others []struct {
+				SKU string `json:"sku"`
+				Qty int
+			}
+			Count    int
+			NoneCode string
+			Maybe    json.RawMessage
+			BadTable string
+			Total    int
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			return fmt.Errorf("response %q: %w", rec.Body.String(), err)
+		}
+		fail := func(what string) error { return fmt.Errorf("%s: %s", what, rec.Body.String()) }
+		skus := func(rows []struct {
+			SKU string `json:"sku"`
+			Qty int
+		}) string {
+			var out []string
+			for _, r := range rows {
+				out = append(out, fmt.Sprintf("%s=%d", r.SKU, r.Qty))
+			}
+			return strings.Join(out, ",")
+		}
+		switch {
+		case got.Secret != "v1":
+			return fail("Deno.env.get at the top of the file should read the Vault secret")
+		case got.User != tok.User.ID || got.Email != email:
+			return fail("auth.getUser should be the caller")
+		case got.UserInsertError != "refused":
+			return fail("the anon-key client must run as the caller (the table's policy refuses the write)")
+		case got.InsertError != nil || got.Inserted.Owner != tok.User.ID || got.Inserted.Qty != 5 || strings.Join(got.Inserted.Tags, "|") != "x|y z" ||
+			string(got.Inserted.Meta) != `{"k":[1,{"n":null}]}` || !strings.HasPrefix(got.Inserted.Due, "2026-01-02T03:04:05") || got.Inserted.Note != "default-note":
+			return fail("insert().select().single() with the service role key: array, jsonb, timestamp and a column default")
+		case got.Upserted.SKU != "b-2" || got.Upserted.Qty != 70:
+			return fail("upsert on the sku column")
+		case len(got.Updated) != 1 || got.Updated[0].Qty != 6 || string(got.Updated[0].Meta) != `{"changed":true}` || got.Updated[0].Note != "default-note":
+			return fail("update().eq().select(), leaving the column whose value was undefined alone")
+		case skus(got.Active) != "a-1=0,b-2=0,c-3=0":
+			return fail(`eq("active", "true") on a boolean column should be the active rows`)
+		case skus(got.Others) != "c-3=0,not-mine=0":
+			return fail(`not("sku", "in", "(a-1,b-2)") should be the other rows`)
+		case got.Forged != "refused":
+			return fail("a client made with a guessed key must run as the caller, not as the service role")
+		case skus(got.Deleted) != "c-3=0":
+			return fail("delete().eq().select()")
+		case skus(got.Mine) != "b-2=70,a-1=6":
+			return fail("the caller's own rows, largest first (not the other owner's row)")
+		case skus(got.All) != "a-1=0,b-2=0,not-mine=0" || got.Count != 3:
+			return fail("service select with in(), order and an exact count")
+		case got.NoneCode != "PGRST116" || string(got.Maybe) != "null" || got.BadTable != "error":
+			return fail("single() on no rows, maybeSingle(), and an unknown table")
+		case got.TotalError != nil || got.Total != 76:
+			return fail("rpc() of a function that returns one value")
+		}
+		if n := env.dedCount(t, "compat_items", "sku IN ('a-1','b-2')"); n != 2 {
+			return fmt.Errorf("%d of the function's rows in the project's database, want 2", n)
+		}
+
+		// Opened to calls without a signed-in user. A Eurobase function's
+		// SQL without a user is the service role, so a client that was not
+		// made with the service role key refuses instead of reading and
+		// writing everything; the service client still works. No
+		// Authorization header is invented, getUser is nobody, and a
+		// caller can't name the service role key.
+		if r := console("PUT", "/functions/e2e-compat", `{"verify_jwt":false}`); r.code >= 300 {
+			return fmt.Errorf("open the function: %w", r)
+		}
+		open := httptest.NewRequest("POST", "http://"+env.slug+".eurobase.test/v1/functions/e2e-compat?mode=open&key=eurobase-service-role", strings.NewReader(`{}`))
+		open.Header.Set("apikey", env.publicKey)
+		open.Header.Set("Content-Type", "application/json")
+		rec = httptest.NewRecorder()
+		env.router.ServeHTTP(rec, open)
+		var anon struct {
+			AnonRead, AnonWrite string
+			ServiceRead         int
+			User                json.RawMessage
+			HasAuthHeader       bool
+			KeyGuessed          bool
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &anon); err != nil || rec.Code != http.StatusOK {
+			return fmt.Errorf("open call: %d %s", rec.Code, rec.Body.String())
+		}
+		if anon.AnonRead != "refused" || anon.AnonWrite != "refused" || anon.ServiceRead != 1 || string(anon.User) != "null" || anon.HasAuthHeader || anon.KeyGuessed {
+			return fmt.Errorf("call without a signed-in user: %s", rec.Body.String())
+		}
+		if n := env.dedCount(t, "compat_items", "sku IN ('by-nobody','forged','by-user')"); n != 0 {
+			return fmt.Errorf("%d rows were written by a client that must not write", n)
 		}
 		return nil
 	})

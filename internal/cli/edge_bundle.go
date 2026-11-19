@@ -67,6 +67,15 @@ type bundleResult struct {
 	Remote []string
 	// Minified is set when the bundle only fits the size cap minified.
 	Minified bool
+	// Compat is "supabase" when the function was built with the Supabase
+	// compatibility layer.
+	Compat string
+	// EnvNames are the settings the function's own files read with
+	// Deno.env.get / process.env, other than Supabase's own.
+	EnvNames []string
+	// UsesServiceRole: the code reads SUPABASE_SERVICE_ROLE_KEY, so its
+	// client runs SQL with the service role.
+	UsesServiceRole bool
 }
 
 // bundleOptions are for the CLI's own callers; the zero value is what a
@@ -75,6 +84,12 @@ type bundleOptions struct {
 	// Virtual maps an import specifier to source code that is bundled in
 	// its place (the CLI's own compatibility modules).
 	Virtual map[string]string
+	// Compat: "supabase" builds the function with the Supabase
+	// compatibility layer (see edge_compat.go); "" builds it as it is.
+	Compat string
+	// loader, when set, is shared by several builds so each remote module
+	// is downloaded once.
+	loader *remoteLoader
 }
 
 // bundleFunction builds the single file to deploy for entryPath.
@@ -93,8 +108,26 @@ func bundleFunction(entryPath string, opts bundleOptions) (*bundleResult, error)
 		absEntry = real
 	}
 	imap := loadImportMap(filepath.Dir(absEntry))
-	// One loader for both builds: the minified retry fetches nothing again.
-	rl := newRemoteLoader()
+	// One loader for every build: a second build fetches nothing again.
+	rl := opts.loader
+	if rl == nil {
+		rl = newRemoteLoader()
+	}
+	compat := opts.Compat == compatSupabase
+	virtual := opts.Virtual
+	if compat {
+		virtual = map[string]string{}
+		for k, v := range opts.Virtual {
+			virtual[k] = v
+		}
+		for k, v := range supabaseCompatModules() {
+			virtual[k] = v
+		}
+	}
+	// The bundle runs inside a function of its own, so nothing it
+	// declares at the top (a helper called "handler", a variable called
+	// "exports") meets the names the runner uses.
+	banner, footer := "(() => {", "})();"
 
 	build := func(minify bool) esbuild.BuildResult {
 		return esbuild.Build(esbuild.BuildOptions{
@@ -114,14 +147,11 @@ func bundleFunction(entryPath string, opts bundleOptions) (*bundleResult, error)
 			LegalComments:    esbuild.LegalCommentsNone,
 			// The server compiles every function as TypeScript, whatever
 			// the file is called; read local files the same way.
-			Loader: map[string]esbuild.Loader{".js": esbuild.LoaderTS, ".mjs": esbuild.LoaderTS, ".cjs": esbuild.LoaderTS},
-			// The bundle runs inside a function of its own, so nothing it
-			// declares at the top (a helper called "handler", a variable
-			// called "exports") meets the names the runner uses.
-			Banner:            map[string]string{"js": "(() => {"},
-			Footer:            map[string]string{"js": "})();"},
+			Loader:            map[string]esbuild.Loader{".js": esbuild.LoaderTS, ".mjs": esbuild.LoaderTS, ".cjs": esbuild.LoaderTS},
+			Banner:            map[string]string{"js": banner},
+			Footer:            map[string]string{"js": footer},
 			ResolveExtensions: []string{".ts", ".tsx", ".mts", ".js", ".mjs", ".jsx", ".json"},
-			Plugins:           []esbuild.Plugin{resolverPlugin(rl, imap, opts.Virtual)},
+			Plugins:           []esbuild.Plugin{resolverPlugin(rl, imap, virtual, compat)},
 		})
 	}
 
@@ -130,7 +160,7 @@ func bundleFunction(entryPath string, opts bundleOptions) (*bundleResult, error)
 		return nil, bundleError(res.Errors)
 	}
 	local, remote := bundleInputs(res.Metafile, filepath.Base(absEntry))
-	if len(local) == 0 && len(remote) == 0 {
+	if !compat && len(local) == 0 && len(remote) == 0 {
 		// Nothing was imported: deploy the developer's own text.
 		return &bundleResult{Code: string(source)}, nil
 	}
@@ -138,10 +168,27 @@ func bundleFunction(entryPath string, opts bundleOptions) (*bundleResult, error)
 		return nil, fmt.Errorf("bundling produced %d files, want 1", len(res.OutputFiles))
 	}
 	out := &bundleResult{Bundled: true, Local: local, Remote: remote}
+	out.EnvNames, out.UsesServiceRole = envNamesRead(string(source), filepath.Dir(absEntry), local)
+	if compat {
+		// Built again inside the wrapper that gives the code what it had
+		// on Supabase; the wrapper needs the names found above.
+		out.Compat = compatSupabase
+		lookup := out.EnvNames
+		if out.UsesServiceRole {
+			// A project may set its own service role key (a shared secret
+			// for a cron caller); the wrapper looks for it like any name.
+			lookup = append(append([]string{}, lookup...), "SUPABASE_SERVICE_ROLE_KEY")
+		}
+		banner, footer = supabaseCompatWrapper(lookup)
+		res = build(false)
+		if len(res.Errors) > 0 {
+			return nil, bundleError(res.Errors)
+		}
+	}
 	code := res.OutputFiles[0].Contents
 	// A handler that is only a top-level `function handler` is found by
 	// the runner in a single file, but not inside a bundle.
-	if text := string(code); !strings.Contains(text, "module.exports") && !strings.Contains(text, "exports.default") && !strings.Contains(text, "globalThis.handler") {
+	if text := string(code); !compat && !strings.Contains(text, "module.exports") && !strings.Contains(text, "exports.default") && !strings.Contains(text, "globalThis.handler") {
 		return nil, errors.New("the function doesn't export its handler — write `export default async (req, ctx) => { … }` (a function with imports needs the export)")
 	}
 	header := bundleHeader(entryPath, len(local)+len(remote))
@@ -274,7 +321,7 @@ func cdnURL(spec string) string {
 // through the plugin.
 type nestedResolve struct{ nested bool }
 
-func resolverPlugin(rl *remoteLoader, imap *importMap, virtual map[string]string) esbuild.Plugin {
+func resolverPlugin(rl *remoteLoader, imap *importMap, virtual map[string]string, compat bool) esbuild.Plugin {
 	return esbuild.Plugin{
 		Name: "eurobase-imports",
 		Setup: func(b esbuild.PluginBuild) {
@@ -312,6 +359,11 @@ func resolverPlugin(rl *remoteLoader, imap *importMap, virtual map[string]string
 			resolveSpec = func(spec string, a esbuild.OnResolveArgs, depth int) (esbuild.OnResolveResult, bool, error) {
 				if _, ok := virtual[spec]; ok {
 					return esbuild.OnResolveResult{Path: spec, Namespace: virtualNamespace}, true, nil
+				}
+				if compat {
+					if alias := supabaseCompatAlias(spec); alias != "" {
+						return esbuild.OnResolveResult{Path: alias, Namespace: virtualNamespace}, true, nil
+					}
 				}
 				switch {
 				case nodeSpecRe.MatchString(spec):

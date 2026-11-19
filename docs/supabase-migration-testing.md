@@ -3,7 +3,7 @@
 Umbrella: [#267]. Sub-issues: [#268] assess, [#269] schema, [#270] data,
 [#271] storage, [#272] functions. All merged. `assess` now enumerates
 storage buckets (from the Postgres `storage` schema) and grades local
-edge functions (via the `functions` translator) — no longer stubbed.
+edge functions (with the `functions` step's check) — no longer stubbed.
 **Not** yet end-to-end validated against a real Supabase project.
 
 Purpose of this document: turn the CLI into a beta feature we're
@@ -94,11 +94,11 @@ eurobase import supabase assess --functions-dir ./supabase/functions
 - [ ] Storage section shows every bucket with `public/private`, an
       object count and total size; a multi-bucket project gets a ⚠
       noting Eurobase's one-bucket-per-project model.
-- [ ] Functions section grades every local edge function: plain ones
-      ✅ "ports cleanly", ones importing `@supabase/supabase-js` in the
-      handler ⚠ "needs a manual rewrite", remote-import/dynamic-env ones
-      ⚠ "ports with N warning(s)". With no `--functions-dir` present it's
-      a single ⚠ skip note.
+- [ ] Functions section grades every local edge function: ✅ "runs as
+      written with the Supabase compatibility layer" (with the service
+      role, open calls and secrets named), or ⚠ with the number of calls
+      that need a change and the first one's file and line. With no
+      `--functions-dir` present it's a single ⚠ skip note.
 - [ ] If you seeded a policy that reads `auth.jwt() -> 'app_metadata'`,
       it's graded ⚠ with a "needs review" note.
 - [ ] If you have `pg_graphql` or another blocklisted extension
@@ -354,10 +354,12 @@ rclone sync --checksum --progress --transfers 8 \
 
 ---
 
-## 6. Step 5 — `functions` (Deno handler port)
+## 6. Step 5 — `functions` (run as written)
 
-**Goal:** rewrite each Supabase edge function to Eurobase's runner
-contract.
+**Goal:** deploy each Supabase edge function to Eurobase without
+rewriting it. `eurobase edge-functions deploy` builds a function written
+for Supabase with a compatibility layer; `import supabase functions`
+checks the whole folder first and can deploy it.
 
 ### 6.1 Preparation
 
@@ -367,53 +369,85 @@ supabase functions download <fn-name>  # for each function you want to migrate
 # now ./supabase/functions/<fn-name>/index.ts exists
 ```
 
-### 6.2 Run the translator
+### 6.2 Check
 
 ```bash
 eurobase import supabase functions
-# reads ./supabase/functions/*
-# writes ./eurobase/functions/*
+# reads ./supabase/functions/* and ../config.toml, changes nothing
 ```
 
-### 6.3 Assertions on the output tree
+- [ ] Every function is listed as `✓ ready` or `✗ needs changes`.
+- [ ] A function that calls `createClient(...)`, `Deno.serve(...)` or
+      `serve(...)` and reads `Deno.env.get(...)` is **ready**.
+- [ ] A function that uses something the layer doesn't have is listed
+      with file and line and what to use instead: `functions.invoke()`,
+      realtime channels, `select()` with an embedded table, `or()`,
+      most `auth.admin` calls, sign-in calls, some storage calls,
+      `Deno` file APIs, a direct database connection.
+- [ ] A function whose imports can't be bundled (a Node-only library)
+      shows the bundler's error.
+- [ ] "service role" is shown for functions that read
+      `SUPABASE_SERVICE_ROLE_KEY`; "no sign-in required" for functions
+      with `verify_jwt = false` in `supabase/config.toml`.
+- [ ] The secrets the functions read are listed once at the end.
 
-- [ ] Each function has an `./eurobase/functions/<name>/index.ts`
-      (or the entrypoint declared in per-function `deno.json`).
-- [ ] `Deno.serve((req) => …)` and `serve((req) => …)` (bare form
-      from the canonical Supabase template) both become
-      `module.exports = async (req, ctx) => …`.
-- [ ] `Deno.env.get('KEY')` becomes `ctx.env.KEY`.
-- [ ] The `import { serve }` line from `deno.land/std/http/server.ts`
-      is commented out.
-- [ ] Functions that call `createClient(SUPABASE_URL, …)` inside the
-      handler are **skipped** (not rewritten). The CLI prints the
-      exact snippet to replace with `ctx.db.sql(…)`.
-- [ ] A function with `return /pattern/.test(req.url)` (regex after
-      `return`) survives byte-for-byte.
-- [ ] A function with `// close ) here` comment inside the handler
-      body survives.
+### 6.3 Secrets
+
+```bash
+eurobase vault set STRIPE_SECRET_KEY <value>   # for each listed name
+```
+
+`Deno.env.get("NAME")` reads the function's own env vars first, then
+the project's Vault.
 
 ### 6.4 Deploy + call
 
-For each ported function:
-
 ```bash
-# On the target Eurobase project:
-eurobase functions deploy <fn-name> --dir ./eurobase/functions/<fn-name>
-curl https://<project-id>.eurobase.app/functions/v1/<fn-name>
+eurobase import supabase functions --deploy
+# or one function:
+eurobase edge-functions deploy <fn-name> --file supabase/functions/<fn-name>/index.ts --allow-service-role
 ```
 
-- [ ] Response matches what Supabase returned for the same input.
-- [ ] Env-var reads (`ctx.env.KEY`) work if you set the same key on
-      the Eurobase project's function env.
+- [ ] Functions that read the service role key are deployed with the
+      allow-service-role setting; `eurobase edge-functions list` shows
+      it.
+- [ ] Called with a signed-in user's token, a function that checks
+      `req.headers.get("Authorization")` and calls
+      `auth.getUser(token)` gets that user.
+- [ ] A client made with the service role key can write a table the
+      user can't; a client made with the anon key is limited by RLS.
+- [ ] A client made with a key the caller sends is not the service
+      role (the service role key is a random value per request unless
+      the project sets one).
+- [ ] In a function open to calls without a signed-in user, an
+      anon-key client's queries are refused when nobody is signed in;
+      the service role key client works.
+- [ ] `.eq("flag", "true")` on a boolean column, `update()` with an
+      `undefined` value, and `.not("id", "in", "(1,2)")` behave as on
+      Supabase.
+- [ ] `insert`, `update`, `upsert`, `delete`, `select` with filters,
+      `single()` / `maybeSingle()`, and `rpc()` return what the same
+      call returned on Supabase (`{ data, error }`).
+- [ ] A secret read at the top of a file (`new Stripe(Deno.env.get(
+      "STRIPE_SECRET_KEY"))`) is there.
+
+`function_supabase_compat` in `TestTeamEndToEnd` runs such a function
+through the real runner and database.
 
 ### 6.5 Bug categories
 
-- Ported function fails to parse at deploy (`syntax error`).
-- Ported function parses but returns 500 (wrong runner contract
-  shape).
-- A `serve(handler)` (bare) call missed because the walker's guard
-  didn't detect the `deno.land/std/http` import.
+- A value that arrives in the wrong type: arrays, jsonb, booleans,
+  timestamps in `insert` / `update` / filters.
+- A call the layer doesn't have that the check didn't flag (it then
+  throws when the function runs, with the call's name).
+- A `select()` string built from request input: a cast must be one type
+  name, and nothing else may become SQL text.
+- A function that trusts a caller because a header equals the service
+  role key.
+- A function that depends on something Supabase-specific outside the
+  client: the project URL, `functions.invoke`, database webhooks.
+- A bundle over the 1 MB code limit.
+- A library that needs Node.js built-ins.
 
 ---
 

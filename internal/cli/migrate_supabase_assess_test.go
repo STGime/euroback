@@ -337,12 +337,15 @@ func TestAssessFunctions_GradesLocalTree(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Clean: plain Deno.serve handler, no remote imports / dynamic env.
+	// Runs as written: Deno.serve, a remote import, the Supabase client
+	// with the service role key and a secret.
 	write("hello", "Deno.serve((req) => new Response(\"hi\"))\n")
-	// Warning: a remote https import the tenant should eyeball.
-	write("with-import", "import { z } from 'https://deno.land/x/zod/mod.ts'\nDeno.serve((req) => new Response(\"ok\"))\n")
-	// Unsupported: in-handler Supabase SDK client → needs manual rewrite.
-	write("sdk", "import { createClient } from '@supabase/supabase-js'\nDeno.serve((req) => { const c = createClient(SUPABASE_URL, KEY); return new Response(\"x\") })\n")
+	write("sdk", "import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'\n"+
+		"Deno.serve(async (req) => { const c = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));\n"+
+		"  const key = Deno.env.get('STRIPE_SECRET_KEY'); await c.from('t').select('*'); return new Response(key) })\n")
+	// Needs a change: a call the compatibility layer doesn't have.
+	write("caller", "import { createClient } from '@supabase/supabase-js'\n"+
+		"Deno.serve(async (req) => { const c = createClient('u', 'k');\n  await c.functions.invoke('other');\n  return new Response(\"x\") })\n")
 	// A shared module (leading underscore) is skipped, not graded.
 	write("_shared", "export const x = 1\n")
 	// A dir with no index.ts is flagged for a manual look.
@@ -359,17 +362,14 @@ func TestAssessFunctions_GradesLocalTree(t *testing.T) {
 	for _, it := range r.functions {
 		byName[it.name] = it
 	}
-	// Grade AND note are asserted: the Unsupported and generic-warnings
-	// branches both emit ⚠, so only the note distinguishes them — a grade-
-	// only check would pass even if the two branches were swapped.
-	if it := byName["function: hello"]; it.grade != gradeOK || !strings.Contains(it.note, "ports cleanly") {
-		t.Errorf("hello: want ✅ ports-cleanly, got %q / %q", it.grade, it.note)
+	if it := byName["function: hello"]; it.grade != gradeOK || !strings.Contains(it.note, "runs as written") {
+		t.Errorf("hello: want ✅ runs as written, got %q / %q", it.grade, it.note)
 	}
-	if it := byName["function: with-import"]; it.grade != gradeWarn || !strings.Contains(it.note, "warning(s)") {
-		t.Errorf("with-import: want ⚠ warnings branch, got %q / %q", it.grade, it.note)
+	if it := byName["function: sdk"]; it.grade != gradeOK || !strings.Contains(it.note, "--allow-service-role") || !strings.Contains(it.note, "STRIPE_SECRET_KEY") {
+		t.Errorf("sdk: want ✅ with the service role and the secret named, got %q / %q", it.grade, it.note)
 	}
-	if it := byName["function: sdk"]; it.grade != gradeWarn || !strings.Contains(it.note, "manual rewrite") {
-		t.Errorf("sdk: want ⚠ unsupported/manual-rewrite branch, got %q / %q", it.grade, it.note)
+	if it := byName["function: caller"]; it.grade != gradeWarn || !strings.Contains(it.note, "caller/index.ts:3 functions.invoke()") {
+		t.Errorf("caller: want ⚠ naming the call and its line, got %q / %q", it.grade, it.note)
 	}
 	if it := byName["function: weird"]; it.grade != gradeWarn || !strings.Contains(it.note, "entry point") {
 		t.Errorf("weird (no index.ts): want ⚠ entry-point note, got %q / %q", it.grade, it.note)

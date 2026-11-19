@@ -1,32 +1,30 @@
 package cli
 
-// #272 (part of #267): `eurobase import supabase functions` — walk a
-// Supabase project's edge-function tree, rewrite each function for
-// Eurobase's runner contract, and write the translated files to an
-// output directory ready to deploy.
+// `eurobase import supabase functions` — check a Supabase project's edge
+// functions against Eurobase and deploy them.
 //
-// Input layout matches Supabase's convention:
+// The functions are not rewritten. `eurobase edge-functions deploy` builds
+// a function written for Supabase with a compatibility layer (see
+// edge_compat.go), so Deno.serve, Deno.env.get, the Authorization header
+// and createClient() keep working. This command does the part that needs
+// the whole project in view:
 //
-//   ./supabase/functions/<name>/index.ts     (+ optional deno.json)
-//
-// Output layout matches Eurobase's:
-//
-//   ./eurobase/functions/<name>/index.ts
-//
-// Deployment is not automated here — the tenant reviews the diff, then
-// deploys via `eurobase functions deploy <name>` (or by uploading via
-// the console). Same shape as schema (#269) and data (#270): CLI
-// translates + writes; tenant applies.
-//
-// Unsupported functions (in-handler Supabase SDK client) are SKIPPED
-// with a printed note explaining the exact snippet to rewrite. The
-// tenant fixes those by hand and reruns.
+//   - builds every function the way a deploy would, so one that can't be
+//     bundled (a Node-only library, a missing import) is found now
+//   - points at calls the compatibility layer doesn't have, by file and
+//     line, with what to use instead
+//   - lists the secrets the functions read, which go into the Vault
+//   - reads supabase/config.toml for functions that take calls without a
+//     signed-in user (verify_jwt = false)
+//   - with --deploy, deploys the functions that are ready
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -34,178 +32,307 @@ import (
 
 func importSupabaseFunctionsCmd() *cobra.Command {
 	var (
-		inputDir  string
-		outputDir string
+		inputDir string
+		deploy   bool
+		noBuild  bool
+		only     []string
 	)
 	cmd := &cobra.Command{
 		Use:   "functions",
-		Short: "Translate Supabase edge functions to Eurobase's runner contract",
-		Long: `Walk a Supabase project's ./supabase/functions/ tree and rewrite each
-function for Eurobase's runner. Writes the translated files under an
-output directory ready to deploy.
+		Short: "Check a Supabase project's edge functions and deploy them",
+		Long: `Check the edge functions under ./supabase/functions and, with --deploy,
+deploy them to the active project.
 
-Rewrite rules applied:
-  - Deno.serve(handler)                → module.exports = handler
-  - Deno.serve((req) => …)             → module.exports = async (req, ctx) => …
-  - Deno.env.get('KEY')                → ctx.env.KEY
-  - Deno.env.get('SUPABASE_URL')       → ctx.env.SUPABASE_URL (also
-                                          emits a warning — the value
-                                          means something different on
-                                          Eurobase)
+The functions run as they are written: the deploy builds each one with a
+compatibility layer that supplies what the code had on Supabase —
 
-Warns (does not rewrite):
-  - import … from 'https://…'          — supported via esbuild-on-
-                                          deploy but eyeball the dep.
-  - Deno.env.get(<expr>)               — dynamic access; rewrite to
-                                          ctx.env[<expr>] manually.
+  Deno.serve(handler)      the handler becomes the function's handler
+  Deno.env.get("NAME")     the function's env vars, then the project's Vault
+  Authorization header     present again when a signed-in user calls
+  createClient(url, key)   auth.getUser, from().select/insert/update/
+                           upsert/delete, rpc() and storage, run as SQL
+                           through ctx.db
+  imports                  https://, npm:, jsr: and ../_shared files are
+                           bundled into the function
 
-Skips (SDK-based functions require manual rewrite):
-  - Any function that calls createClient(SUPABASE_URL, …) inside the
-    handler. Eurobase functions get ctx.db + ctx.storage on the
-    invocation context — no separate SDK client. The CLI prints the
-    exact snippet to replace.
+A client made with the service role key runs its queries with the service
+role; such a function is deployed with --allow-service-role.
 
-Deployment is out of scope for this command: review the emitted files,
-then run "eurobase functions deploy <name>" for each.`,
+For each function the command reports whether it is ready, and lists by
+file and line the calls the compatibility layer doesn't have (calling
+another function, realtime channels, embedded selects, or() filters, most
+auth.admin calls). Those need a change in the function's code.
+
+Without --deploy nothing is changed anywhere.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			if inputDir == "" {
 				inputDir = "./supabase/functions"
 			}
-			if outputDir == "" {
-				outputDir = "./eurobase/functions"
-			}
-			info, err := os.Stat(inputDir)
+			fns, err := listSupabaseFunctions(inputDir)
 			if err != nil {
-				return fmt.Errorf("read %s: %w — run this command from your Supabase project root (or pass --input)", inputDir, err)
+				return err
 			}
-			if !info.IsDir() {
-				return fmt.Errorf("%s is not a directory", inputDir)
+			if len(only) > 0 {
+				want := map[string]bool{}
+				for _, n := range only {
+					want[n] = true
+				}
+				var kept []*supabaseFunction
+				for _, fn := range fns {
+					if want[fn.Name] {
+						kept = append(kept, fn)
+						delete(want, fn.Name)
+					}
+				}
+				for n := range want {
+					return fmt.Errorf("no function %q in %s", n, inputDir)
+				}
+				fns = kept
 			}
-			entries, err := os.ReadDir(inputDir)
-			if err != nil {
-				return fmt.Errorf("list %s: %w", inputDir, err)
+			if len(fns) == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "No functions found in %s.\n", inputDir)
+				return nil
 			}
 
-			if err := os.MkdirAll(outputDir, 0o755); err != nil {
-				return fmt.Errorf("create %s: %w", outputDir, err)
+			out := cmd.OutOrStdout()
+			loader := newRemoteLoader() // one download of each module for all functions
+			ready, secrets := 0, map[string]bool{}
+			for _, fn := range fns {
+				fn.analyze()
+				if !noBuild && fn.Entry != "" {
+					res, err := bundleFunction(fn.Entry, bundleOptions{Compat: compatSupabase, loader: loader})
+					if err != nil {
+						fn.BuildError = err.Error()
+					} else {
+						fn.code = res.Code
+						fn.SizeKB = len(res.Code) / 1024
+					}
+				}
+				printFunctionStatus(out, fn)
+				if fn.Ready() {
+					ready++
+				}
+				for _, s := range fn.Secrets {
+					secrets[s] = true
+				}
 			}
 
-			summary := funcMigrationSummary{}
-			for _, e := range entries {
-				if !e.IsDir() {
-					continue
+			fmt.Fprintf(out, "\n%d function(s): %d ready, %d need changes\n", len(fns), ready, len(fns)-ready)
+			if len(secrets) > 0 {
+				names := make([]string, 0, len(secrets))
+				for s := range secrets {
+					names = append(names, s)
 				}
-				if strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
-					// Supabase convention: leading `_` means a shared
-					// module, not a deployable function. `.git`,
-					// `.DS_Store`, etc. also filtered out.
-					continue
-				}
-				if err := translateOneFunction(inputDir, outputDir, e.Name(), cmd, &summary); err != nil {
-					return err
-				}
+				sort.Strings(names)
+				fmt.Fprintf(out, "\nSecrets the functions read — set each one in the project's Vault before the functions run\n(console → Vault, or `eurobase vault set NAME VALUE`):\n  %s\n", strings.Join(names, "\n  "))
 			}
-			printFuncSummary(cmd, summary)
-			if summary.unsupported > 0 {
-				// Non-zero-but-not-error: the tenant needs to review
-				// the unsupported ones before deploying. Return nil
-				// so the shell exit code stays 0 — the print above
-				// is loud enough.
-				fmt.Fprintln(cmd.ErrOrStderr(), "Skipped functions above need manual rewrite before they can deploy.")
+
+			if !deploy {
+				if ready > 0 {
+					fmt.Fprintln(out, "\nNext: run again with --deploy to deploy the functions that are ready.")
+				}
+				return nil
+			}
+			if noBuild {
+				return fmt.Errorf("--deploy needs the build; drop --no-build")
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "\nDeploying to %s\n", ProjectLabel(cfg))
+			failed := 0
+			for _, fn := range fns {
+				if !fn.Ready() {
+					continue
+				}
+				// Set either way, so a function that no longer uses the
+				// service role key loses the setting on the next import.
+				allow := &fn.UsesServiceRole
+				if _, err := uploadFunction(client, cfg.ActiveProject, fn.Name, fn.code, fn.VerifyJWT, allow); err != nil {
+					failed++
+					fmt.Fprintf(out, "  %-40s ✗ %v\n", fn.Name, err)
+					continue
+				}
+				fmt.Fprintf(out, "  %-40s ✓ deployed%s\n", fn.Name, deployNote(fn))
+			}
+			if failed > 0 {
+				return fmt.Errorf("%d function(s) could not be deployed", failed)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&inputDir, "input", "", "Supabase functions directory (default ./supabase/functions)")
-	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Eurobase functions output directory (default ./eurobase/functions)")
+	cmd.Flags().BoolVar(&deploy, "deploy", false, "Deploy the functions that are ready to the active project")
+	cmd.Flags().BoolVar(&noBuild, "no-build", false, "Only read the code; don't build each function (no downloads)")
+	cmd.Flags().StringSliceVar(&only, "only", nil, "Only these functions (comma-separated names)")
 	return cmd
 }
 
-// funcMigrationSummary carries the per-run counts printed at the end.
-type funcMigrationSummary struct {
-	ported      int
-	unsupported int
-	warned      int
-	rewrites    int
+func deployNote(fn *supabaseFunction) string {
+	var parts []string
+	if fn.UsesServiceRole {
+		parts = append(parts, "service role allowed")
+	}
+	if !fn.VerifyJWT {
+		parts = append(parts, "open to calls without a signed-in user")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
-// translateOneFunction reads inputDir/<name>/index.ts, translates,
-// and writes outputDir/<name>/index.ts. Anything but a plain
-// index.ts is skipped with a note — Supabase supports other entry
-// points but 95% of tenant functions use the canonical shape.
-func translateOneFunction(inputDir, outputDir, name string, cmd *cobra.Command, summary *funcMigrationSummary) error {
-	entryFile := resolveEntrypoint(filepath.Join(inputDir, name))
-	inPath := filepath.Join(inputDir, name, entryFile)
-	source, err := os.ReadFile(inPath)
+func printFunctionStatus(out interface{ Write([]byte) (int, error) }, fn *supabaseFunction) {
+	status := "✓ ready"
+	if !fn.Ready() {
+		status = "✗ needs changes"
+	}
+	var facts []string
+	if fn.SizeKB > 0 {
+		facts = append(facts, fmt.Sprintf("%d KB", fn.SizeKB))
+	}
+	if fn.UsesServiceRole {
+		facts = append(facts, "service role")
+	}
+	if !fn.VerifyJWT {
+		facts = append(facts, "no sign-in required")
+	}
+	if len(fn.Secrets) > 0 {
+		facts = append(facts, "reads "+strings.Join(fn.Secrets, ", "))
+	}
+	line := fmt.Sprintf("  %-40s %s", fn.Name, status)
+	if len(facts) > 0 {
+		line += "  (" + strings.Join(facts, "; ") + ")"
+	}
+	fmt.Fprintln(out, line)
+	if fn.Entry == "" {
+		fmt.Fprintf(out, "      no index.ts in %s\n", fn.Dir)
+	}
+	if fn.BuildError != "" {
+		fmt.Fprintf(out, "      %s\n", strings.ReplaceAll(fn.BuildError, "\n", "\n      "))
+	}
+	for _, f := range fn.Findings {
+		fmt.Fprintf(out, "      %s:%d  %s — %s\n", f.File, f.Line, f.What, f.Instead)
+	}
+	for _, n := range fn.Notes {
+		fmt.Fprintf(out, "      note: %s\n", n)
+	}
+}
+
+// ── one function ────────────────────────────────────────────────────
+
+// supabaseFunction is one folder under supabase/functions.
+type supabaseFunction struct {
+	Name string
+	Dir  string
+	// Entry is the file the function starts in; "" when there is none.
+	Entry string
+	// VerifyJWT is false when supabase/config.toml says the function takes
+	// calls without a signed-in user.
+	VerifyJWT bool
+	// Findings are calls the compatibility layer doesn't have.
+	Findings []functionFinding
+	// Secrets are the settings the code reads, other than Supabase's own.
+	Secrets []string
+	// UsesServiceRole: the code reads the service role key.
+	UsesServiceRole bool
+	// Notes are things to know that don't stop a deploy.
+	Notes []string
+	// BuildError is why the function can't be bundled.
+	BuildError string
+	SizeKB     int
+
+	code string
+}
+
+// Ready: the function can be deployed as it is.
+func (fn *supabaseFunction) Ready() bool {
+	return fn.Entry != "" && fn.BuildError == "" && len(fn.Findings) == 0
+}
+
+type functionFinding struct {
+	File    string
+	Line    int
+	What    string
+	Instead string
+}
+
+// listSupabaseFunctions returns the functions in dir, by name. A folder
+// whose name starts with "_" holds shared code, not a function.
+func listSupabaseFunctions(dir string) ([]*supabaseFunction, error) {
+	info, err := os.Stat(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  %-40s (skipped — no %s)\n", name, entryFile)
-			return nil
+		return nil, fmt.Errorf("read %s: %w — run this from your Supabase project's root, or pass --input", dir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", dir, err)
+	}
+	open := functionsWithoutJWT(filepath.Join(dir, "..", "config.toml"))
+	var fns []*supabaseFunction
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
+			continue
 		}
-		return fmt.Errorf("read %s: %w", inPath, err)
-	}
-
-	res := TranslateFunction(string(source))
-	if res.Unsupported {
-		summary.unsupported++
-		fmt.Fprintf(cmd.ErrOrStderr(), "  %-40s ✗ unsupported — %s\n", name, res.UnsupportedReason)
-		return nil
-	}
-
-	outSubdir := filepath.Join(outputDir, name)
-	outPath := filepath.Join(outSubdir, entryFile)
-	// Nested entrypoints (`main: "src/handler.ts"`) need the
-	// intermediate directory created too — MkdirAll on outSubdir
-	// alone would leave WriteFile with a missing `src/`. Use the
-	// dir of outPath so both flat and nested shapes work. (#277
-	// round-4 review H.)
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(outPath), err)
-	}
-	if err := os.WriteFile(outPath, []byte(res.Source), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", outPath, err)
-	}
-
-	summary.ported++
-	nRewrites := 0
-	for _, c := range res.Rewrites {
-		nRewrites += c
-	}
-	summary.rewrites += nRewrites
-	nWarn := len(res.Warnings)
-	summary.warned += nWarn
-
-	if nWarn == 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  %-40s ✓ ported (%d rewrite(s))\n", name, nRewrites)
-	} else {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  %-40s ✓ ported (%d rewrite(s), %d warning(s))\n", name, nRewrites, nWarn)
-		for _, w := range res.Warnings {
-			if w.line > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "      line %d: %s\n", w.line, w.note)
-			} else {
-				fmt.Fprintf(cmd.ErrOrStderr(), "      %s\n", w.note)
-			}
+		fn := &supabaseFunction{Name: e.Name(), Dir: filepath.Join(dir, e.Name()), VerifyJWT: !open[e.Name()]}
+		entry := filepath.Join(fn.Dir, resolveEntrypoint(fn.Dir))
+		if _, err := os.Stat(entry); err == nil {
+			fn.Entry = entry
 		}
+		fns = append(fns, fn)
 	}
-	return nil
+	sort.Slice(fns, func(i, j int) bool { return fns[i].Name < fns[j].Name })
+	return fns, nil
 }
 
-// resolveEntrypoint returns the filename the CLI should read as the
-// function's entry. Defaults to `index.ts` (the Supabase convention),
-// but honours a per-function `deno.json` `"main"` field if present.
-// Round-1 review M #5 flagged that tenants with a `deno.json`-
-// configured entry point silently got "no index.ts" and no rewrite.
-//
-// Rejects entrypoints that would escape the function dir — an
-// absolute path or one containing `..` traversal would steer both
-// reads and writes outside the tenant's project tree, which is
-// unwanted even on a local dev-machine CLI. Falls back to
-// `index.ts` on rejection so the tenant sees the standard "no
-// index.ts" note rather than a path-outside error. (#277 round-5
-// review M.)
+var (
+	tomlSectionRe = regexp.MustCompile(`^\s*\[\s*functions\.("?)([A-Za-z0-9_-]+)("?)\s*\]`)
+	tomlAnyRe     = regexp.MustCompile(`^\s*\[`)
+	tomlNoJWTRe   = regexp.MustCompile(`^\s*verify_jwt\s*=\s*false\b`)
+)
+
+// functionsWithoutJWT reads `verify_jwt = false` per function from a
+// Supabase config.toml. A missing file means every function verifies.
+func functionsWithoutJWT(path string) map[string]bool {
+	out := map[string]bool{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	current := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		if m := tomlSectionRe.FindStringSubmatch(line); m != nil {
+			current = m[2]
+			continue
+		}
+		if tomlAnyRe.MatchString(line) {
+			current = ""
+			continue
+		}
+		if current != "" && tomlNoJWTRe.MatchString(line) {
+			out[current] = true
+		}
+	}
+	return out
+}
+
+// resolveEntrypoint returns the file a function starts in: index.ts, or
+// what its deno.json names as "main" / "entrypoint" — as long as that
+// stays inside the function's folder.
 func resolveEntrypoint(funcDir string) string {
-	denoConfig := filepath.Join(funcDir, "deno.json")
-	b, err := os.ReadFile(denoConfig)
+	b, err := os.ReadFile(filepath.Join(funcDir, "deno.json"))
 	if err != nil {
 		return "index.ts"
 	}
@@ -213,18 +340,12 @@ func resolveEntrypoint(funcDir string) string {
 		Main       string `json:"main"`
 		Entrypoint string `json:"entrypoint"`
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
+	if err := json.Unmarshal(relaxJSON(b), &cfg); err != nil {
 		return "index.ts"
 	}
-	// Deno CLI honours `"main"` officially; some Supabase-templated
-	// projects use `"entrypoint"`. Accept either — the file we open
-	// matters, not the config key.
 	candidate := cfg.Main
 	if candidate == "" {
 		candidate = cfg.Entrypoint
-	}
-	if candidate == "" {
-		return "index.ts"
 	}
 	if !isSafeEntrypoint(candidate) {
 		return "index.ts"
@@ -232,34 +353,166 @@ func resolveEntrypoint(funcDir string) string {
 	return candidate
 }
 
-// isSafeEntrypoint returns true if `p` stays inside the function's
-// own dir when joined onto it. Rejects: absolute paths, `..`
-// traversal, and empty strings. Used to gate deno.json `main` /
-// `entrypoint` values so a hostile / typo'd config can't steer the
-// CLI's reads or writes outside the tenant tree.
+// isSafeEntrypoint reports whether p stays inside the function's folder.
 func isSafeEntrypoint(p string) bool {
-	if p == "" {
+	if p == "" || filepath.IsAbs(p) {
 		return false
 	}
-	if filepath.IsAbs(p) {
-		return false
-	}
-	// Normalise separators + collapse any `..` — if the cleaned
-	// path still starts with `..` (or IS `..`), it escapes.
 	clean := filepath.Clean(p)
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
+	return clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
-func printFuncSummary(cmd *cobra.Command, s funcMigrationSummary) {
-	fmt.Fprintln(cmd.OutOrStdout(), "")
-	fmt.Fprintf(cmd.OutOrStdout(),
-		"Summary: %d ported (%d rewrite(s), %d warning(s)), %d unsupported\n",
-		s.ported, s.rewrites, s.warned, s.unsupported,
-	)
-	if s.ported > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "Next: review the translated files, then `eurobase functions deploy <name>` for each.")
+// ── reading the code ────────────────────────────────────────────────
+
+// compatGap is a call the compatibility layer doesn't have.
+type compatGap struct {
+	re      *regexp.Regexp
+	what    string
+	instead string
+	// near: only a finding when one of the three lines up to this one
+	// matches (a method name too common to flag on its own).
+	near *regexp.Regexp
+}
+
+var compatGaps = []compatGap{
+	{re: regexp.MustCompile(`\.functions\s*\.\s*invoke\s*\(`), what: "functions.invoke()",
+		instead: "a function can't call the project's own API; move the shared code into a file both functions import"},
+	{re: regexp.MustCompile(`\.(channel|removeChannel)\s*\(|\.realtime\b`), what: "a realtime channel",
+		instead: "realtime is used from your app, not from a function"},
+	{re: regexp.MustCompile("\\.select\\s*\\(\\s*[\"'`][^\"'`]*\\("), what: "select() with an embedded table",
+		instead: "join the tables in SQL with ctx.db.sql, or select from a view"},
+	{re: regexp.MustCompile("\\.or\\s*\\(\\s*[\"'`]"), what: "an or() filter",
+		instead: "write the query as SQL with ctx.db.sql"},
+	{re: regexp.MustCompile(`\.(textSearch|containedBy|overlaps|rangeGt|rangeGte|rangeLt|rangeLte|rangeAdjacent)\s*\(`), what: "a filter the compatibility layer doesn't have",
+		instead: "write the query as SQL with ctx.db.sql"},
+	{re: regexp.MustCompile(`\.contains\s*\(`), near: regexp.MustCompile(`\.from\s*\(|\.select\s*\(|\.eq\s*\(`), what: "a contains() filter",
+		instead: "write the query as SQL with ctx.db.sql (the @> operator)"},
+	{re: regexp.MustCompile(`auth\s*\.\s*admin\s*\.\s*(listUsers|createUser|updateUserById|deleteUser|inviteUserByEmail|generateLink)\b`), what: "an auth.admin call",
+		instead: "manage users with the users API from your server, or with SQL on the users table through ctx.db.asService()"},
+	{re: regexp.MustCompile(`auth\s*\.\s*(signInWithPassword|signInWithOtp|signInWithOAuth|signUp|resetPasswordForEmail|refreshSession|exchangeCodeForSession|verifyOtp)\b`), what: "a sign-in call",
+		instead: "sign users in from your app with the Eurobase SDK"},
+	{re: regexp.MustCompile(`\.(getPublicUrl|listBuckets|createBucket|getBucket|createSignedUrls)\s*\(`), what: "a storage call the compatibility layer doesn't have",
+		instead: "use upload, createSignedUrl, createSignedUploadUrl and remove, or ctx.storage"},
+	{re: regexp.MustCompile(`\.(download|list|move|copy)\s*\(`), near: regexp.MustCompile(`\.storage\b`), what: "a storage call the compatibility layer doesn't have",
+		instead: "use upload, createSignedUrl, createSignedUploadUrl and remove, or ctx.storage"},
+	{re: regexp.MustCompile(`\.schema\s*\(\s*["']`), what: "schema()",
+		instead: "a project's tables are in one schema; drop the call"},
+	{re: regexp.MustCompile(`\bDeno\s*\.\s*(readFile|readTextFile|writeFile|writeTextFile|readDir|openKv|connect|listen|Command|run|cron)\b`), what: "a Deno API that functions can't use",
+		instead: "functions have network access only (fetch); keep files in storage and data in the database"},
+	{re: regexp.MustCompile(`["']postgres(ql)?://|SUPABASE_DB_URL|deno\.land/x/postgres`), what: "a direct database connection",
+		instead: "use ctx.db.sql; functions don't get a database URL"},
+	{re: regexp.MustCompile(`/(rest|functions|auth|storage|realtime)/v1\b`), what: "a direct call to the Supabase API",
+		instead: "there is no such URL on Eurobase; use the client (createClient) or ctx"},
+	{re: regexp.MustCompile(`auth\s*\.\s*(getClaims|updateUser|admin\s*\.\s*signOut)\b`), what: "an auth call the compatibility layer doesn't have",
+		instead: "use auth.getUser() for the caller; change users with the users API or SQL through ctx.db.asService()"},
+	{re: regexp.MustCompile(`\bEdgeRuntime\s*\.\s*waitUntil\b`), what: "EdgeRuntime.waitUntil()",
+		instead: "a function ends with its response; await the work, or hand it to a cron job"},
+	// The service role key in a comparison or sent somewhere: on Supabase
+	// that is how a function recognises a trusted caller (a cron job) or
+	// calls the API as admin. Here the key is a random value per request
+	// unless the project sets one, and the Authorization header of a call
+	// isn't passed to the function.
+	{re: regexp.MustCompile("(===?|!==?)[^;\n]*SERVICE_ROLE_KEY|SERVICE_ROLE_KEY[^;\n]*(===?|!==?)|Bearer[^;\n]*SERVICE_ROLE_KEY|fetch\\s*\\([^;\n]*SERVICE_ROLE_KEY"),
+		what:    "the service role key compared with or sent in a request",
+		instead: "to recognise a trusted caller, set your own secret (eurobase vault set …) and compare a custom header with it — the Authorization header isn't passed to a function, and without a value of your own SUPABASE_SERVICE_ROLE_KEY is a new random value in every request"},
+}
+
+var localImportRe = regexp.MustCompile(`(?:from|import)\s*\(?\s*["'](\.{1,2}/[^"']+)["']`)
+
+// analyze reads the function's entry file and the local files it imports
+// and fills Findings, Secrets and UsesServiceRole.
+func (fn *supabaseFunction) analyze() {
+	if fn.Entry == "" {
+		return
 	}
+	seen := map[string]bool{}
+	var sources []string
+	var walk func(path string, depth int)
+	walk = func(path string, depth int) {
+		real, err := filepath.Abs(path)
+		if err != nil || seen[real] || depth > 12 {
+			return
+		}
+		raw, err := os.ReadFile(real)
+		if err != nil {
+			return
+		}
+		seen[real] = true
+		src := string(raw)
+		sources = append(sources, src)
+		shown := filepath.ToSlash(real)
+		if rel, err := filepath.Rel(filepath.Dir(fn.Dir), real); err == nil {
+			shown = filepath.ToSlash(rel)
+		}
+		fn.Findings = append(fn.Findings, findCompatGaps(shown, src)...)
+		for _, m := range localImportRe.FindAllStringSubmatch(src, -1) {
+			next := filepath.Join(filepath.Dir(real), filepath.FromSlash(m[1]))
+			if _, err := os.Stat(next); err != nil {
+				for _, ext := range []string{".ts", ".js", ".tsx", ".mjs"} {
+					if _, err := os.Stat(next + ext); err == nil {
+						next += ext
+						break
+					}
+				}
+			}
+			walk(next, depth+1)
+		}
+	}
+	walk(fn.Entry, 0)
+	names := map[string]bool{}
+	for _, src := range sources {
+		got, service := envNamesRead(src, "", nil)
+		fn.UsesServiceRole = fn.UsesServiceRole || service
+		for _, n := range got {
+			names[n] = true
+		}
+	}
+	for n := range names {
+		fn.Secrets = append(fn.Secrets, n)
+	}
+	sort.Strings(fn.Secrets)
+	if !fn.VerifyJWT && strings.Contains(strings.Join(sources, "\n"), "SUPABASE_ANON_KEY") {
+		fn.Notes = append(fn.Notes, "takes calls without a signed-in user and makes a client with the anon key: that client's queries are refused when nobody is signed in (function SQL has no anon role on Eurobase) — use the service role key client for what the function does on its own behalf")
+	}
+}
+
+// findCompatGaps scans one file. Lines that are only a comment are
+// skipped; a call inside a string would still be reported, which errs on
+// the side of looking.
+func findCompatGaps(file, src string) []functionFinding {
+	var out []functionFinding
+	lines := strings.Split(src, "\n")
+	inBlock := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if inBlock {
+			if strings.Contains(trimmed, "*/") {
+				inBlock = false
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/*") {
+			inBlock = !strings.Contains(trimmed, "*/")
+			continue
+		}
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		for _, gap := range compatGaps {
+			if !gap.re.MatchString(line) {
+				continue
+			}
+			if gap.near != nil {
+				from := i - 3
+				if from < 0 {
+					from = 0
+				}
+				if !gap.near.MatchString(strings.Join(lines[from:i+1], "\n")) {
+					continue
+				}
+			}
+			out = append(out, functionFinding{File: file, Line: i + 1, What: gap.what, Instead: gap.instead})
+		}
+	}
+	return out
 }

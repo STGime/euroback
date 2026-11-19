@@ -25,7 +25,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -678,7 +677,7 @@ func assessStorage(ctx context.Context, conn *pgx.Conn, r *report) error {
 // assessFunctions grades the edge functions in the tenant's local
 // Supabase project directory. Functions aren't in Postgres — they live
 // in ./supabase/functions/<name>/ — so we run each through the same
-// TranslateFunction the `functions` step uses and report whether it
+// check the `functions` step uses and report whether it
 // ports cleanly, ports with warnings, or needs a manual rewrite first.
 // A missing directory is a skip-with-note, not an error (a tenant may be
 // assessing before checking out their functions).
@@ -700,50 +699,40 @@ func assessFunctions(r *report, functionsDir string) error {
 		})
 		return nil
 	}
-	entries, err := os.ReadDir(functionsDir)
+	fns, err := listSupabaseFunctions(functionsDir)
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
+	for _, fn := range fns {
+		name := fmt.Sprintf("function: %s", fn.Name)
+		if fn.Entry == "" {
+			r.functions = append(r.functions, item{name: name, grade: gradeWarn, note: "no index.ts — non-standard entry point, review by hand"})
 			continue
 		}
-		// Supabase convention: a leading `_` is a shared module, not a
-		// deployable function; dotfiles (.git, .DS_Store) aren't either.
-		if strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
+		fn.analyze()
+		var extras []string
+		if fn.UsesServiceRole {
+			extras = append(extras, "uses the service role (deployed with --allow-service-role)")
+		}
+		if !fn.VerifyJWT {
+			extras = append(extras, "takes calls without a signed-in user")
+		}
+		if len(fn.Secrets) > 0 {
+			extras = append(extras, "reads "+strings.Join(fn.Secrets, ", ")+" (set in the Vault)")
+		}
+		extra := ""
+		if len(extras) > 0 {
+			extra = "; " + strings.Join(extras, "; ")
+		}
+		if len(fn.Findings) == 0 {
+			r.functions = append(r.functions, item{name: name, grade: gradeOK,
+				note: "runs as written with the Supabase compatibility layer" + extra})
 			continue
 		}
-		entryFile := resolveEntrypoint(filepath.Join(functionsDir, e.Name()))
-		source, err := os.ReadFile(filepath.Join(functionsDir, e.Name(), entryFile))
-		if err != nil {
-			r.functions = append(r.functions, item{
-				name:  fmt.Sprintf("function: %s", e.Name()),
-				grade: gradeWarn,
-				note:  fmt.Sprintf("no readable %s — non-standard entry point, review by hand", entryFile),
-			})
-			continue
-		}
-		res := TranslateFunction(string(source))
-		switch {
-		case res.Unsupported:
-			r.functions = append(r.functions, item{
-				name:  fmt.Sprintf("function: %s", e.Name()),
-				grade: gradeWarn,
-				note:  fmt.Sprintf("needs a manual rewrite before deploy — %s", res.UnsupportedReason),
-			})
-		case len(res.Warnings) > 0:
-			r.functions = append(r.functions, item{
-				name:  fmt.Sprintf("function: %s", e.Name()),
-				grade: gradeWarn,
-				note:  fmt.Sprintf("ports with %d warning(s) to review (e.g. remote imports or dynamic env access)", len(res.Warnings)),
-			})
-		default:
-			r.functions = append(r.functions, item{
-				name:  fmt.Sprintf("function: %s", e.Name()),
-				grade: gradeOK,
-				note:  "ports cleanly to Eurobase's runner contract",
-			})
-		}
+		first := fn.Findings[0]
+		r.functions = append(r.functions, item{name: name, grade: gradeWarn,
+			note: fmt.Sprintf("%d call(s) need a change, e.g. %s:%d %s — %s%s (`eurobase import supabase functions` lists them all)",
+				len(fn.Findings), first.File, first.Line, first.What, first.Instead, extra)})
 	}
 	return nil
 }
