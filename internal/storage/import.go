@@ -20,11 +20,13 @@ package storage
 // Ownership rules, so an import can't take a file away from anyone:
 //   - a new key is recorded with the requested owner (an end user of this
 //     project, or none for a developer file);
-//   - a key that is already recorded keeps its owner: the request is
-//     answered "exists" when the owner and size match, a file an earlier
-//     import recorded for the same owner gets its URL again (a resumed
-//     import), and anything else is a "conflict" — the file is not
-//     touched;
+//   - a key that is already recorded keeps its owner and its bytes. It
+//     is "exists" when it is in the bucket with the same owner (and the
+//     same size, when the caller knows the size). Only a file an earlier
+//     import recorded and whose upload never arrived — not in the
+//     bucket, size still 0 — gets its upload URL again. Everything else
+//     is a "conflict": a file changed or replaced since the import is
+//     never overwritten by running the import again;
 //   - a file in the bucket without a record is not overwritten.
 
 import (
@@ -56,7 +58,8 @@ var importUUIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F
 
 // ImportObject is one file to import.
 type ImportObject struct {
-	Key         string `json:"key"`
+	Key string `json:"key"`
+	// Size in bytes, or -1 when the source doesn't know it.
 	Size        int64  `json:"size"`
 	ContentType string `json:"content_type,omitempty"`
 	// Owner is the end user the file belongs to; empty for a developer
@@ -135,8 +138,8 @@ func (h *StorageHandler) importOne(r *http.Request, bucket, schema string, obj I
 	if isExportKey(r, key) {
 		return fail("export_namespace", "this folder holds the project's data exports")
 	}
-	if obj.Size < 0 {
-		return fail("invalid_size", "size must not be negative")
+	if obj.Size < -1 {
+		return fail("invalid_size", "size must be -1 (unknown) or more")
 	}
 	if obj.Size > importMaxObjectBytes {
 		return fail("too_large", fmt.Sprintf("files larger than %d GB can't be imported yet", importMaxObjectBytes>>30))
@@ -206,18 +209,28 @@ func (h *StorageHandler) importOne(r *http.Request, bucket, schema string, obj I
 		if !sameOwner() {
 			return ImportResult{Key: obj.Key, Status: "conflict", Error: "a file with this key is already in the project, with another owner"}, nil
 		}
-		meta, err := h.s3.HeadObjectInfo(r.Context(), bucket, key)
-		if err == nil && meta != nil && meta.Size == obj.Size {
-			if recordedSize == nil || *recordedSize != obj.Size {
-				h.recordImportedSize(r, esc, key, obj.Size)
+		inS3, err := h.s3.ObjectExists(r.Context(), bucket, key)
+		if err != nil {
+			// Not "absent": an unanswered check never leads to an upload.
+			return ImportResult{}, err
+		}
+		if inS3 {
+			meta, err := h.s3.HeadObjectInfo(r.Context(), bucket, key)
+			if err != nil || meta == nil {
+				return ImportResult{}, fmt.Errorf("head object: %w", err)
+			}
+			if obj.Size >= 0 && meta.Size != obj.Size {
+				return ImportResult{Key: obj.Key, Status: "conflict", Error: "the project's file with this key has another size (changed or replaced since it was imported); left as it is"}, nil
+			}
+			if recordedSize == nil || *recordedSize != meta.Size {
+				h.recordImportedSize(r, esc, key, meta.Size)
 			}
 			return ImportResult{Key: obj.Key, Status: "exists"}, nil
 		}
-		// Recorded by an import for this owner but not (fully) in the
-		// bucket: an interrupted import. Hand out the URL again. A file
-		// the project already had is never replaced.
-		if !imported {
-			return ImportResult{Key: obj.Key, Status: "conflict", Error: "a different file with this key is already in the project"}, nil
+		// Recorded but not in the bucket. Only an import's own record
+		// whose upload never arrived is picked up again.
+		if !imported || (recordedSize != nil && *recordedSize != 0) {
+			return ImportResult{Key: obj.Key, Status: "conflict", Error: "a different file with this key is recorded in the project"}, nil
 		}
 	} else {
 		if inS3, err := h.s3.ObjectExists(r.Context(), bucket, key); err != nil {

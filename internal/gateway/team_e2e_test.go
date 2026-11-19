@@ -933,19 +933,48 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		if o := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'imp/dev.txt'", "storage_objects"); o != "<null>" {
 			return fmt.Errorf("a conflicting import changed the owner to %s", o)
 		}
-		// A record whose upload never arrived gets its URL again; a
-		// different size means the copy wasn't finished either.
-		resumed, err := importBatch(
+		// A file that changed since its import (another size) is never
+		// overwritten by running the import again; with the size unknown
+		// (-1) a file that is there counts as there.
+		changed, err := importBatch(
 			map[string]any{"key": "imp/alice.txt", "size": 12, "owner": alice},
+			map[string]any{"key": "imp/alice.txt", "size": -1, "owner": alice},
 		)
 		if err != nil {
 			return err
 		}
-		if resumed[0].Status != "upload" {
-			return fmt.Errorf("a size change for the same owner: %+v", resumed[0])
+		if changed[0].Status != "conflict" || changed[1].Status != "exists" {
+			return fmt.Errorf("re-import of a changed file: %+v", changed)
 		}
-		if err := put(resumed[0], "alice's doc!"); err != nil {
+		// A record whose upload never arrived gets its URL again (an
+		// interrupted import) — until the upload is there.
+		pending, err := importBatch(map[string]any{"key": "imp/pending.txt", "size": 7, "owner": alice})
+		if err != nil {
 			return err
+		}
+		resumed, err := importBatch(map[string]any{"key": "imp/pending.txt", "size": 7, "owner": alice})
+		if err != nil {
+			return err
+		}
+		if pending[0].Status != "upload" || resumed[0].Status != "upload" {
+			return fmt.Errorf("interrupted import: %+v then %+v", pending[0], resumed[0])
+		}
+		if err := put(resumed[0], "pending"); err != nil {
+			return err
+		}
+		if done, err := importBatch(map[string]any{"key": "imp/pending.txt", "size": 7, "owner": alice}); err != nil || done[0].Status != "exists" {
+			return fmt.Errorf("after the upload: %+v %v", done, err)
+		}
+		if size := env.dedScalar(t, "SELECT size_bytes::text FROM %s WHERE key = 'imp/pending.txt'", "storage_objects"); size != "7" {
+			return fmt.Errorf("the re-import recorded size %s, want 7", size)
+		}
+		// A developer file recorded without its bytes (an upload URL
+		// that was never used) is not the import's to fill in.
+		if r := console("POST", "/storage/signed-url", `{"key":"imp/unused-url.txt","operation":"upload","content_type":"text/plain"}`); r.code != 200 {
+			return fmt.Errorf("console upload URL: %w", r)
+		}
+		if unused, err := importBatch(map[string]any{"key": "imp/unused-url.txt", "size": 1}); err != nil || unused[0].Status != "conflict" {
+			return fmt.Errorf("a record the import didn't make: %+v %v", unused, err)
 		}
 
 		// A shared folder holds developer files only.

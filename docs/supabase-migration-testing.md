@@ -338,8 +338,13 @@ eurobase import supabase storage --apply         # copy
       Sharing as public, and its files download without a token.
 - [ ] Stopping the copy (Ctrl-C) and running it again copies only what
       was missing; a third run reports everything as already there.
-- [ ] A file the project already had under the same name is left as it
-      is and listed under "Not copied".
+- [ ] A file the project already had under the same name, or one
+      changed in the project since the copy, is left as it is and listed
+      under "Not copied".
+- [ ] A public bucket whose folder already has files in the project, or
+      is shared with signed-in users only, stops the copy before
+      anything is shared.
+- [ ] Files without `metadata.size` count as copied on the second run.
 - [ ] A file whose owner isn't a user is a developer file
       (`--missing-owner skip` leaves it out).
 - [ ] Sizes in console → Storage match the source.

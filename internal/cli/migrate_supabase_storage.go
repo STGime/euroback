@@ -59,7 +59,13 @@ How files come over:
   - Supabase's storage policies are not carried over; on Eurobase each
     end user owns their files, and folders can be shared.
 
-Limits: one file can be up to 5 GB; the project's storage limit applies.
+Running it again copies only what is missing. It never replaces a file
+the project has: a file changed, replaced or deleted in the project after
+the import is listed or — when deleted — copied again; delete such files
+on Supabase first if they must stay gone.
+
+Limits: one file can be up to 5 GB. The copy is not checked against the
+plan's storage limit: compare the total in the report first.
 
 Env vars:
   SUPABASE_DB_URL             the Supabase database (lists the files)
@@ -181,15 +187,10 @@ func runStorageCopy(ctx context.Context, out io.Writer, q sourceQuerier, buckets
 	}
 	stats := &copyStats{}
 	// Public buckets: share their folder with everyone before the first
-	// file arrives.
-	for _, b := range buckets {
-		if !b.public {
-			continue
-		}
-		if err := dst.Share(b.name+"/", "public"); err != nil {
-			return fmt.Errorf("share the folder %s/ with everyone: %w", b.name, err)
-		}
-		stats.SharedFolders = append(stats.SharedFolders, b.name+"/")
+	// file arrives — but only a folder that is new to the project. Sharing
+	// a folder that already holds files would make those public too.
+	if err := sharePublicFolders(buckets, dst, stats); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(out, "Copying into %s\n", target)
@@ -244,6 +245,54 @@ func runStorageCopy(ctx context.Context, out io.Writer, q sourceQuerier, buckets
 	}
 	if stats.Failed > 0 {
 		return fmt.Errorf("%d file(s) failed; run the command again to retry them (copied files are skipped)", stats.Failed)
+	}
+	return nil
+}
+
+// sharePublicFolders shares each public bucket's folder with everyone,
+// once: a folder already shared with everyone is left as it is; one
+// shared otherwise, or one that already holds files the import didn't
+// put there, stops the copy before anything is changed.
+func sharePublicFolders(buckets []supabaseBucket, dst storageTarget, stats *copyStats) error {
+	var public []supabaseBucket
+	for _, b := range buckets {
+		if b.public {
+			public = append(public, b)
+		}
+	}
+	if len(public) == 0 {
+		return nil
+	}
+	rules, err := dst.SharedFolders()
+	if err != nil {
+		return fmt.Errorf("read the project's shared folders: %w", err)
+	}
+	var share []string
+	for _, b := range public {
+		prefix := b.name + "/"
+		if strings.EqualFold(b.name, "exports") {
+			return fmt.Errorf("the public bucket %q can't become a folder: exports/ holds the project's data exports — copy the other buckets with --bucket, and this one by hand into another folder", b.name)
+		}
+		switch v, ok := rules[prefix]; {
+		case ok && v == "public":
+			continue // shared by an earlier run
+		case ok:
+			return fmt.Errorf("the folder %s is shared with %s users; the public bucket %q needs it shared with everyone — change the rule in the console (Storage → Sharing) if that is what you want, then run again", prefix, v, b.name)
+		}
+		has, err := dst.HasFiles(prefix)
+		if err != nil {
+			return fmt.Errorf("look at the folder %s: %w", prefix, err)
+		}
+		if has {
+			return fmt.Errorf("the project already has files in %s; sharing that folder with everyone (as the public bucket %q was) would make them public too — move them, or share the folder yourself (Storage → Sharing) if they may be public, then run again", prefix, b.name)
+		}
+		share = append(share, prefix)
+	}
+	for _, prefix := range share {
+		if err := dst.Share(prefix, "public"); err != nil {
+			return fmt.Errorf("share the folder %s with everyone: %w", prefix, err)
+		}
+		stats.SharedFolders = append(stats.SharedFolders, prefix)
 	}
 	return nil
 }

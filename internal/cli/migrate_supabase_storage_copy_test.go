@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -47,13 +48,14 @@ type fakeTarget struct {
 	records map[string]string // key → owner ("" = developer file)
 	bucket  map[string][]byte
 	shared  []string
+	rules   map[string]string
 	server  *httptest.Server
 	putFail map[string]bool
 	calls   int
 }
 
 func newFakeTarget(t *testing.T, users ...string) *fakeTarget {
-	ft := &fakeTarget{users: map[string]bool{}, records: map[string]string{}, bucket: map[string][]byte{}, putFail: map[string]bool{}}
+	ft := &fakeTarget{users: map[string]bool{}, records: map[string]string{}, bucket: map[string][]byte{}, putFail: map[string]bool{}, rules: map[string]string{}}
 	for _, u := range users {
 		ft.users[u] = true
 	}
@@ -98,8 +100,10 @@ func (ft *fakeTarget) Import(items []importItem) ([]importAnswer, error) {
 			out = append(out, importAnswer{Key: it.Key, Status: "error", Code: "unknown_owner", Error: "not a user"})
 		case recorded && owner != it.Owner:
 			out = append(out, importAnswer{Key: it.Key, Status: "conflict", Error: "another owner"})
-		case recorded && int64(len(ft.bucket[it.Key])) == it.Size && ft.bucket[it.Key] != nil:
+		case recorded && ft.bucket[it.Key] != nil && (it.Size < 0 || int64(len(ft.bucket[it.Key])) == it.Size):
 			out = append(out, importAnswer{Key: it.Key, Status: "exists"})
+		case recorded && ft.bucket[it.Key] != nil:
+			out = append(out, importAnswer{Key: it.Key, Status: "conflict", Error: "another size"})
 		default:
 			ft.records[it.Key] = it.Owner
 			out = append(out, importAnswer{Key: it.Key, Status: "upload", URL: ft.server.URL + "/" + it.Key, Headers: map[string]string{"X-Signed": "yes"}})
@@ -126,7 +130,29 @@ func (ft *fakeTarget) Share(prefix, visibility string) error {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 	ft.shared = append(ft.shared, prefix+"="+visibility)
+	ft.rules[prefix] = visibility
 	return nil
+}
+
+func (ft *fakeTarget) SharedFolders() (map[string]string, error) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	out := map[string]string{}
+	for k, v := range ft.rules {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (ft *fakeTarget) HasFiles(prefix string) (bool, error) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	for k := range ft.records {
+		if strings.HasPrefix(k, prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // memQuerier answers listSourceFiles from a fixed list, as the source
@@ -139,8 +165,10 @@ func copyRun(t *testing.T, files []sourceFile, src *fakeSource, dst *fakeTarget,
 	for _, b := range buckets {
 		if b.public {
 			opts.PublicBuckets[b.name] = true
-			_ = dst.Share(b.name+"/", "public")
 		}
+	}
+	if err := sharePublicFolders(buckets, dst, stats); err != nil {
+		return out.String(), stats, err
 	}
 	// Batches of two, to cross batch borders.
 	for i := 0; i < len(files); i += 2 {
@@ -337,5 +365,78 @@ func TestListSourceFiles_Fixture(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("files:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A file without a recorded size counts as copied once it is there; a
+// file changed in the project since the import is never overwritten.
+func TestCopyFiles_UnknownSizesAndChangedFiles(t *testing.T) {
+	files := []sourceFile{{Bucket: "b", Name: "old", Size: -1}, {Bucket: "b", Name: "changed", Size: 3}}
+	src := &fakeSource{files: map[string][]byte{"b/old": []byte("legacy"), "b/changed": []byte("abc")}}
+	dst := newFakeTarget(t)
+	if _, stats, err := copyRun(t, files, src, dst, nil, "developer"); err != nil || stats.Copied != 2 {
+		t.Fatalf("first run: %+v %v", stats, err)
+	}
+	dst.bucket["b/changed"] = []byte("changed in the app")
+	_, again, err := copyRun(t, files, src, dst, nil, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Copied != 0 || again.Already != 1 || again.Skipped != 1 || string(dst.bucket["b/changed"]) != "changed in the app" {
+		t.Errorf("second run: %+v, project file %q", again, dst.bucket["b/changed"])
+	}
+}
+
+// A public bucket's folder is shared with everyone only when it is new
+// to the project.
+func TestSharePublicFolders(t *testing.T) {
+	pub := []supabaseBucket{{name: "media", public: true}, {name: "private"}}
+
+	dst := newFakeTarget(t)
+	stats := &copyStats{}
+	if err := sharePublicFolders(pub, dst, stats); err != nil || strings.Join(dst.shared, ",") != "media/=public" {
+		t.Fatalf("new folder: %v %v", dst.shared, err)
+	}
+	// A second run leaves the rule as it is.
+	if err := sharePublicFolders(pub, dst, &copyStats{}); err != nil || len(dst.shared) != 1 {
+		t.Errorf("second run: %v %v", dst.shared, err)
+	}
+
+	withFiles := newFakeTarget(t)
+	withFiles.records["media/private-report.pdf"] = ""
+	if err := sharePublicFolders(pub, withFiles, &copyStats{}); err == nil || !strings.Contains(err.Error(), "already has files in media/") || len(withFiles.shared) != 0 {
+		t.Errorf("folder with files: shared=%v err=%v", withFiles.shared, err)
+	}
+
+	otherRule := newFakeTarget(t)
+	otherRule.rules["media/"] = "authenticated"
+	if err := sharePublicFolders(pub, otherRule, &copyStats{}); err == nil || !strings.Contains(err.Error(), "shared with authenticated users") || otherRule.rules["media/"] != "authenticated" {
+		t.Errorf("other rule: %v %v", otherRule.rules, err)
+	}
+
+	exports := newFakeTarget(t)
+	if err := sharePublicFolders([]supabaseBucket{{name: "exports", public: true}}, exports, &copyStats{}); err == nil || !strings.Contains(err.Error(), "data exports") {
+		t.Errorf("exports bucket: %v", err)
+	}
+}
+
+func TestSupabaseStorageSource_AsksForTheStoredBytes(t *testing.T) {
+	var enc string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enc = r.Header.Get("Accept-Encoding")
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+	src := &supabaseStorageSource{base: srv.URL, key: "k", client: srv.Client()}
+	body, _, err := src.Open(context.Background(), sourceFile{Bucket: "b", Name: "f.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Close()
+	if enc != "identity" {
+		t.Errorf("Accept-Encoding = %q, want identity", enc)
+	}
+	if d := transferDeadline(5 << 30); d < time.Hour || d > 7*time.Hour {
+		t.Errorf("deadline for 5 GB = %s", d)
 	}
 }

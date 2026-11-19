@@ -73,6 +73,10 @@ type storageTarget interface {
 	Import(items []importItem) ([]importAnswer, error)
 	Complete(keys []string) ([]completeAnswer, error)
 	Share(prefix, visibility string) error
+	// SharedFolders returns the project's shared folders: prefix → visibility.
+	SharedFolders() (map[string]string, error)
+	// HasFiles reports whether the project has any file under prefix.
+	HasFiles(prefix string) (bool, error)
 }
 
 // storageSource is where the bytes come from.
@@ -115,10 +119,9 @@ func copyFiles(ctx context.Context, files []sourceFile, src storageSource, dst s
 	byKey := map[string]sourceFile{}
 	for _, f := range files {
 		stats.Seen++
+		// -1: the source doesn't know the size; the project then counts a
+		// file that is there as copied.
 		it := importItem{Key: f.Key(), Size: f.Size, ContentType: f.ContentType, Owner: f.Owner}
-		if it.Size < 0 {
-			it.Size = 0
-		}
 		if opts.PublicBuckets[f.Bucket] {
 			// Everyone could read it: a developer file in a shared folder.
 			if it.Owner != "" {
@@ -138,7 +141,7 @@ func copyFiles(ctx context.Context, files []sourceFile, src storageSource, dst s
 	for _, a := range answers {
 		if a.Status == "error" && a.Code == "unknown_owner" && opts.MissingOwner == "developer" {
 			f := byKey[a.Key]
-			retry = append(retry, importItem{Key: a.Key, Size: max(f.Size, 0), ContentType: f.ContentType})
+			retry = append(retry, importItem{Key: a.Key, Size: f.Size, ContentType: f.ContentType})
 		}
 	}
 	if len(retry) > 0 {
@@ -146,10 +149,12 @@ func copyFiles(ctx context.Context, files []sourceFile, src storageSource, dst s
 		if err != nil {
 			return err
 		}
-		stats.OwnerDropped += int64(len(again))
 		replaced := map[string]importAnswer{}
 		for _, a := range again {
 			replaced[a.Key] = a
+			if a.Status == "upload" || a.Status == "exists" {
+				stats.OwnerDropped++
+			}
 		}
 		for i, a := range answers {
 			if r, ok := replaced[a.Key]; ok {
@@ -213,6 +218,9 @@ func copyFiles(ctx context.Context, files []sourceFile, src storageSource, dst s
 		if err != nil {
 			return err
 		}
+		if len(results) != len(done) {
+			return fmt.Errorf("the project answered for %d of %d uploaded files", len(results), len(done))
+		}
 		for _, r := range results {
 			if r.Status == "done" {
 				stats.Copied++
@@ -241,12 +249,28 @@ func transferOne(ctx context.Context, src storageSource, f sourceFile, a importA
 		if !retryable || ctx.Err() != nil {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return 0, last
 }
 
+// transferDeadline is how long one file may take: ten minutes, plus the
+// time its size needs at 256 KB/s. A stalled connection ends there
+// instead of holding the run.
+func transferDeadline(size int64) time.Duration {
+	if size < 0 {
+		size = 0
+	}
+	return 10*time.Minute + time.Duration(size/(256<<10))*time.Second
+}
+
 func transferAttempt(ctx context.Context, src storageSource, f sourceFile, a importAnswer, client *http.Client) (int64, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, transferDeadline(f.Size))
+	defer cancel()
 	body, size, err := src.Open(ctx, f)
 	if err != nil {
 		return 0, true, fmt.Errorf("read from Supabase: %w", err)
@@ -308,6 +332,9 @@ func (s *supabaseStorageSource) Open(ctx context.Context, f sourceFile) (io.Read
 	}
 	req.Header.Set("Authorization", "Bearer "+s.key)
 	req.Header.Set("apikey", s.key)
+	// The bytes as stored: a compressed answer would change the length
+	// (and Go would unpack it, losing the length altogether).
+	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -355,6 +382,39 @@ func (t *apiStorageTarget) Complete(keys []string) ([]completeAnswer, error) {
 		return nil, fmt.Errorf("complete answer: %w", err)
 	}
 	return out.Results, nil
+}
+
+func (t *apiStorageTarget) SharedFolders() (map[string]string, error) {
+	data, err := t.client.Get("/platform/projects/" + t.projectID + "/storage-sharing")
+	if err != nil {
+		return nil, err
+	}
+	var rules []struct {
+		Prefix     string `json:"prefix"`
+		Visibility string `json:"visibility"`
+	}
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return nil, fmt.Errorf("shared folders: %w", err)
+	}
+	out := map[string]string{}
+	for _, r := range rules {
+		out[r.Prefix] = r.Visibility
+	}
+	return out, nil
+}
+
+func (t *apiStorageTarget) HasFiles(prefix string) (bool, error) {
+	data, err := t.client.Get("/platform/projects/" + t.projectID + "/storage?limit=1&prefix=" + url.QueryEscape(prefix))
+	if err != nil {
+		return false, err
+	}
+	var out struct {
+		Objects []json.RawMessage `json:"objects"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return false, fmt.Errorf("list files: %w", err)
+	}
+	return len(out.Objects) > 0, nil
 }
 
 func (t *apiStorageTarget) Share(prefix, visibility string) error {

@@ -50,10 +50,10 @@
 					<ul class="mt-1 list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
 						<li><strong>A bucket becomes a folder:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">avatars/u1/me.png</code> stays <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">avatars/u1/me.png</code>. A function deployed with the Supabase compatibility layer reads <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage.from(&quot;avatars&quot;)</code> from the same folder.</li>
 						<li><strong>Files keep their owners:</strong> the end user who uploaded a file keeps the access they had, and nobody else gets it. Import your users first (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">import supabase data</code>). A file whose owner isn't a user of the project becomes a developer file (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--missing-owner skip</code> leaves it out).</li>
-						<li><strong>Public buckets</strong> become a folder shared with everyone, and their files become developer files: on Supabase anyone could read them. Their uploaders can no longer replace or delete them from your app.</li>
-						<li><strong>Nothing is overwritten:</strong> a file your project already has under the same name is left as it is and listed.</li>
+						<li><strong>Public buckets</strong> become a folder shared with everyone, and their files become developer files: on Supabase anyone could read them. Their uploaders can no longer replace or delete them from your app. If your project already has files in that folder, the copy stops instead of making them public.</li>
+						<li><strong>Nothing is overwritten:</strong> a file your project already has under the same name, or one changed since it was copied, is left as it is and listed. A file deleted in your project after the copy comes back if you run it again: delete it on Supabase too.</li>
 						<li><strong>Storage policies</strong> are not carried over. Check that per-user ownership and shared folders cover what your policies allowed.</li>
-						<li><strong>Limits:</strong> one file can be up to 5 GB. Your plan's storage limit applies; check the total the command shows first.</li>
+						<li><strong>Limits:</strong> one file can be up to 5 GB. The copy is not checked against your plan's storage limit: compare the total the command shows first.</li>
 					</ul>
 				</div>
 
