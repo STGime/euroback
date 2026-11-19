@@ -8,7 +8,7 @@
 				</p>
 
 				<p class="text-sm text-gray-700 leading-relaxed">
-					For the whole migration in order, with every command, see <a href="/docs/migrating-step-by-step" class="text-blue-600 hover:underline">chapter 31, Migrating from Supabase, step by step</a>; it also has a Claude skill that does it for you.
+					For the whole migration in order, with every command, see <a href="/docs/migrating-step-by-step" class="text-eurobase-700 hover:underline">chapter 31, Migrating from Supabase, step by step</a>; it also has a Claude skill that does it for you.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-2">Migrating in</h3>

@@ -19,7 +19,7 @@ Written against `@eurobase/sdk` 0.12.0 (most of it works from 0.8.1). All exampl
 | `storage.list` | `{ objects, has_more, next_cursor, error }` |
 | `storage.download` | `Blob` |
 | `functions.invoke` | `{ data, error: { status, message } or null }` (`status` is `0` today — show `message`, don't branch on `status`) |
-| `db.rpc(fn, args)` | `{ data, error, code }` — `code` is the Postgres error code (`P0001` for the function's own `RAISE EXCEPTION`, `42501` for a permission or RLS denial) |
+| `db.rpc(fn, args)` | `{ data, error, code }` — `code` is the Postgres error code (`P0001` for the function's own `RAISE EXCEPTION`, `42501` for a permission or RLS denial). A set-returning function gives only its first row: return a list as one `jsonb` value |
 | `auth.signOut` / `forgotPassword` / `resetPassword` / `verifyEmail` / `resendVerification` / `requestMagicLink` | `{ error }` |
 | `auth.updatePassword` | `{ data: AuthSession or null, error }` |
 | `auth.onAuthStateChange(cb)` | an unsubscribe function |
@@ -60,7 +60,8 @@ await eb.db.from('tasks').in('project_id', projectIds)
 await eb.db.from('events').gte('created_at', from).lte('created_at', to)
 await eb.db.from('tasks').neq('status', 'done')
 
-// A row this row points to (one level, along a foreign key of this table)
+// A row this row points to (one level, along a foreign key of this table;
+// named by the related table — no aliases; RLS of that table applies, a hidden row is null)
 const { data } = await eb.db.from('tasks').select('id', 'title', 'projects(id,name)')
 // → [{ id, title, projects: { id, name } }]
 
@@ -95,7 +96,7 @@ const { data: projects } = ids.length
   : { data: [] }
 ```
 
-Limits to remember: `insert` takes one row (an object, not an array); no upsert, no `.or()`, no `.not()`, no `.is(null)`, no `.maybeSingle()` (`single()` returns the error `'Row not found'` when there's no row), embeds one level deep and only along this table's foreign keys, and `update`/`delete` only by `id`. Several filters on the same column are fine, up to 64 filters per query. Anything beyond that — upserts, bulk changes, `OR` conditions — goes into a database function called with `rpc`, or an edge function.
+Limits to remember: `insert` takes one row (an object, not an array); no upsert, no `.or()`, no `.not()`, no `.is(null)`, no `.maybeSingle()` (`single()` returns the error `'Row not found'` when there's no row), embeds one level deep and only along this table's foreign keys, and `update`/`delete` only by `id`. Several filters on the same column are fine, up to 64 filters per query. Anything beyond that — upserts, bulk changes, `OR` conditions — goes into a database function called with `rpc` (returning a list as one `jsonb` value), or an edge function.
 
 ## Auth provider
 
@@ -299,7 +300,7 @@ const handler: EdgeHandler = async (req, ctx) => {
 export default handler
 ```
 
-`ctx.user` is set when the caller is signed in and the function has **Require JWT** on (the default); a function with it off also accepts signed-out callers, and `ctx.user` is then `null`. With a signed-in caller, `ctx.db.sql` runs as that user, under your RLS policies. Without one it runs with the service role, which every policy lets through — treat it as privileged: always scope queries with `ctx.user.id` yourself and use `$1` parameters, never string concatenation.
+`ctx.user` is set when the caller is signed in and the function has **Require JWT** on (the default); a function with it off also accepts signed-out callers, and `ctx.user` is then `null`. With a signed-in caller, `ctx.db.sql` runs as that user, under your RLS policies. Without one it runs with the service role, which passes the policies that include `is_service_role()` (the table presets and imported tables have one; check hand-written policies) — treat it as privileged: always scope queries with `ctx.user.id` yourself and use `$1` parameters, never string concatenation.
 
 A write the user may not make themselves (a subscription, a credit balance), after your code has checked the request: `ctx.db.asService().sql(query, params)` runs one statement with the service role while `auth_uid()` is still the caller. It needs the function's **allow service role** setting (CLI: `eurobase edge-functions deploy <name> --allow-service-role`).
 

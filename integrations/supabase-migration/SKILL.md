@@ -23,7 +23,7 @@ The developer's Supabase project keeps running throughout. Nothing here writes t
 Ask the developer for, or check:
 
 - The Eurobase CLI: `eurobase --version` (0.6.9+; install from console → Docs → CLI). Signed in: `eurobase login` — the developer types their password themselves.
-- `pg_dump` on PATH, the same major version as the Supabase database (`brew install libpq` on macOS).
+- `pg_dump` on PATH, the same major version as the Supabase database or newer (`brew install libpq` on macOS).
 - In the developer's shell (not in chat):
   - `SUPABASE_DB_URL` — Supabase dashboard → **Connect** → **Session pooler** URL (the direct `db.<ref>.supabase.co` host is IPv6-only).
   - `SUPABASE_URL` (`https://<ref>.supabase.co`) and `SUPABASE_SERVICE_ROLE_KEY` — only needed to copy files.
@@ -70,14 +70,19 @@ If `migrations up` fails, read the error. A missing table usually means the Supa
 
 ```bash
 eurobase import supabase data --migrations-dir ./migrations
-eurobase migrations up
 ```
 
-Users come first (ids, emails, bcrypt password hashes, OAuth links), then every table's rows, parents before children. Sessions are not copied: every user signs in once on Eurobase.
+Users come first (ids, emails, bcrypt password hashes, OAuth links), then every table's rows, parents before children. Sessions are not copied: every user signs in once on Eurobase. The import is for a project without data: it is not incremental, and applying it twice writes the rows twice.
 
 **Decision (test runs):** to leave large tables out — logs, analytics — use `--exclude-table logs,events`. The command refuses if another table's rows refer to an excluded one; exclude that too or keep both.
 
 Read the "Read before applying" list out loud: deleted and SSO users left out, password hashes that can't be used (those users reset their password), OAuth providers that need setting up, triggers paused during the copy.
+
+**Decision:** the files hold real users (emails, password hashes) and their data. Apply only after the developer agrees to copy them into this project:
+
+```bash
+eurobase migrations up
+```
 
 **Check:** compare row counts per table between Supabase (`SELECT count(*) …` there) and Eurobase (console SQL editor, or the MCP server's `runSQL`). For a few important tables compare a checksum of each column, not of whole rows — the two databases sort text differently.
 
@@ -108,8 +113,10 @@ For a function listed as "needs changes", the report names the file, the line an
 
 **Secrets:** the report lists the names the functions read. The developer sets each one — never you, and never in chat:
 
+Console → Vault, or in their own terminal (a leading space keeps the value out of shell history in most shells):
+
 ```bash
-eurobase vault set STRIPE_SECRET_KEY <value>
+ eurobase vault set STRIPE_SECRET_KEY '<value>'
 ```
 
 **Decision:** then deploy the ready ones:
@@ -149,28 +156,28 @@ Replace `@supabase/supabase-js` with `@eurobase/sdk`. Don't rename things that d
 | `(await auth.getUser()).data.user` | `(await eb.auth.getUser()).data` |
 | `auth.onAuthStateChange(cb)` → `data.subscription.unsubscribe()` | `const off = eb.auth.onAuthStateChange(cb)` → `off()` |
 | `from('t').select('id, name')` | `eb.db.from('t').select('id', 'name')` |
-| `from('t').select('*, author(*)')` (to-one) | `eb.db.from('t').select('*', 'author(*)')` — one level, along a foreign key of `t` |
+| `from('t').select('*, author:profiles(*)')` (to-one) | `eb.db.from('t').select('*', 'profiles(*)')` — named by the **table**, no alias or `!fk` hint; one level, along a foreign key of `t`; with two foreign keys to the same table, one of them is used — load the other with a second query. `users(*)` is refused from the app |
 | `from('t').select('*, comments(*)')` (to-many) | a second query: `eb.db.from('comments').in('post_id', ids)` |
 | `.eq / .neq / .gt / .gte / .lt / .lte / .like / .ilike / .in / .order / .limit` | the same |
 | `.range(from, to)` | `.offset(from).limit(to - from + 1)` |
-| `.single()` | `.single()` (error `'Row not found'` when there's no row) |
+| `.single()` | `.single()` (error `'Row not found'` when there's no row; with several rows it returns the first, no error) |
 | `.maybeSingle()` | `.single()` and treat `'Row not found'` as "none" |
-| `.or()`, `.not()`, `.is()`, `.contains()`, `.textSearch()` | a database function called with `eb.db.rpc` (or an edge function) |
+| `.or()`, `.not()`, `.is()`, `.contains()`, `.textSearch()` | a database function called with `eb.db.rpc` (or an edge function). `rpc` returns only the first row of a set-returning function: return the list as one `jsonb` value (`jsonb_agg`) |
 | `from('t').insert(row).select().single()` | `eb.db.from('t').insert(row)` (returns the row) |
 | `from('t').insert([rows])` | one `insert` per row, or a database function for bulk inserts |
 | `from('t').upsert(row)` | a database function (`INSERT … ON CONFLICT`) called with `rpc` |
 | `from('t').update(values).eq('id', id)` | `eb.db.from('t').update(id, values)` (by id only) |
 | `from('t').delete().eq('id', id)` | `eb.db.from('t').delete(id)` (by id only) |
-| `rpc(fn, args)` | `eb.db.rpc(fn, args)` → `{ data, error, code }` |
+| `rpc(fn, args)` | `eb.db.rpc(fn, args)` → `{ data, error, code }`; a function returning `SETOF` / `TABLE` gives only its first row — return `jsonb` instead |
 | `storage.from('b').upload(path, file)` | `eb.storage.upload('b/' + path, file, { contentType })` (one bucket per project; the old bucket is a folder) |
 | `storage.from('b').createSignedUrl(path, 60)` | `eb.storage.createSignedUrl('b/' + path, 'download', { expiresIn: 60 })` |
 | `storage.from('b').createSignedUploadUrl(path)` | `eb.storage.createSignedUrl('b/' + path, 'upload')` |
 | `storage.from('b').getPublicUrl(path)` | `eb.storage.getPublicUrl('b/' + path)` (folders shared with everyone; public key only) |
-| `storage.from('b').download(path)` | `eb.storage.download('b/' + path)` → `Blob` |
-| `storage.from('b').list(folder)` | `eb.storage.list({ prefix: 'b/' + folder + '/' })` → `{ objects, has_more, next_cursor }` |
+| `storage.from('b').download(path)` | `eb.storage.download('b/' + path)` → `Blob`; it throws on an error instead of returning `{ error }` |
+| `storage.from('b').list(folder)` | `eb.storage.list({ prefix: 'b/' + folder + '/' })` → `{ objects, has_more, next_cursor }` — every file under the prefix, subfolders included, no folder entries |
 | `storage.from('b').remove([paths])` | `eb.storage.remove('b/' + path)` per file |
 | `functions.invoke(name, { body })` | `eb.functions.invoke(name, { body })` |
-| `channel(…).on('postgres_changes', { event, table }, cb).subscribe()` | `const sub = eb.realtime.on(table, 'INSERT' \| 'UPDATE' \| 'DELETE' \| '*', cb)` → `eb.realtime.off(sub)` |
+| `channel(…).on('postgres_changes', { event, schema, table }, cb).subscribe()` | `const sub = eb.realtime.on(table, 'INSERT' \| 'UPDATE' \| 'DELETE' \| '*', cb)` → `eb.realtime.off(sub)`. Needs `projectId` in `createClient`. **Custom RLS policies don't apply to realtime:** signed-in users get only their own rows on tables with an owner column (`user_id`, `owner_id`, `created_by`, `uploaded_by`), and nothing else is filtered — tell the developer which subscribed tables relied on Supabase's realtime RLS |
 
 Errors are plain strings (`toast.error(error)`, not `error.message`), except `functions.invoke`, whose `error` has a `message`. A file in a folder shared with everyone (a former public bucket) has a plain URL: `eb.storage.getPublicUrl('bucket/' + path)`. Before writing calls you're unsure of, read the SDK reference: https://github.com/STGime/euroback/blob/main/integrations/lovable/references/sdk-reference.md (written for Lovable apps; the calls are the same everywhere), or console → Docs.
 
@@ -180,14 +187,22 @@ For OAuth: set each provider up in console → Auth with the **same OAuth app (c
 
 ## Step 8 — Switch over
 
-**Decision:** the developer picks the moment. In order:
+**Decision:** the developer picks the moment. The production project is a new, empty project; the test project stays a test.
 
-1. Stop writes on Supabase (maintenance mode in the app, or a quiet hour).
-2. Run `data` again **into a fresh project** for the final copy — the data import is not incremental (or, if Supabase barely changed, copy only the tables that changed with `--table`).
-3. Run `storage --apply` once more: it copies only new files.
-4. Switch the cron jobs on in console → Cron, and switch them off on Supabase.
-5. Deploy the app with the Eurobase keys.
-6. Keep the Supabase project untouched for a while as the way back.
+Before the switch (Supabase keeps running):
+
+1. Create the production project and make it active (`eurobase projects create`, `eurobase switch`).
+2. In a **new folder**, put the schema migration the test project used into `migrations/` — not the test's data files — and run `eurobase migrations up`. (The data import writes new files next to old ones; applying old and new data together writes rows twice.)
+3. Copy the files (`storage --apply`), have the developer set the secrets, deploy the functions, import the cron jobs (switched off), and set up auth providers, CORS origins and redirect URLs — steps 4–7 against the production project.
+
+The switch:
+
+4. The developer stops writes on Supabase (maintenance mode in the app, or a quiet hour).
+5. In the new folder: `eurobase import supabase data --migrations-dir ./migrations`, then — after the developer's go — `eurobase migrations up`. Compare row counts with Supabase.
+6. Run `storage --apply` once more: it copies only new files.
+7. The developer switches the cron jobs on in console → Cron, and switches them off on Supabase themselves (you never write to Supabase).
+8. Deploy the app with the Eurobase keys.
+9. Keep the Supabase project untouched for a while as the way back.
 
 ## What to tell the developer at the end
 
