@@ -59,10 +59,11 @@ Typical flow (each step is its own subcommand):
                   written, with a compatibility layer.
   6. cron       — carry scheduled jobs (pg_cron) over to cron jobs.
 
-Every subcommand needs the Supabase source credentials:
+Supabase source credentials:
 
-  SUPABASE_DB_URL       postgres://…  (the tenant's Supabase Postgres URL)
-  SUPABASE_SERVICE_KEY  the Supabase service-role key
+  SUPABASE_DB_URL            postgres://…  (Session pooler URL) — every subcommand
+  SUPABASE_URL               https://<ref>.supabase.co — storage --apply only
+  SUPABASE_SERVICE_ROLE_KEY  the Supabase service-role key — storage --apply only
 
 Target Eurobase project comes from the standard Eurobase CLI config
 (run "eurobase login" + "eurobase switch <project>" first).
