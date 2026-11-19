@@ -1,6 +1,6 @@
 # @eurobase/sdk reference for Lovable apps
 
-Written against `@eurobase/sdk` 0.8.1+. All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
+Written against `@eurobase/sdk` 0.12.0 (most of it works from 0.8.1). All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
 
 ## Return shapes
 
@@ -19,6 +19,11 @@ Written against `@eurobase/sdk` 0.8.1+. All examples assume the shared client an
 | `storage.list` | `{ objects, has_more, next_cursor, error }` |
 | `storage.download` | `Blob` |
 | `functions.invoke` | `{ data, error: { status, message } or null }` (`status` is `0` today — show `message`, don't branch on `status`) |
+| `db.rpc(fn, args)` | `{ data, error, code }` — `code` is the Postgres error code (`P0001` for the function's own `RAISE EXCEPTION`, `42501` for a permission or RLS denial) |
+| `auth.signOut` / `forgotPassword` / `resetPassword` / `verifyEmail` / `resendVerification` / `requestMagicLink` | `{ error }` |
+| `auth.updatePassword` | `{ data: AuthSession or null, error }` |
+| `auth.onAuthStateChange(cb)` | an unsubscribe function |
+| `realtime.on` | a subscription; pass it to `realtime.off` |
 
 `AuthSession = { access_token, refresh_token, expires_in, token_type, user }`
 `AuthUser = { id, email, display_name?, avatar_url?, metadata?, created_at, updated_at }`
@@ -50,10 +55,20 @@ await eb.db.from('projects').update(id, { status: 'archived' })
 // Delete by id
 await eb.db.from('projects').delete(id)
 
-// IN filter; date range (both bounds apply)
+// IN filter; date range (both bounds apply); not equal
 await eb.db.from('tasks').in('project_id', projectIds)
 await eb.db.from('events').gte('created_at', from).lte('created_at', to)
+await eb.db.from('tasks').neq('status', 'done')
+
+// A row this row points to (one level, along a foreign key of this table)
+const { data } = await eb.db.from('tasks').select('id', 'title', 'projects(id,name)')
+// → [{ id, title, projects: { id, name } }]
+
+// A database function (Postgres function in your schema)
+const { data: total, error, code } = await eb.db.rpc('order_total', { p_order_id: id })
 ```
+
+Filters: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`. Shape: `select(...columns)`, `order(column, { ascending })`, `limit`, `offset`, `single()`.
 
 With TanStack Query, wrap calls so errors throw:
 
@@ -70,7 +85,7 @@ export function useProjects() {
 }
 ```
 
-"Join" pattern (no embeds in the SDK):
+Rows that point *to* this table (a project's tasks) aren't embedded — load them with a second query:
 
 ```typescript
 const { data: tasks } = await eb.db.from('tasks').eq('assignee_id', userId)
@@ -80,7 +95,7 @@ const { data: projects } = ids.length
   : { data: [] }
 ```
 
-Limits to remember: no upsert, no `.or()`, no `.is(null)`, no nested selects, and `update`/`delete` only by `id`. Several filters on the same column are fine, up to 64 filters per query. Bulk changes across many rows belong in an edge function.
+Limits to remember: `insert` takes one row (an object, not an array); no upsert, no `.or()`, no `.not()`, no `.is(null)`, no `.maybeSingle()` (`single()` returns the error `'Row not found'` when there's no row), embeds one level deep and only along this table's foreign keys, and `update`/`delete` only by `id`. Several filters on the same column are fine, up to 64 filters per query. Anything beyond that — upserts, bulk changes, `OR` conditions — goes into a database function called with `rpc`, or an edge function.
 
 ## Auth provider
 
@@ -181,6 +196,26 @@ const { data: job } = await eb.auth.exportMyData('json')
 
 Rate-limited to one export per user per day by default.
 
+Account and session:
+
+```typescript
+await eb.auth.signOut()                       // ends the session in this tab and the others
+const { data: session } = await eb.auth.refreshSession()   // the SDK also refreshes on its own
+const { error } = await eb.auth.updatePassword({ currentPassword, newPassword })
+// users without a password (magic link, OAuth) set one with forgotPassword() / resetPassword()
+```
+
+Passkeys (sign-in without a password):
+
+```typescript
+if (eb.auth.passkeysSupported()) {
+  await eb.auth.registerPasskey('My laptop')          // signed in: adds a passkey
+  const { data: session } = await eb.auth.signInWithPasskey()
+  const { data: keys } = await eb.auth.listPasskeys()
+  await eb.auth.deletePasskey(keys![0].id)
+}
+```
+
 ## Storage
 
 ```typescript
@@ -234,6 +269,8 @@ useEffect(() => {
 }, [])
 ```
 
+Events: `'INSERT'`, `'UPDATE'`, `'DELETE'` or `'*'`. `eb.realtime.disconnect()` closes the connection (on sign-out, say).
+
 The client needs `projectId` (see `SKILL.md` setup) — without it, signed-in users can't connect. Events carry `type`, `record`, `old_record`. The server filters by owner column (`user_id`, `owner_id`, `created_by`, `uploaded_by`): signed-in users receive only their own rows on tables that have one, and anonymous visitors receive nothing from those tables. Custom RLS policies are **not** enforced over realtime yet, so don't subscribe to tables whose privacy depends on custom policies.
 
 ## Edge functions
@@ -262,7 +299,11 @@ const handler: EdgeHandler = async (req, ctx) => {
 export default handler
 ```
 
-`ctx.user` is set when the caller is signed in and the function has **Require JWT** on (the default); a function with it off also accepts signed-out callers, and `ctx.user` is then `null`. Treat `ctx.db.sql` as privileged: always scope queries with `ctx.user.id` yourself and use `$1` parameters, never string concatenation. `ctx` also has `storage.upload / createSignedUrl / delete`, `env`, and `requestId`.
+`ctx.user` is set when the caller is signed in and the function has **Require JWT** on (the default); a function with it off also accepts signed-out callers, and `ctx.user` is then `null`. With a signed-in caller, `ctx.db.sql` runs as that user, under your RLS policies. Without one it runs with the service role, which every policy lets through — treat it as privileged: always scope queries with `ctx.user.id` yourself and use `$1` parameters, never string concatenation.
+
+A write the user may not make themselves (a subscription, a credit balance), after your code has checked the request: `ctx.db.asService().sql(query, params)` runs one statement with the service role while `auth_uid()` is still the caller. It needs the function's **allow service role** setting (CLI: `eurobase edge-functions deploy <name> --allow-service-role`).
+
+`ctx` also has `storage.upload / createSignedUrl / delete`, `vault.get`, `env`, `log.info / warn / error`, and `requestId`.
 
 Calling it from the app:
 
@@ -276,6 +317,8 @@ The signed-in user's token is attached automatically, which is what populates `c
 Try a deployed function in the console → Functions → select it → **Test**: method, body, optional "run as end user"; it shows the status, response, `ctx.log` lines and the equivalent curl command.
 
 Schedules (cron) are created in the console → Cron & RPC, not from the browser.
+
+Server-only parts of the SDK — they need the secret key (`eb_sk_…`), so they belong in your backend or a script, never in the app: `eb.vault.list / get / set / delete`, `eb.functions.schedules.create / update / get / list / delete / createOrUpdate`, and `eb.db.schema.createTable / dropTable / addColumn / dropColumn`. `eb.status()` checks the connection.
 
 ## Common errors
 

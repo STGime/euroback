@@ -138,14 +138,39 @@ Replace `@supabase/supabase-js` with `@eurobase/sdk`. Don't rename things that d
 | supabase-js | @eurobase/sdk |
 |---|---|
 | `createClient(url, anonKey)` | `createClient({ url, apiKey: publicKey, projectId })` |
-| `supabase.auth.signInWithPassword({ email, password })` | `eb.auth.signIn({ email, password })` |
-| `supabase.auth.signInWithOAuth({ provider: 'google' })` | `eb.auth.signInWithOAuth('google', { redirectTo })`, then `eb.auth.handleOAuthCallback()` on the callback page |
-| `supabase.from('t').update(values).eq('id', id)` | `eb.db.from('t').update(id, values)` |
-| `supabase.from('t').delete().eq('id', id)` | `eb.db.from('t').delete(id)` |
-| `supabase.storage.from('bucket').upload(path, file)` | `eb.storage.upload('bucket/' + path, file)` (one bucket per project; the old bucket is a folder) |
-| `supabase.storage.from('bucket').createSignedUrl(path, 60)` | `eb.storage.createSignedUrl('bucket/' + path, 'download', { expiresIn: 60 })` |
-| `supabase.functions.invoke(name, { body })` | `eb.functions.invoke(name, { body })` |
-| `supabase.channel(...).on('postgres_changes', …)` | `eb.realtime.on(table, 'INSERT' | 'UPDATE' | 'DELETE', cb)` |
+| `auth.signUp({ email, password, options: { data, emailRedirectTo } })` | `eb.auth.signUp({ email, password, metadata, emailRedirectTo })` |
+| `auth.signInWithPassword({ email, password })` | `eb.auth.signIn({ email, password })` |
+| `auth.signInWithOAuth({ provider: 'google', options: { redirectTo } })` | `eb.auth.signInWithOAuth('google', { redirectTo })`, then `eb.auth.handleOAuthCallback()` on the callback page |
+| `auth.signInWithOtp({ email })` | `eb.auth.requestMagicLink(email, { emailRedirectTo })`, then `eb.auth.signInWithMagicLink(token)` on the link's page |
+| `auth.resetPasswordForEmail(email, { redirectTo })` | `eb.auth.forgotPassword(email, { emailRedirectTo })`, then `eb.auth.resetPassword(token, newPassword)` |
+| `auth.updateUser({ password })` | `eb.auth.updatePassword({ currentPassword, newPassword })` (needs the current password) |
+| `auth.signOut()` | `eb.auth.signOut()` |
+| `(await auth.getSession()).data.session` | `eb.auth.getSession()` (synchronous) |
+| `(await auth.getUser()).data.user` | `(await eb.auth.getUser()).data` |
+| `auth.onAuthStateChange(cb)` → `data.subscription.unsubscribe()` | `const off = eb.auth.onAuthStateChange(cb)` → `off()` |
+| `from('t').select('id, name')` | `eb.db.from('t').select('id', 'name')` |
+| `from('t').select('*, author(*)')` (to-one) | `eb.db.from('t').select('*', 'author(*)')` — one level, along a foreign key of `t` |
+| `from('t').select('*, comments(*)')` (to-many) | a second query: `eb.db.from('comments').in('post_id', ids)` |
+| `.eq / .neq / .gt / .gte / .lt / .lte / .like / .ilike / .in / .order / .limit` | the same |
+| `.range(from, to)` | `.offset(from).limit(to - from + 1)` |
+| `.single()` | `.single()` (error `'Row not found'` when there's no row) |
+| `.maybeSingle()` | `.single()` and treat `'Row not found'` as "none" |
+| `.or()`, `.not()`, `.is()`, `.contains()`, `.textSearch()` | a database function called with `eb.db.rpc` (or an edge function) |
+| `from('t').insert(row).select().single()` | `eb.db.from('t').insert(row)` (returns the row) |
+| `from('t').insert([rows])` | one `insert` per row, or a database function for bulk inserts |
+| `from('t').upsert(row)` | a database function (`INSERT … ON CONFLICT`) called with `rpc` |
+| `from('t').update(values).eq('id', id)` | `eb.db.from('t').update(id, values)` (by id only) |
+| `from('t').delete().eq('id', id)` | `eb.db.from('t').delete(id)` (by id only) |
+| `rpc(fn, args)` | `eb.db.rpc(fn, args)` → `{ data, error, code }` |
+| `storage.from('b').upload(path, file)` | `eb.storage.upload('b/' + path, file, { contentType })` (one bucket per project; the old bucket is a folder) |
+| `storage.from('b').createSignedUrl(path, 60)` | `eb.storage.createSignedUrl('b/' + path, 'download', { expiresIn: 60 })` |
+| `storage.from('b').createSignedUploadUrl(path)` | `eb.storage.createSignedUrl('b/' + path, 'upload')` |
+| `storage.from('b').getPublicUrl(path)` | `eb.storage.getPublicUrl('b/' + path)` (folders shared with everyone; public key only) |
+| `storage.from('b').download(path)` | `eb.storage.download('b/' + path)` → `Blob` |
+| `storage.from('b').list(folder)` | `eb.storage.list({ prefix: 'b/' + folder + '/' })` → `{ objects, has_more, next_cursor }` |
+| `storage.from('b').remove([paths])` | `eb.storage.remove('b/' + path)` per file |
+| `functions.invoke(name, { body })` | `eb.functions.invoke(name, { body })` |
+| `channel(…).on('postgres_changes', { event, table }, cb).subscribe()` | `const sub = eb.realtime.on(table, 'INSERT' \| 'UPDATE' \| 'DELETE' \| '*', cb)` → `eb.realtime.off(sub)` |
 
 Errors are plain strings (`toast.error(error)`, not `error.message`), except `functions.invoke`, whose `error` has a `message`. A file in a folder shared with everyone (a former public bucket) has a plain URL: `eb.storage.getPublicUrl('bucket/' + path)`. Before writing calls you're unsure of, read the SDK reference: https://github.com/STGime/euroback/blob/main/integrations/lovable/references/sdk-reference.md (written for Lovable apps; the calls are the same everywhere), or console → Docs.
 
