@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2103,6 +2104,44 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if !strings.Contains(again.Service, "not switched on") || again.UserSees != 1 {
 			return fmt.Errorf("after switching the setting off: %+v, want asService refused", again)
+		}
+		// Requests at the same time: redeploys must not write an earlier
+		// "on" back over a switch-off, and each change gets a version of
+		// its own (the runner caches per version).
+		versionOf := func(r *httpResult) (int, bool) {
+			var f struct {
+				Version          int  `json:"version"`
+				AllowServiceRole bool `json:"allow_service_role"`
+			}
+			_ = json.Unmarshal([]byte(r.body), &f)
+			return f.Version, f.AllowServiceRole
+		}
+		r := console("PUT", "/functions/e2e-as-service", `{"allow_service_role":true}`)
+		if r.code >= 300 {
+			return r
+		}
+		v0, _ := versionOf(r)
+		const redeploys = 6
+		var wg sync.WaitGroup
+		for i := 0; i <= redeploys; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if i == redeploys {
+					console("PUT", "/functions/e2e-as-service", `{"allow_service_role":false}`)
+					return
+				}
+				b, _ := json.Marshal(map[string]any{"code": code + strings.Repeat("\n", i+2)})
+				console("PUT", "/functions/e2e-as-service", string(b))
+			}(i)
+		}
+		wg.Wait()
+		v1, allowed := versionOf(console("GET", "/functions/e2e-as-service", ""))
+		if allowed || v1 != v0+redeploys+1 {
+			return fmt.Errorf("after %d redeploys and a switch-off at once: setting %v, version %d -> %d (want off, +%d)", redeploys, allowed, v0, v1, redeploys+1)
+		}
+		if last, err := invoke("e2e-as-service"); err != nil || !strings.Contains(last.Service, "not switched on") {
+			return fmt.Errorf("after the concurrent switch-off: %+v %v, want asService refused", last, err)
 		}
 		if n := env.dedCount(t, "as_service_ledger", "note = 'service'"); n != 1 {
 			return fmt.Errorf("%d service rows in the project's database, want 1", n)

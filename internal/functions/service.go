@@ -348,14 +348,12 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	if req.VerifyJWT != nil {
 		verifyJWT = *req.VerifyJWT
 	}
-	allowServiceRole := existing.AllowServiceRole
-	if req.AllowServiceRole != nil && *req.AllowServiceRole != existing.AllowServiceRole {
-		allowServiceRole = *req.AllowServiceRole
-		// A new version, so the runner (which caches a function per
-		// version) picks the change up on the next call — switching the
-		// setting off must not wait for a cache to expire.
-		bumpVersion = true
-	}
+	// The setting and the version are decided in the UPDATE itself, from
+	// the row as it is then — not from the read above. Two requests at
+	// once (a redeploy and a switch-off, say) must not write a stale "on"
+	// back, and must not end on the same version number: the runner caches
+	// a function per version, so a changed setting needs a version of its
+	// own to apply on the next call.
 	if req.Status != nil {
 		if *req.Status != "active" && *req.Status != "disabled" {
 			return nil, fmt.Errorf("invalid status: must be 'active' or 'disabled'")
@@ -366,13 +364,11 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 		envVars = req.EnvVars
 	}
 
-	version := existing.Version
 	if bumpVersion {
 		// Save current code as a version before overwriting.
 		if saveErr := s.SaveVersion(ctx, existing.ID, existing.Version, existing.Code); saveErr != nil {
 			slog.Warn("failed to save function version", "error", saveErr)
 		}
-		version++
 	}
 
 	// Seal env_vars at rest with the per-tenant vault key (#206). The
@@ -395,21 +391,22 @@ func (s *Service) Update(ctx context.Context, projectID, name string, req Update
 	err = s.pool.QueryRow(ctx,
 		`UPDATE edge_functions
 		 SET code = $3, compiled_code = COALESCE($10, compiled_code),
-		     verify_jwt = $4, allow_service_role = $12, status = $5,
+		     verify_jwt = $4, allow_service_role = COALESCE($12, allow_service_role), status = $5,
 		     env_vars = $6, env_vars_blob = $7, env_vars_nonce = $8, env_vars_key_version = $9,
-		     version = $11, updated_at = now()
+		     version = version + CASE WHEN $11::boolean OR COALESCE($12, allow_service_role) IS DISTINCT FROM allow_service_role THEN 1 ELSE 0 END,
+		     updated_at = now()
 		 WHERE project_id = $1 AND name = $2
 		 RETURNING id, project_id, name, code, verify_jwt, allow_service_role, status, version, created_at, updated_at`,
 		projectID, name, code, verifyJWT, status,
 		legacyEnvVars, blob, nonce, nullIfZero(keyVersion),
-		compiled, version, allowServiceRole,
+		compiled, bumpVersion, req.AllowServiceRole,
 	).Scan(&f.ID, &f.ProjectID, &f.Name, &f.Code, &f.VerifyJWT, &f.AllowServiceRole, &f.Status, &f.Version, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update edge function: %w", err)
 	}
 	f.EnvVars = envVars
 
-	slog.Info("edge function updated", "project_id", projectID, "name", name, "version", version)
+	slog.Info("edge function updated", "project_id", projectID, "name", name, "version", f.Version, "allow_service_role", f.AllowServiceRole)
 	return &f, nil
 }
 
@@ -598,20 +595,19 @@ func (s *Service) Rollback(ctx context.Context, projectID, name string, version 
 	}
 
 	// Update the function with the rolled-back code.
-	newVersion := fn.Version + 1
 	var updated EdgeFunction
 	err = s.pool.QueryRow(ctx,
 		`UPDATE edge_functions
-		 SET code = $3, compiled_code = $5, version = $4, updated_at = now()
+		 SET code = $3, compiled_code = $4, version = version + 1, updated_at = now()
 		 WHERE project_id = $1 AND name = $2
 		 RETURNING id, project_id, name, code, verify_jwt, allow_service_role, status, version, created_at, updated_at`,
-		projectID, name, code, newVersion, compiled,
+		projectID, name, code, compiled,
 	).Scan(&updated.ID, &updated.ProjectID, &updated.Name, &updated.Code, &updated.VerifyJWT, &updated.AllowServiceRole, &updated.Status, &updated.Version, &updated.CreatedAt, &updated.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("rollback edge function: %w", err)
 	}
 
-	slog.Info("edge function rolled back", "project_id", projectID, "name", name, "to_version", version, "new_version", newVersion)
+	slog.Info("edge function rolled back", "project_id", projectID, "name", name, "to_version", version, "new_version", updated.Version)
 	return &updated, nil
 }
 

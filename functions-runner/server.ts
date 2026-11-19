@@ -395,8 +395,10 @@ async function executeFunction(
   // deno-lint-ignore no-explicit-any
   async function runDBSql(query: string, params: unknown[], asService = false): Promise<any> {
     // ctx.db.asService() needs the function's own setting. Checked here,
-    // before anything reaches the database.
-    if (asService) {
+    // before anything reaches the database. A call without a user is the
+    // service role anyway, so code shared by user calls and cron runs
+    // doesn't need the setting for the latter.
+    if (asService && userId) {
       const denied = asServiceError(fn.allowServiceRole);
       if (denied) throw new Error(denied);
     }

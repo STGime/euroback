@@ -164,7 +164,7 @@ export interface EdgeContext {
      * Only for a function that has the "allow service role" setting
      * (`eurobase edge-functions deploy <name> --allow-service-role`);
      * otherwise the call throws. A call without a signed-in user
-     * already runs as the service role.
+     * already runs as the service role, with or without the setting.
      */
     asService(): {
       sql<TRow = Record<string, unknown>>(

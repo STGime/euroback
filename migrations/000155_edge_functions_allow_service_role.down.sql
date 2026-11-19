@@ -1,4 +1,7 @@
 -- 000155_edge_functions_allow_service_role.down.sql
+--
+-- Roll the runner back first: a runner that selects allow_service_role
+-- can't load functions from the lookup below.
 
 DROP FUNCTION public.runner_get_function(uuid, uuid);
 
