@@ -469,14 +469,28 @@ eurobase import supabase cron --apply    # creates the ready jobs, switched off
 - [ ] `net.http_post(url:='…/functions/v1/<name>', …)` is shown as a job
       that runs the function `<name>`; a fixed JSON `body` is its
       payload.
-- [ ] No key from a `headers` argument appears anywhere in the output or
-      in the created job.
+- [ ] No request header is carried into a job; their names are listed.
+      No key (a `Bearer` token, a key in a URL's query string or in the
+      body) appears in the output: the payload is shown by its keys.
+- [ ] pg_net's positional form (`net.http_post(url, body, params,
+      headers)`) is read like the named one.
 - [ ] Schedules: `1-5`, `MON-FRI`, `8-18/2`, `*/3` on days or months and
       weekday `7` are written out as lists; a rewritten schedule is
       noted next to the job.
-- [ ] Listed as "needs changes", with the reason: several statements,
-      Supabase's own schemas, a URL that isn't a function, a schedule in
-      seconds, `$`, a schedule limiting both day of month and weekday.
+- [ ] Listed as "needs changes", with the reason: several statements;
+      a pg_net call that isn't the whole command (in a CTE, a DO block,
+      followed by another statement); Supabase's own schemas or another
+      schema, quoted or not; the http extension; statements other than
+      SELECT / INSERT / UPDATE / DELETE / CALL (VACUUM, TRUNCATE,
+      REFRESH, ALTER, SET); a URL that isn't `/functions/v1/<name>`
+      exactly, or is built in SQL; a schedule in seconds, `$`,
+      `@reboot`.
+- [ ] Day of month and weekday: `0 0 13 * 5` (neither field begins with
+      `*`, so pg_cron runs it when either matches) is refused;
+      `0 0 1-31 * 1` becomes every day; `0 0 */2 * 1` (begins with `*`,
+      both must match) is carried over.
+- [ ] A time zone that isn't an IANA name stops the command with a hint
+      to pass `--timezone`.
 - [ ] A job that is inactive on Supabase says so.
 
 ### 6b.2 Assertions on apply
@@ -490,8 +504,10 @@ eurobase import supabase cron --apply    # creates the ready jobs, switched off
       says so.
 - [ ] On a Free project the third job is refused with the plan's limit.
 
-`TestReadPgCronJobs_Fixture` (with `ASSESS_SCRATCH_DB_URL`) reads a
-pg_cron-shaped table; `cron_import_from_supabase` in `TestTeamEndToEnd`
+`TestTranslateCronSchedule_SameRunTimes` compares, minute by minute
+over two years, when cron's rule and the scheduler's rule run each
+translated schedule. `TestReadPgCronJobs_Fixture` (with
+`ASSESS_SCRATCH_DB_URL`) reads a pg_cron-shaped table; `cron_import_from_supabase` in `TestTeamEndToEnd`
 sends the import's requests to the real server.
 
 ---
