@@ -1,29 +1,20 @@
 package cli
 
-// #271 (part of #267): `eurobase import supabase storage` — enumerate
-// Supabase buckets, produce a summary report, and print the `rclone`
-// commands the tenant runs to copy the bytes over.
+// `eurobase import supabase storage` — copy a Supabase project's files
+// into a Eurobase project.
 //
-// Scope note: the umbrella issue #271 mentions extending Eurobase's
-// storage model to support multiple buckets per project (currently one
-// bucket-per-project). That platform work — DB migration adding a
-// `bucket` column to `storage_objects`, gateway routing by bucket,
-// SDK `.bucket('name')` accessor — is a SEPARATE follow-up PR. This
-// PR ships the CLI-side extraction so tenants can start moving bytes;
-// once multi-bucket ships, a later revision of this command will also
-// emit policy translations mapping `bucket_id` → `bucket`.
-//
-// Approach — same shape as `assess` (#268) and `schema` (#269): the
-// CLI does read-only enumeration + emits shell commands. The tenant
-// runs the actual byte transfer manually (`rclone` on PATH). Nothing
-// automatic against the target Eurobase project — the tenant reviews
-// the plan and executes.
+// Without --apply it reports what there is (buckets, files, sizes, what
+// becomes of public buckets and storage policies) and changes nothing.
+// With --apply it copies: see migrate_supabase_storage_copy.go. The copy
+// can be stopped and run again; files already copied are skipped.
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -36,93 +27,71 @@ func importSupabaseStorageCmd() *cobra.Command {
 	var (
 		outputPath   string
 		targetBucket string
-		showRclone   bool
+		apply        bool
+		parallel     int
+		missingOwner string
 	)
 	cmd := &cobra.Command{
 		Use:   "storage",
-		Short: "Enumerate Supabase buckets and print the rclone commands to copy the bytes",
-		Long: `Read the bucket layout from a Supabase project (via its Postgres
-storage.buckets + storage.objects tables) and produce a plan the tenant
-can act on:
+		Short: "Copy a Supabase project's files (storage buckets) into the active project",
+		Long: `Copy the files of a Supabase project into the active Eurobase project.
 
-  1. A summary report per bucket: size, object count, public/private,
-     file-size limit, allowed MIME types.
-  2. The exact ` + "`rclone sync`" + ` command the tenant runs to copy the
-     bytes from Supabase's S3-compatible endpoint into Eurobase's
-     Scaleway bucket.
+Without --apply, report what there is and change nothing: buckets, file
+counts and sizes, and what happens to each bucket.
+
+With --apply, copy every file. Each file is streamed from Supabase straight
+to the project's bucket (nothing is stored on this machine), a few at a
+time. The copy can be stopped and run again: files already copied are
+skipped.
+
+How files come over:
+  - A Supabase bucket becomes a folder: avatars/u1/me.png stays
+    avatars/u1/me.png. (storage.from("avatars") in a function built with
+    the Supabase compatibility layer uses the same folder.)
+  - A file keeps its owner, the end user who uploaded it, so they keep
+    the access they had. Import the users first (import supabase data).
+    A file whose owner is not a user of the project is imported as a
+    developer file (--missing-owner skip leaves it out).
+  - The files of a public bucket become developer files in a folder
+    shared with everyone, because on Supabase anyone can read every file
+    of a public bucket. Their owners can no longer replace or delete
+    them from the app.
+  - Supabase's storage policies are not carried over; on Eurobase each
+    end user owns their files, and folders can be shared.
+
+Limits: one file can be up to 5 GB; the project's storage limit applies.
 
 Env vars:
-  SUPABASE_DB_URL   postgres:// URL of the Supabase project (required
-                    — enumerates storage.buckets + storage.objects)
-
-Prerequisites (documented in the report footer):
-  rclone on PATH.
-
-  Two rclone remotes need to be configured — the tenant sets these up
-  once, then reruns the printed commands. Suggested names:
-    supabase_src   — the source project's S3-compatible endpoint.
-                     Region: any (Supabase uses "us-east-1").
-                     Endpoint: https://<project>.supabase.co/storage/v1/s3
-                     Provider: "Other" / S3-compatible.
-                     Access key + secret: the service-role key pair
-                     from the Supabase console (Storage → API keys).
-    eurobase_dst   — the target Eurobase project's Scaleway bucket.
-                     Region: fr-par (or your project's region).
-                     Endpoint: https://s3.fr-par.scw.cloud
-                     Provider: Scaleway.
-                     Access key + secret: from the Eurobase console
-                     (Storage → Credentials → S3-compatible).
-
-## Multi-bucket scope note
-
-Supabase supports arbitrarily many buckets per project. Eurobase today
-runs one bucket per project. Translating multi-bucket layouts into
-Eurobase natively is a platform-side change (DB migration + gateway
-routing + SDK accessor) shipping in a later PR. In the interim, this
-command:
-
-  - Reports every source bucket individually.
-  - Prints one ` + "`rclone sync`" + ` command per bucket, targeting
-    ` + "`eurobase_dst:<bucket-name>/`" + ` — the tenant gets the same
-    prefix layout once multi-bucket lands.
-
-Pass --bucket <name> to filter to a single source bucket. Pass
---rclone=false to suppress the rclone commands (report only).`,
+  SUPABASE_DB_URL             the Supabase database (lists the files)
+  SUPABASE_URL                https://<ref>.supabase.co  (with --apply)
+  SUPABASE_SERVICE_ROLE_KEY   reads the files            (with --apply)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			dbURL := os.Getenv("SUPABASE_DB_URL")
 			if dbURL == "" {
 				return fmt.Errorf("SUPABASE_DB_URL is required (postgres:// URL of the Supabase project)")
 			}
-			if showRclone {
-				if _, err := exec.LookPath("rclone"); err != nil {
-					fmt.Fprintln(cmd.ErrOrStderr(),
-						"warning: rclone not found on PATH — install it (`brew install rclone` / `apt install rclone` / `apk add rclone`, or https://rclone.org/downloads/) before running the printed commands")
-				}
+			if missingOwner != "developer" && missingOwner != "skip" {
+				return fmt.Errorf("--missing-owner takes developer or skip")
 			}
-
-			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
-			defer cancel()
-
-			conn, err := pgx.Connect(ctx, dbURL)
+			ctx := cmd.Context()
+			connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			conn, err := pgx.Connect(connectCtx, dbURL)
+			cancel()
 			if err != nil {
 				return fmt.Errorf("connect to Supabase: %w", err)
 			}
-			defer conn.Close(ctx)
+			defer conn.Close(context.Background())
 
 			buckets, err := listSupabaseBuckets(ctx, conn)
 			if err != nil {
 				return fmt.Errorf("enumerate buckets: %w", err)
 			}
 			if len(buckets) == 0 {
-				fmt.Fprintln(cmd.ErrOrStderr(), "No buckets found on the source Supabase project. Nothing to copy.")
+				fmt.Fprintln(cmd.OutOrStdout(), "No buckets on the source project: nothing to copy.")
 				return nil
 			}
 			if targetBucket != "" {
-				// Snapshot the full name list BEFORE filtering — the
-				// "not found" error path needs to list what IS
-				// available, and reusing the same backing array via
-				// `buckets[:0]` would leave the join walking an empty
-				// slice. (#276 review ship-blocker.)
 				available := joinBucketNames(buckets)
 				filtered := make([]supabaseBucket, 0, 1)
 				for _, b := range buckets {
@@ -136,29 +105,201 @@ Pass --bucket <name> to filter to a single source bucket. Pass
 				buckets = filtered
 			}
 
-			report, err := buildStorageReport(ctx, conn, buckets, showRclone)
-			if err != nil {
-				return fmt.Errorf("build report: %w", err)
-			}
-
-			if outputPath == "-" || outputPath == "" {
-				_, err := cmd.OutOrStdout().Write([]byte(report))
+			if !apply {
+				report, err := buildStorageReport(ctx, conn, buckets)
 				if err != nil {
+					return fmt.Errorf("build report: %w", err)
+				}
+				if outputPath == "-" || outputPath == "" {
+					_, err := io.WriteString(cmd.OutOrStdout(), report)
 					return err
 				}
+				if err := os.WriteFile(outputPath, []byte(report), 0o644); err != nil {
+					return fmt.Errorf("write report: %w", err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Storage report written to %s\n", outputPath)
 				return nil
 			}
-			if err := os.WriteFile(outputPath, []byte(report), 0o644); err != nil {
-				return fmt.Errorf("write report: %w", err)
+
+			base := strings.TrimSpace(os.Getenv("SUPABASE_URL"))
+			key := strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_ROLE_KEY"))
+			if base == "" || key == "" {
+				return errors.New("--apply reads the files through Supabase's storage API: set SUPABASE_URL (https://<ref>.supabase.co) and SUPABASE_SERVICE_ROLE_KEY")
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Storage report written to %s\n", outputPath)
-			return nil
+			cfg, err := LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := RequireProject(cfg); err != nil {
+				return err
+			}
+			client, err := NewClientFromConfig()
+			if err != nil {
+				return err
+			}
+			// Large files: no overall time limit on a single transfer.
+			transfer := &http.Client{Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				ResponseHeaderTimeout: 5 * time.Minute,
+				MaxIdleConnsPerHost:   parallel * 2,
+			}}
+			src := &supabaseStorageSource{base: base, key: key, client: transfer}
+			dst := &apiStorageTarget{client: client, projectID: cfg.ActiveProject}
+			return runStorageCopy(ctx, cmd.OutOrStdout(), conn, buckets, src, dst, copyOptions{
+				Parallel:     parallel,
+				MissingOwner: missingOwner,
+				Upload:       transfer,
+			}, ProjectLabel(cfg))
 		},
 	}
-	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output path (default stdout; use a filename to save)")
-	cmd.Flags().StringVar(&targetBucket, "bucket", "", "Report only this bucket (default: all buckets)")
-	cmd.Flags().BoolVar(&showRclone, "rclone", true, "Include the rclone sync commands in the output")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Without --apply: write the report to this file (default stdout)")
+	cmd.Flags().StringVar(&targetBucket, "bucket", "", "Only this bucket (default: all buckets)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "Copy the files into the active project")
+	cmd.Flags().IntVar(&parallel, "parallel", 4, "With --apply: files copied at the same time")
+	cmd.Flags().StringVar(&missingOwner, "missing-owner", "developer", "With --apply: a file whose owner isn't a user of the project is imported as a developer file (developer) or left out (skip)")
 	return cmd
+}
+
+// runStorageCopy copies every file of the given buckets.
+func runStorageCopy(ctx context.Context, out io.Writer, q sourceQuerier, buckets []supabaseBucket, src storageSource, dst storageTarget, opts copyOptions, target string) error {
+	if opts.Parallel < 1 || opts.Parallel > 32 {
+		return fmt.Errorf("--parallel takes 1 to 32")
+	}
+	opts.PublicBuckets = map[string]bool{}
+	var names []string
+	for _, b := range buckets {
+		// The bucket's name becomes a folder name.
+		if !isSafeBucketName(b.name) {
+			return fmt.Errorf("bucket %q has characters a folder name can't have; copy the others with --bucket", b.name)
+		}
+	}
+	for _, b := range buckets {
+		names = append(names, b.name)
+		if b.public {
+			opts.PublicBuckets[b.name] = true
+		}
+	}
+	stats := &copyStats{}
+	// Public buckets: share their folder with everyone before the first
+	// file arrives.
+	for _, b := range buckets {
+		if !b.public {
+			continue
+		}
+		if err := dst.Share(b.name+"/", "public"); err != nil {
+			return fmt.Errorf("share the folder %s/ with everyone: %w", b.name, err)
+		}
+		stats.SharedFolders = append(stats.SharedFolders, b.name+"/")
+	}
+
+	fmt.Fprintf(out, "Copying into %s\n", target)
+	start := time.Now()
+	opts.Progress = func(s copyStats) {
+		fmt.Fprintf(out, "  %d files looked at: %d copied (%s), %d already there, %d left out, %d failed — %s\n",
+			s.Seen, s.Copied, formatBytes(s.Bytes), s.Already, s.Skipped, s.Failed, time.Since(start).Round(time.Second))
+	}
+	afterBucket, afterName := "", ""
+	for {
+		files, err := listSourceFiles(ctx, q, names, afterBucket, afterName, importBatchSize)
+		if err != nil {
+			return fmt.Errorf("list files: %w", err)
+		}
+		if len(files) == 0 {
+			break
+		}
+		last := files[len(files)-1]
+		afterBucket, afterName = last.Bucket, last.Name
+		var batch []sourceFile
+		for _, f := range files {
+			// Supabase's placeholder for an empty folder; folders don't
+			// need one here.
+			if f.Name == ".emptyFolderPlaceholder" || strings.HasSuffix(f.Name, "/.emptyFolderPlaceholder") {
+				continue
+			}
+			batch = append(batch, f)
+		}
+		if len(batch) > 0 {
+			if err := copyFiles(ctx, batch, src, dst, opts, stats); err != nil {
+				return err
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+
+	fmt.Fprintf(out, "\nDone: %d copied (%s), %d already there, %d left out, %d failed.\n",
+		stats.Copied, formatBytes(stats.Bytes), stats.Already, stats.Skipped, stats.Failed)
+	if len(stats.SharedFolders) > 0 {
+		fmt.Fprintf(out, "Shared with everyone (public buckets on Supabase): %s\n", strings.Join(stats.SharedFolders, ", "))
+	}
+	if stats.OwnerDropped > 0 {
+		fmt.Fprintf(out, "%d file(s) were imported as developer files (in a public bucket, or their owner isn't a user of the project).\n", stats.OwnerDropped)
+	}
+	if len(stats.Problems) > 0 {
+		fmt.Fprintln(out, "\nNot copied:")
+		for _, p := range stats.Problems {
+			fmt.Fprintf(out, "  - %s\n", p)
+		}
+	}
+	if stats.Failed > 0 {
+		return fmt.Errorf("%d file(s) failed; run the command again to retry them (copied files are skipped)", stats.Failed)
+	}
+	return nil
+}
+
+// importBatchSize matches the platform's limit per request.
+const importBatchSize = 100
+
+// listSourceFiles returns the next files after (afterBucket, afterName),
+// in byte order, from the given buckets.
+func listSourceFiles(ctx context.Context, q sourceQuerier, buckets []string, afterBucket, afterName string, limit int) ([]sourceFile, error) {
+	// The whole row as JSON: the owner column is "owner" (uuid) on older
+	// projects and "owner_id" (text) on newer ones.
+	rows, err := q.Query(ctx, `
+		SELECT o.bucket_id, o.name,
+		       COALESCE(o.metadata ->> 'size', ''), COALESCE(o.metadata ->> 'mimetype', ''),
+		       COALESCE(to_jsonb(o) ->> 'owner_id', to_jsonb(o) ->> 'owner', '')
+		  FROM storage.objects o
+		 WHERE o.bucket_id = ANY($1)
+		   AND (o.bucket_id COLLATE "C", o.name COLLATE "C") > ($2 COLLATE "C", $3 COLLATE "C")
+		 ORDER BY o.bucket_id COLLATE "C", o.name COLLATE "C"
+		 LIMIT $4`, buckets, afterBucket, afterName, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sourceFile
+	for rows.Next() {
+		var f sourceFile
+		var size string
+		if err := rows.Scan(&f.Bucket, &f.Name, &size, &f.ContentType, &f.Owner); err != nil {
+			return nil, err
+		}
+		f.Size = -1
+		if n, err := parseSize(size); err == nil {
+			f.Size = n
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func parseSize(s string) (int64, error) {
+	var n int64
+	if s == "" {
+		return 0, errors.New("empty")
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, errors.New("not a number")
+		}
+		n = n*10 + int64(c-'0')
+		if n > 1<<50 {
+			return 0, errors.New("too large")
+		}
+	}
+	return n, nil
 }
 
 // supabaseBucket is the projected shape of one row from Supabase's
@@ -174,11 +315,9 @@ type supabaseBucket struct {
 }
 
 // listSupabaseBuckets reads the bucket rows. Object counts + total
-// bytes are populated by buildStorageReport (a separate scan against
-// storage.objects since we don't want to lock buckets on a heavy
-// aggregate).
-func listSupabaseBuckets(ctx context.Context, conn *pgx.Conn) ([]supabaseBucket, error) {
-	rows, err := conn.Query(ctx, `
+// bytes are populated by buildStorageReport.
+func listSupabaseBuckets(ctx context.Context, q sourceQuerier) ([]supabaseBucket, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id, public, file_size_limit, allowed_mime_types
 		  FROM storage.buckets
 		 ORDER BY id
@@ -201,10 +340,8 @@ func listSupabaseBuckets(ctx context.Context, conn *pgx.Conn) ([]supabaseBucket,
 }
 
 // buildStorageReport writes the Markdown report for `buckets`.
-// Populates object counts + sizes per bucket by querying
-// storage.objects grouped by bucket_id.
-func buildStorageReport(ctx context.Context, conn *pgx.Conn, buckets []supabaseBucket, showRclone bool) (string, error) {
-	totals, err := storageObjectTotals(ctx, conn)
+func buildStorageReport(ctx context.Context, q sourceQuerier, buckets []supabaseBucket) (string, error) {
+	totals, err := storageObjectTotals(ctx, q)
 	if err != nil {
 		return "", err
 	}
@@ -223,134 +360,60 @@ func buildStorageReport(ctx context.Context, conn *pgx.Conn, buckets []supabaseB
 	fmt.Fprintf(&out, "# Supabase → Eurobase storage plan\n\n")
 	fmt.Fprintf(&out, "Generated: %s UTC\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&out, "Buckets: %d\n\n", len(buckets))
-
-	// Grand total.
-	var grandCount int64
-	var grandBytes int64
+	var grandCount, grandBytes int64
 	for _, b := range buckets {
 		grandCount += b.objectCount
 		grandBytes += b.totalBytes
 	}
 	fmt.Fprintf(&out, "Total objects: %s across %s\n\n", formatCount(grandCount), formatBytes(grandBytes))
-
-	// Per-bucket rows.
 	for _, b := range buckets {
-		out.WriteString(renderBucketSection(b, showRclone))
+		out.WriteString(renderBucketSection(b))
 	}
-
-	// Footer: rclone setup + next-step hints.
-	fmt.Fprintln(&out, "## Prerequisites")
+	fmt.Fprintln(&out, "## Copying")
 	fmt.Fprintln(&out, "")
-	fmt.Fprintln(&out, "1. Install `rclone` (`brew install rclone` / `apt install rclone` / `apk add rclone`, or https://rclone.org/downloads/).")
-	fmt.Fprintln(&out, "2. Configure two remotes with `rclone config`:")
-	fmt.Fprintln(&out, "   - `supabase_src` → the Supabase project's S3-compatible endpoint")
-	fmt.Fprintln(&out, "     (`https://<project>.supabase.co/storage/v1/s3`).")
-	fmt.Fprintln(&out, "   - `eurobase_dst` → the Eurobase project's Scaleway bucket")
-	fmt.Fprintln(&out, "     (`https://s3.fr-par.scw.cloud`; credentials from the Eurobase console).")
-	fmt.Fprintln(&out, "3. Run the commands above; each is idempotent — `--checksum` forces rclone to compare content hashes, not mtimes (Supabase's S3 shim frequently reports epoch mtimes, which would otherwise trigger a full re-copy on rerun).")
-	fmt.Fprintln(&out, "")
-	fmt.Fprintln(&out, "## Multi-bucket note")
-	fmt.Fprintln(&out, "")
-	fmt.Fprintln(&out, "Eurobase currently exposes one bucket per project. Each `rclone sync` above targets `eurobase_dst:<bucket-name>/`, so once Eurobase's multi-bucket support ships (planned follow-up in umbrella #267), your object layout already matches — no re-sync needed.")
+	fmt.Fprintln(&out, "Run the command again with `--apply` (and `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) to copy the files into the active project. Each file is streamed from Supabase straight to the project's bucket; the copy can be stopped and run again. Import the users first (`import supabase data`), so files keep their owners.")
 	fmt.Fprintln(&out, "")
 	fmt.Fprintln(&out, "## Storage policies")
 	fmt.Fprintln(&out, "")
-	fmt.Fprintln(&out, "Supabase per-bucket policies on `storage.objects` are NOT translated by this command — Eurobase's single-bucket policy model doesn't have a one-to-one mapping until multi-bucket lands. Review your `storage.objects` policies in the `assess` report and plan a re-implementation with Eurobase's storage policy DSL after the byte copy completes.")
+	fmt.Fprintln(&out, "Supabase's policies on `storage.objects` are not carried over. On Eurobase each end user owns the files they upload, and folders can be shared with signed-in users or everyone (console → Storage → Sharing). Check that this covers what your policies allowed.")
 	return out.String(), nil
 }
 
-// renderBucketSection returns the Markdown block for one bucket:
-// header + facts + (optional) rclone command. Extracted from
-// buildStorageReport so tests can exercise the rendering without a
-// live Postgres connection.
+// renderBucketSection returns the Markdown block for one bucket.
 //
 // All tenant-controlled strings (bucket name, MIME types) run through
 // mdEscape so a hostile source can't inject structural Markdown into
-// the report (#276 review M — same class as the H1 injection guard
-// pinned by #268 `assess`).
-func renderBucketSection(b supabaseBucket, showRclone bool) string {
+// the report.
+func renderBucketSection(b supabaseBucket) string {
 	var out strings.Builder
-	// Bucket name goes into a bold header, not backticks — a hostile
-	// bucket name with an embedded backtick can't inject structural
-	// Markdown once passed through mdEscape.
 	fmt.Fprintf(&out, "## Bucket: **%s**\n\n", mdEscape(b.name))
-	visibility := "private"
+	visibility := "private — files keep their owners"
 	if b.public {
-		visibility = "public"
+		visibility = "public — copied as developer files into a folder shared with everyone"
 	}
 	fmt.Fprintf(&out, "- Visibility: %s\n", visibility)
+	fmt.Fprintf(&out, "- Becomes the folder: %s/\n", mdEscape(b.name))
 	fmt.Fprintf(&out, "- Objects: %s\n", formatCount(b.objectCount))
 	fmt.Fprintf(&out, "- Size:    %s\n", formatBytes(b.totalBytes))
 	if b.fileSizeLimit != nil && *b.fileSizeLimit > 0 {
-		fmt.Fprintf(&out, "- File size limit: %s per object\n", formatBytes(*b.fileSizeLimit))
+		fmt.Fprintf(&out, "- File size limit: %s per object (not carried over)\n", formatBytes(*b.fileSizeLimit))
 	}
 	if len(b.allowedMimeTypes) > 0 {
-		// Escape each MIME type — the tenant controls this list on
-		// the source and a backtick in an item would otherwise
-		// break the surrounding content span.
 		escaped := make([]string, len(b.allowedMimeTypes))
 		for i, m := range b.allowedMimeTypes {
 			escaped[i] = mdEscape(m)
 		}
-		fmt.Fprintf(&out, "- Allowed MIME types: %s\n", strings.Join(escaped, ", "))
+		fmt.Fprintf(&out, "- Allowed MIME types: %s (not carried over)\n", strings.Join(escaped, ", "))
 	}
-	// Warn (in the report itself) when a bucket has objects but zero
-	// total bytes — happens on older Supabase projects where
-	// `metadata->>'size'` wasn't populated yet. Object count is
-	// accurate; the byte total is uninformative.
 	if b.objectCount > 0 && b.totalBytes == 0 {
-		fmt.Fprintln(&out, "- **Note:** total-bytes shows 0 because `metadata->>'size'` wasn't populated on this project's storage.objects (common on older Supabase schemas). The rclone sync copies every object regardless — the gap only affects this summary.")
+		fmt.Fprintln(&out, "- **Note:** the size shows 0 because `metadata->>'size'` isn't filled in on this project's storage.objects (older Supabase projects). The file count is right; sizes are read during the copy.")
 	}
 	fmt.Fprintln(&out)
-	if showRclone {
-		fmt.Fprintf(&out, "```\n%s\n```\n\n", rcloneCommandFor(b))
-	}
 	return out.String()
 }
 
-// rcloneCommandFor returns the rclone invocation for one bucket.
-//
-// Flags:
-//   - --checksum: forces size+checksum comparison instead of mtime.
-//     Supabase's S3 shim frequently reports epoch mtimes, so without
-//     this, rerunning `sync` re-copies every object silently (#276
-//     review H — mtime-based reruns weren't actually idempotent).
-//   - --progress: live meter — copies can take minutes on a decent
-//     project.
-//   - --transfers 8: parallel object copies — a sane default for a
-//     home connection.
-//
-// The source + destination remotes are addressed as `<remote>:<bucket>/`
-// (no leading `/`; the trailing `/` is the standard rclone convention
-// for "sync the whole bucket root"). This matches the layout Eurobase's
-// future multi-bucket support will consume — no re-sync needed once
-// that ships (#276 review H — code / doc alignment).
-//
-// If the bucket name contains characters that would break a shell
-// argument or the surrounding Markdown code fence (newlines, backticks,
-// quotes, control chars), we refuse to emit the command and return a
-// comment instead. Real Supabase bucket names are restricted to
-// `[a-zA-Z0-9-_.]`, so this only fires on a compromised source.
-func rcloneCommandFor(b supabaseBucket) string {
-	if !isSafeBucketName(b.name) {
-		return "# skipped — bucket name contains characters that are invalid for shell / Markdown embedding"
-	}
-	return fmt.Sprintf(
-		"rclone sync --checksum --progress --transfers 8 \\\n"+
-			"  supabase_src:%s/ \\\n"+
-			"  eurobase_dst:%s/",
-		b.name, b.name,
-	)
-}
-
 // isSafeBucketName returns true if the name matches Supabase's actual
-// bucket-name grammar: `[a-zA-Z0-9-_.]+`. Strict allowlist so no
-// injection vector — shell metacharacters (space, `;`, `|`, `&`, `<`,
-// `>`, `(`, `)`, `{`, `}`, `#`, `$`, backticks, quotes, backslash) all
-// fall on the reject side, as do Unicode line/paragraph separators
-// (U+2028 / U+2029) and BiDi overrides (U+202E) that can visually
-// reorder text in some Markdown renderers. (#276 round-2 review M —
-// closed the whole class.)
+// bucket-name grammar: `[a-zA-Z0-9-_.]+`.
 func isSafeBucketName(s string) bool {
 	if s == "" {
 		return false
@@ -373,15 +436,12 @@ type storageTotal struct {
 	bytes int64
 }
 
-// storageObjectTotals returns per-bucket object counts + byte sums via
-// one aggregate scan of storage.objects. Cheaper than N queries when a
-// project has many buckets. Missing `metadata->>'size'` falls back to 0 (the
-// count is still accurate).
-func storageObjectTotals(ctx context.Context, conn *pgx.Conn) (map[string]storageTotal, error) {
-	rows, err := conn.Query(ctx, `
+// storageObjectTotals returns per-bucket object counts and byte sums.
+func storageObjectTotals(ctx context.Context, q sourceQuerier) (map[string]storageTotal, error) {
+	rows, err := q.Query(ctx, `
 		SELECT bucket_id,
-		       COUNT(*)                                          AS n,
-		       COALESCE(SUM((metadata ->> 'size')::bigint), 0)   AS total_bytes
+		       COUNT(*) AS n,
+		       COALESCE(SUM(CASE WHEN metadata ->> 'size' ~ '^[0-9]+$' THEN (metadata ->> 'size')::bigint END), 0) AS total_bytes
 		  FROM storage.objects
 		 GROUP BY bucket_id
 	`)

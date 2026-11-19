@@ -45,6 +45,19 @@
 				</div>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
+					<p class="text-sm font-semibold text-gray-900">How do my files (storage buckets) come over?</p>
+					<p class="mt-1 text-sm text-gray-700 leading-relaxed"><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase import supabase storage</code> (CLI 0.6.8 or later) shows your buckets, file counts and sizes; with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--apply</code> it copies every file into your project. Each file is streamed from Supabase straight to your project's bucket, a few at a time, so gigabytes are fine and nothing is stored on your machine. Stop it whenever you like: run it again and files already copied are skipped. It reads the files with your Supabase project's service role key (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">SUPABASE_URL</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">SUPABASE_SERVICE_ROLE_KEY</code>).</p>
+					<ul class="mt-1 list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
+						<li><strong>A bucket becomes a folder:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">avatars/u1/me.png</code> stays <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">avatars/u1/me.png</code>. A function deployed with the Supabase compatibility layer reads <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage.from(&quot;avatars&quot;)</code> from the same folder.</li>
+						<li><strong>Files keep their owners:</strong> the end user who uploaded a file keeps the access they had, and nobody else gets it. Import your users first (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">import supabase data</code>). A file whose owner isn't a user of the project becomes a developer file (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--missing-owner skip</code> leaves it out).</li>
+						<li><strong>Public buckets</strong> become a folder shared with everyone, and their files become developer files: on Supabase anyone could read them. Their uploaders can no longer replace or delete them from your app.</li>
+						<li><strong>Nothing is overwritten:</strong> a file your project already has under the same name is left as it is and listed.</li>
+						<li><strong>Storage policies</strong> are not carried over. Check that per-user ownership and shared folders cover what your policies allowed.</li>
+						<li><strong>Limits:</strong> one file can be up to 5 GB. Your plan's storage limit applies; check the total the command shows first.</li>
+					</ul>
+				</div>
+
+				<div class="rounded-xl border border-gray-200 bg-white p-5">
 					<p class="text-sm font-semibold text-gray-900">What about my scheduled jobs (pg_cron)?</p>
 					<p class="mt-1 text-sm text-gray-700 leading-relaxed"><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase import supabase cron</code> (CLI 0.6.7 or later) reads the jobs in your Supabase project and shows how each becomes a Eurobase cron job; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--apply</code> creates them. A SQL command becomes a SQL job with the same statement. A command that calls one of your edge functions with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">net.http_post(…/functions/v1/name)</code> becomes a job that runs the function <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">name</code>, with the JSON body as its payload.</p>
 					<ul class="mt-1 list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">

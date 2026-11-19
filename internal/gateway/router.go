@@ -1459,6 +1459,9 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 						WithPoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool { return query.TenantPoolFromContext(ctx) })
 					r.With(tenant.RequireMinRole("developer")).Post("/upload", storageHandler.UploadFile)
 					r.With(tenant.RequireMinRole("developer")).Post("/signed-url", storageHandler.GenerateSignedURL)
+					// Imports from another service (CLI: import supabase storage).
+					r.With(tenant.RequireMinRole("developer")).Post("/import", storageHandler.ImportObjects)
+					r.With(tenant.RequireMinRole("developer")).Post("/import/complete", storageHandler.CompleteImport)
 					r.With(tenant.RequireMinRole("viewer")).Get("/", storageHandler.ListFiles)
 					r.With(tenant.RequireMinRole("viewer")).Get("/*", storageHandler.DownloadFile)
 					r.With(tenant.RequireMinRole("viewer")).Head("/*", storageHandler.DownloadFile)
