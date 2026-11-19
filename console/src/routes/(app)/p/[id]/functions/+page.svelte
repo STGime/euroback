@@ -260,8 +260,9 @@
 //       module.exports = async (req, ctx) => { ... }
 //       globalThis.handler = async (req, ctx) => { ... }
 //   • TypeScript is compiled on deploy (types stripped, not checked).
-//   • No third-party imports (\`import … from "https://…"\`, npm) —
-//     inline dependencies into the function file.
+//   • No imports in this editor: a function is one file. To use other
+//     files or packages, deploy with the CLI, which bundles them in:
+//     eurobase edge-functions deploy <name>
 //
 // Available on \`ctx\`:
 //   ctx.db.sql(query, params)              run SQL on your tenant schema

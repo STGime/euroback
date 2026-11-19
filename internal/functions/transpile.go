@@ -48,7 +48,8 @@ func checkCodeSize(code string) error {
 // Third-party imports (`import x from "https://..."` / npm packages)
 // compile to `require(...)` calls; the worker has no module loader, so
 // the bootstrap's require stub rejects them at load time with a clear
-// message. Bundling dependency graphs is out of scope here.
+// message. Dependency graphs are bundled before the code gets here, by
+// the CLI's deploy command (internal/cli/edge_bundle.go).
 //
 // Errors carry esbuild's line/column diagnostics so a bad deploy fails
 // at deploy time with a pointer to the offending source, instead of an

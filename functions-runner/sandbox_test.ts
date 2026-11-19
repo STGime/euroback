@@ -302,7 +302,7 @@ Deno.test("require() of a third-party module fails at load with a clear message 
   });
   assert(!result.ok);
   assert(
-    String(result.error).includes("third-party imports are not supported"),
+    String(result.error).includes("which bundles imports into it") && String(result.error).includes("deno.land/std/http/server.ts"),
     `expected the require-stub message, got: ${result.error}`,
   );
 });
