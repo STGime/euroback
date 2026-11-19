@@ -7,6 +7,10 @@
 					Eurobase is close to Supabase in shape — Postgres, Row-Level Security, an SDK with a familiar API, EU storage with signed URLs — but it is not a drop-in replacement. A migration CLI (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase import supabase</code>) automates most of a move, starting with an <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">assess</code> step that reports what transfers cleanly and what needs changes. The next step, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase import supabase schema</code>, writes your tables, policies, functions and views as a migration file you review and apply. Both only read from Supabase and need CLI 0.6.3 or later. If you'd like us to go through the report with you, <a href="mailto:contact@eurobase.app" class="cursor-pointer text-eurobase-700 hover:underline">get in touch</a>. The answers below are deliberately straight about the gaps.
 				</p>
 
+				<p class="text-sm text-gray-700 leading-relaxed">
+					For the whole migration in order, with every command, see <a href="/docs/migrating-step-by-step" class="text-blue-600 hover:underline">chapter 31, Migrating from Supabase, step by step</a>; it also has a Claude skill that does it for you.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-2">Migrating in</h3>
 
 				<div class="rounded-xl border border-gray-200 bg-white p-5">
