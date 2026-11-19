@@ -75,3 +75,14 @@ func TestSupabaseCompatWrapper_NoFixedServiceKey(t *testing.T) {
 		t.Error("the client module contains a fixed service role key")
 	}
 }
+
+// console.* in a function built with the compatibility layer goes to the
+// function's log, one bounded line per call.
+func TestSupabaseCompatWrapper_ConsoleLines(t *testing.T) {
+	banner, _ := supabaseCompatWrapper(nil)
+	for _, want := range []string{"const console = new Proxy(globalThis.console", "line.length > 2048", `if (a === undefined) return "undefined"`} {
+		if !strings.Contains(banner, want) {
+			t.Errorf("wrapper lacks %q", want)
+		}
+	}
+}

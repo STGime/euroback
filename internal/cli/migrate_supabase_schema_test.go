@@ -1071,6 +1071,11 @@ CREATE POLICY "Read" ON public.posts FOR SELECT USING (true);
 	if err := query.ValidateTenantMigrationSQL(got); err != nil {
 		t.Errorf("platform would refuse: %v", err)
 	}
+	// Translating the result again adds nothing: a second policy of the
+	// same name would fail to apply.
+	if again := Translate(got).sql; strings.Count(again, "CREATE POLICY eurobase_service_role") != 3 {
+		t.Errorf("translating twice added service policies:\n%s", again)
+	}
 }
 
 // ── third review ─────────────────────────────────────────────────────

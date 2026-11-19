@@ -811,6 +811,8 @@ var (
 var (
 	reEnableRLS    = regexp.MustCompile(`(?im)^ALTER\s+TABLE\s+(?:ONLY\s+)?("(?:[^"]|"")*"|\S+)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\s*;`)
 	rePolicyOnLine = regexp.MustCompile(`(?im)^CREATE\s+POLICY\s+(?:"(?:[^"]|"")*"|\S+)\s+ON\s+("(?:[^"]|"")*"|[^\s;]+)`)
+	// The policy serviceOnlyPolicies writes, under either spelling.
+	reServicePolicyOn = regexp.MustCompile(`(?im)^CREATE\s+POLICY\s+(?:eurobase_service_role|"eurobase_service_role")\s+ON\s+("(?:[^"]|"")*"|[^\s;]+)`)
 )
 
 // serviceOnlyPolicies returns a service-role policy for every table in
@@ -824,11 +826,17 @@ func serviceOnlyPolicies(sql string, res *translationResult) string {
 	for _, m := range rePolicyOnLine.FindAllStringSubmatch(sql, -1) {
 		withPolicy[normalizeName(m[1])] = true
 	}
+	// Tables that already have the policy (SQL translated once before, or
+	// a source policy of that name): a second one would fail to apply.
+	hasServicePolicy := map[string]bool{}
+	for _, m := range reServicePolicyOn.FindAllStringSubmatch(sql, -1) {
+		hasServicePolicy[normalizeName(m[1])] = true
+	}
 	var b strings.Builder
 	seen := map[string]bool{}
 	for _, m := range reEnableRLS.FindAllStringSubmatch(sql, -1) {
 		name := normalizeName(m[1])
-		if seen[name] {
+		if seen[name] || hasServicePolicy[name] {
 			continue
 		}
 		seen[name] = true

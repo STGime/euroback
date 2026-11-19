@@ -160,11 +160,17 @@ const __envApi = { get: (n) => __env[n], has: (n) => n in __env, toObject: () =>
 const Deno = new Proxy(globalThis.Deno || {}, { get: (t, k) => (k === "env" ? __envApi : k === "serve" ? __serve : t[k]) });
 const process = new Proxy(globalThis.process || {}, { get: (t, k) => (k === "env" ? __env : t[k]) });
 // console.* goes to the function's log, where Supabase showed it.
-const __fmt = (args) => args.map((a) => {
-  if (typeof a === "string") return a;
-  if (a instanceof Error) return a.stack || String(a);
-  try { return JSON.stringify(a); } catch (_e) { return String(a); }
-}).join(" ");
+// One line is at most 2 KB: the function's log keeps a limited amount
+// per call, and one large payload must not crowd out the lines after it.
+const __fmt = (args) => {
+  const line = args.map((a) => {
+    if (typeof a === "string") return a;
+    if (a === undefined) return "undefined";
+    if (a instanceof Error) return a.stack || String(a);
+    try { const j = JSON.stringify(a); return j === undefined ? String(a) : j; } catch (_e) { return String(a); }
+  }).join(" ");
+  return line.length > 2048 ? line.slice(0, 2048) + "… (" + line.length + " characters)" : line;
+};
 const __log = __ctx.log || {};
 const console = new Proxy(globalThis.console, { get: (t, k) => {
   if (k === "log" || k === "info" || k === "debug") return (...a) => __log.info && __log.info(__fmt(a));
