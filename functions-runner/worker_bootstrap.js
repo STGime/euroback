@@ -150,6 +150,11 @@
     return {
       db: {
         sql: (query, params = []) => rpc("db.sql.call", { query, params }),
+        // SQL with the service identity while a user is calling. The
+        // runner refuses it unless the function has the setting.
+        asService: () => ({
+          sql: (query, params = []) => rpc("db.sql.call", { query, params, service: true }),
+        }),
       },
       vault: {
         get: (name) => rpc("vault.get.call", { name }),

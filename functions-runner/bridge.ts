@@ -71,7 +71,9 @@ export type WorkerToParent =
   | { type: "error"; message: string }
   // RPC call from worker to parent for SQL execution. Parent runs the
   // query under the per-tenant role and posts back db.sql.result.
-  | { type: "db.sql.call"; id: string; query: string; params: unknown[] }
+  // `service: true` is ctx.db.asService(): the parent checks the
+  // function's permission before it runs anything.
+  | { type: "db.sql.call"; id: string; query: string; params: unknown[]; service?: boolean }
   | { type: "vault.get.call"; id: string; name: string }
   // ctx.storage.* RPCs (closes #85). The parent calls back to the
   // gateway's HMAC-protected /internal/functions/storage endpoints.

@@ -8,7 +8,7 @@
  * is NEVER exposed to the public internet. Only the Gateway can reach it.
  */
 
-import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
+import { asServiceError, quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
 import { isConnectionDrop, isLoginError, isPoolerBusyError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
@@ -92,6 +92,8 @@ const LOG_OUTPUT_LIMIT = 10 * 1024;            // 10 KB per invocation
 interface CachedFunction {
   code: string;
   env_vars: Record<string, string>;
+  // The function may call ctx.db.asService().
+  allowServiceRole: boolean;
   cachedAt: number;
 }
 
@@ -243,7 +245,7 @@ async function loadFunction(
     // role has no direct access to platform tables.
     const [row] = await db`
       SELECT code, env_vars_legacy, env_vars_blob, env_vars_nonce,
-             env_vars_key_version, schema_name
+             env_vars_key_version, schema_name, allow_service_role
         FROM public.runner_get_function(${functionId}::uuid, ${projectId}::uuid)
     `;
     if (!row) return null;
@@ -253,6 +255,8 @@ async function loadFunction(
     const fn: CachedFunction = {
       code: row.code,
       env_vars: env,
+      // Anything but true is "no".
+      allowServiceRole: row.allow_service_role === true,
       cachedAt: Date.now(),
     };
     setCache(cacheKey, fn);
@@ -389,7 +393,13 @@ async function executeFunction(
   const logCapture = createLogCapture(projectId, LOG_OUTPUT_LIMIT);
 
   // deno-lint-ignore no-explicit-any
-  async function runDBSql(query: string, params: unknown[]): Promise<any> {
+  async function runDBSql(query: string, params: unknown[], asService = false): Promise<any> {
+    // ctx.db.asService() needs the function's own setting. Checked here,
+    // before anything reaches the database.
+    if (asService) {
+      const denied = asServiceError(fn.allowServiceRole);
+      if (denied) throw new Error(denied);
+    }
     // Customer SQL must not change the role or search_path set below.
     const guardErr = privilegeStatementError(query);
     if (guardErr) throw new Error(guardErr);
@@ -428,7 +438,7 @@ async function executeFunction(
           // Mirror the gateway's RLS context so auth_uid() /
           // is_service_role() behave the same in functions as in gateway
           // REST — see rlsContextStatements in role.ts. Closes #188.
-          for (const stmt of rlsContextStatements(userId)) {
+          for (const stmt of rlsContextStatements(userId, asService)) {
             await tx.unsafe(stmt.sql, stmt.params);
           }
           return await tx.unsafe(query, params);
@@ -542,7 +552,7 @@ async function runUserHandlerInWorker(opts: {
   serializedRequest: SerializedRequest;
   user: { id: string; email: string } | null;
   timeoutMs: number;
-  runDBSql: (query: string, params: unknown[]) => Promise<unknown>;
+  runDBSql: (query: string, params: unknown[], asService?: boolean) => Promise<unknown>;
   // deno-lint-ignore no-explicit-any
   vaultLookup: () => Promise<((name: string) => Promise<any>) | undefined>;
   // deno-lint-ignore no-explicit-any
@@ -685,7 +695,7 @@ async function runUserHandlerInWorker(opts: {
             // Run the query under the per-tenant role and post the
             // result back. Errors are reported as `error` strings so the
             // worker's RPC layer can rebuild an Error.
-            runDBSql(msg.query, msg.params)
+            runDBSql(msg.query, msg.params, msg.service === true)
               .then((rows) => {
                 if (settled) return;
                 const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };

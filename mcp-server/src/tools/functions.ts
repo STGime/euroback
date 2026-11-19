@@ -63,8 +63,12 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
         .boolean()
         .optional()
         .describe('Require a signed-in end user to call it. New functions default to true; on update, omit to keep the current setting. Set false only for public endpoints such as webhooks.'),
+      allowServiceRole: z
+        .boolean()
+        .optional()
+        .describe('Let the function call ctx.db.asService(): SQL with the service identity (RLS takes its service branch) while a signed-in user is calling. Off for new functions; on update, omit to keep the current setting. Switch it on only when the code checks the request before such SQL.'),
     },
-    async ({ projectId, functionName, code, verifyJwt }) => {
+    async ({ projectId, functionName, code, verifyJwt, allowServiceRole }) => {
       const client = getClient();
       const path = fnPath(projectId, functionName);
       let exists = true;
@@ -77,6 +81,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
       const update = async () => {
         const body: Record<string, unknown> = { code };
         if (verifyJwt !== undefined) body.verify_jwt = verifyJwt;
+        if (allowServiceRole !== undefined) body.allow_service_role = allowServiceRole;
         return json({ action: 'updated', function: redactFunction(await client.put(path, body)) });
       };
       if (exists) return update();
@@ -85,6 +90,7 @@ export function registerFunctionTools(server: McpServer, getClient: () => ApiCli
           name: functionName,
           code,
           verify_jwt: verifyJwt ?? true,
+          ...(allowServiceRole !== undefined ? { allow_service_role: allowServiceRole } : {}),
         });
         return json({ action: 'created', function: redactFunction(created) });
       } catch (err) {

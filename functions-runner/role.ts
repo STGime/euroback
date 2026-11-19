@@ -62,9 +62,28 @@ export function quoteIdent(s: string): string {
 // (FUNCTIONS_RUNNER_HMAC_REQUIRE_SIGNED=true in deploy/k8s/functions.yaml).
 // Do not relax HMAC verification to soft mode without accounting for the
 // fact that it now governs database row security, not only ctx.user.
+//
+// asService (ctx.db.asService(), allowed per function): the service
+// branch while a user is calling. app.end_user_id stays set, so
+// auth_uid() and audit triggers still see who asked; only the role
+// setting differs. The caller checks the function's permission first
+// (asServiceError).
 export function rlsContextStatements(
   userId: string,
+  asService = false,
 ): Array<{ sql: string; params: string[] }> {
+  if (userId && asService) {
+    return [
+      {
+        sql: "SELECT set_config('app.end_user_id', $1, true)",
+        params: [userId],
+      },
+      {
+        sql: "SELECT set_config('app.end_user_role', 'service', true)",
+        params: [],
+      },
+    ];
+  }
   if (userId) {
     return [
       {
@@ -83,4 +102,13 @@ export function rlsContextStatements(
       params: [],
     },
   ];
+}
+
+// asServiceError is the gate for ctx.db.asService(): it returns the error
+// for a function that hasn't been given the setting, or null. It runs in
+// the runner process, not in the worker that holds customer code, so a
+// hand-made message from that code can't skip it.
+export function asServiceError(allowServiceRole: boolean): string | null {
+  if (allowServiceRole) return null;
+  return "ctx.db.asService() is not switched on for this function — deploy it with --allow-service-role (or set allow_service_role) to use it";
 }
