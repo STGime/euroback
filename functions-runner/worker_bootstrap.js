@@ -122,7 +122,7 @@
       const exports = module.exports;
       const require = (spec) => {
         throw new Error(
-          'third-party imports are not supported in edge functions yet (tried to import "' + spec + '") — inline the dependency into the function file',
+          'this function imports "' + spec + '", which is not part of its code — a function runs as one file; deploy it with the CLI (eurobase edge-functions deploy), which bundles imports into it',
         );
       };
       ${code}

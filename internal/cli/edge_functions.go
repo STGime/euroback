@@ -114,27 +114,49 @@ func efDeployCmd() *cobra.Command {
 			file, _ := cmd.Flags().GetString("file")
 			noJWT, _ := cmd.Flags().GetBool("no-verify-jwt")
 
+			if file == "" {
+				// The usual places, single-file and folder layouts.
+				candidates := []string{
+					"functions/" + args[0] + ".ts",
+					"functions/" + args[0] + ".js",
+					"functions/" + args[0] + "/index.ts",
+					"functions/" + args[0] + "/index.js",
+					"eurobase/functions/" + args[0] + "/index.ts",
+				}
+				for _, c := range candidates {
+					if _, err := os.Stat(c); err == nil {
+						file = c
+						break
+					}
+				}
+				if file == "" {
+					return fmt.Errorf("no file found — provide --file or place code at functions/%s.ts (or functions/%s/index.ts)", args[0], args[0])
+				}
+				fmt.Printf("Deploying from %s\n", file)
+			}
+
+			// A function that imports other modules is bundled into one
+			// file here: the runner loads a single script.
 			var code string
-			if file != "" {
+			if noBundle, _ := cmd.Flags().GetBool("no-bundle"); noBundle {
 				content, err := os.ReadFile(file)
 				if err != nil {
 					return fmt.Errorf("reading file: %w", err)
 				}
 				code = string(content)
 			} else {
-				// Try default path: functions/<name>.ts
-				defaultPath := "functions/" + args[0] + ".ts"
-				content, err := os.ReadFile(defaultPath)
+				res, err := bundleFunction(file, bundleOptions{})
 				if err != nil {
-					// Try .js
-					defaultPath = "functions/" + args[0] + ".js"
-					content, err = os.ReadFile(defaultPath)
-					if err != nil {
-						return fmt.Errorf("no file found — provide --file or place code at functions/%s.ts", args[0])
-					}
+					return err
 				}
-				code = string(content)
-				fmt.Printf("Deploying from %s\n", defaultPath)
+				code = res.Code
+				if res.Bundled {
+					note := ""
+					if res.Minified {
+						note = ", minified to fit"
+					}
+					fmt.Printf("Bundled %d local and %d remote module(s) into one file (%d KB%s)\n", len(res.Local), len(res.Remote), len(code)/1024, note)
+				}
 			}
 
 			verifyJWT := true
@@ -180,6 +202,7 @@ func efDeployCmd() *cobra.Command {
 	}
 	cmd.Flags().StringP("file", "f", "", "Path to the function file")
 	cmd.Flags().Bool("no-verify-jwt", false, "Allow unauthenticated invocations")
+	cmd.Flags().Bool("no-bundle", false, "Deploy the file as it is, without bundling its imports")
 	cmd.Flags().Bool("allow-service-role", false, "Let the function call ctx.db.asService(): SQL with the service identity while a signed-in user is calling (--allow-service-role=false switches it off; leave the flag out to keep the current setting)")
 	return cmd
 }

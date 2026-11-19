@@ -103,7 +103,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Function Structure</h3>
 				<p class="text-sm text-gray-700">Write TypeScript or JavaScript and export your handler with <code>export default</code> (or <code>module.exports</code>). The runner passes <code>req</code> (a <code>Request</code>) and <code>ctx</code> (context). Code is compiled on deploy — types are stripped, not checked.</p>
-				<p class="text-sm text-amber-700 bg-amber-50 border-l-4 border-amber-400 px-3 py-2 mt-2 rounded"><strong>Heads-up:</strong> third-party imports (<code>import … from "https://…"</code> or npm packages) are not supported yet — inline dependencies into the function file.</p>
+				<p class="text-sm text-amber-700 bg-amber-50 border-l-4 border-amber-400 px-3 py-2 mt-2 rounded"><strong>Imports:</strong> a function is stored and run as one file. <code>eurobase edge-functions deploy</code> (CLI 0.6.6 or later) bundles what your file imports into it: relative files (<code>./util.ts</code>, <code>../_shared/cors.ts</code>), URLs (<code>https://esm.sh/…</code>), <code>npm:</code> and <code>jsr:</code> packages, and names from the <code>imports</code> of a <code>deno.json</code>. The function with its imports can be up to 1 MB, and libraries that need Node.js built-ins (<code>node:fs</code>, …) can't be used — take their browser or Deno build. The console editor and the MCP deploy tool take a single file without imports.</p>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Reading the request (webhooks & APIs)</h3>
 				<p class="text-sm text-gray-700">Your function receives the full incoming request, so it can act as a webhook receiver or small HTTP API:</p>
