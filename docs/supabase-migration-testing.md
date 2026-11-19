@@ -218,6 +218,10 @@ nothing to Supabase. Together the files hold, in this order: users,
 OAuth links, then each table's rows (parents before children) followed
 by its sequence positions. Apply all of them.
 
+To try it on part of the data first: `--exclude-table a,b` leaves those
+tables' rows out; the command refuses when another table's rows refer to
+one of them.
+
 ### 4.1 Assertions on emission
 
 - [ ] Exits 0. One or more files land under `./migrations/`

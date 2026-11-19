@@ -671,3 +671,23 @@ func TestQuoteIdent_EscapesEmbeddedDoubleQuotes(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckExcludedTables(t *testing.T) {
+	tables := []tableRef{{name: "media"}, {name: "media_variants"}, {name: "posts"}, {name: "analytics"}}
+	edges := []fkEdge{{from: "media_variants", to: "media"}, {from: "analytics", to: "posts"}, {from: "media", to: "media"}}
+	for _, ok := range [][]string{nil, {"analytics"}, {"media_variants"}, {"media", "media_variants"}, {"posts", "analytics"}} {
+		ex := map[string]bool{}
+		for _, n := range ok {
+			ex[n] = true
+		}
+		if err := checkExcludedTables(tables, edges, ex); err != nil {
+			t.Errorf("exclude %v: %v", ok, err)
+		}
+	}
+	if err := checkExcludedTables(tables, edges, map[string]bool{"media": true}); err == nil || !strings.Contains(err.Error(), "media_variants refers to media") {
+		t.Errorf("excluding a parent: %v", err)
+	}
+	if err := checkExcludedTables(tables, edges, map[string]bool{"nope": true}); err == nil || !strings.Contains(err.Error(), "no table nope") {
+		t.Errorf("unknown table: %v", err)
+	}
+}
