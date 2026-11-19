@@ -781,6 +781,244 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// Files imported from another service (CLI: import supabase storage):
+	// the console's import API records each file with its owner and hands
+	// out an upload URL; the bytes go straight to the bucket; complete
+	// records the size. The owner keeps their access, nobody else gets
+	// it, a resumed import skips what is there, and an import never takes
+	// a key from another file.
+	check(t, env, "storage_import", func() error {
+		sdkAs := func(method, path, apiKey, jwt string) *httpResult {
+			req := httptest.NewRequest(method, "http://"+env.slug+".eurobase.test"+path, nil)
+			req.Header.Set("apikey", apiKey)
+			if jwt != "" {
+				req.Header.Set("Authorization", "Bearer "+jwt)
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		signIn := func(email string) (id, token string, err error) {
+			sdk("POST", "/v1/auth/signup", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+			si := sdk("POST", "/v1/auth/signin", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+			var tok struct {
+				AccessToken string `json:"access_token"`
+				User        struct {
+					ID string `json:"id"`
+				} `json:"user"`
+			}
+			if err := json.Unmarshal([]byte(si.body), &tok); err != nil || tok.AccessToken == "" {
+				return "", "", fmt.Errorf("sign in %s: %w", email, si)
+			}
+			return tok.User.ID, tok.AccessToken, nil
+		}
+		alice, aliceJWT, err := signIn("import-alice@team.test")
+		if err != nil {
+			return err
+		}
+		_, bobJWT, err := signIn("import-bob@team.test")
+		if err != nil {
+			return err
+		}
+		type result struct {
+			Key, Status, URL, Code, Error string
+			Headers                       map[string]string
+			Size                          int64
+		}
+		importBatch := func(objects ...map[string]any) ([]result, error) {
+			b, _ := json.Marshal(map[string]any{"objects": objects})
+			r := console("POST", "/storage/import", string(b))
+			var out struct{ Results []result }
+			if r.code != 200 || json.Unmarshal([]byte(r.body), &out) != nil || len(out.Results) != len(objects) {
+				return nil, fmt.Errorf("import: %w", r)
+			}
+			return out.Results, nil
+		}
+		put := func(res result, body string) error {
+			req, _ := http.NewRequest("PUT", res.URL, strings.NewReader(body))
+			req.Header.Set("Content-Type", "text/plain")
+			for k, v := range res.Headers {
+				req.Header.Set(k, v)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("PUT %s: %v", res.Key, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode >= 300 {
+				return fmt.Errorf("PUT %s: %s", res.Key, resp.Status)
+			}
+			return nil
+		}
+
+		first, err := importBatch(
+			map[string]any{"key": "imp/alice.txt", "size": 11, "content_type": "text/plain", "owner": alice},
+			map[string]any{"key": "imp/dev.txt", "size": 3, "content_type": "text/plain"},
+			map[string]any{"key": "imp/ghost.txt", "size": 1, "owner": "99999999-9999-4999-8999-999999999999"},
+			map[string]any{"key": "../escape", "size": 1},
+			map[string]any{"key": storage.ExportArchivePrefix(env.projectID) + "x.zip", "size": 1},
+			map[string]any{"key": "imp/huge.bin", "size": int64(6) << 30},
+		)
+		if err != nil {
+			return err
+		}
+		got := []string{}
+		for _, r := range first {
+			got = append(got, r.Status+":"+r.Code)
+		}
+		if strings.Join(got, ",") != "upload:,upload:,error:unknown_owner,error:invalid_key,error:export_namespace,error:too_large" {
+			return fmt.Errorf("first import: %v", got)
+		}
+		if err := put(first[0], "alice's doc"); err != nil {
+			return err
+		}
+		if err := put(first[1], "dev"); err != nil {
+			return err
+		}
+		b, _ := json.Marshal(map[string]any{"keys": []string{"imp/alice.txt", "imp/dev.txt", "imp/never-uploaded.txt"}})
+		if r := console("POST", "/storage/import/complete", string(b)); r.code != 200 ||
+			!strings.Contains(r.body, `{"key":"imp/alice.txt","status":"done","size":11}`) ||
+			!strings.Contains(r.body, `{"key":"imp/never-uploaded.txt","status":"missing"}`) {
+			return fmt.Errorf("complete: %w", r)
+		}
+		if size := env.dedScalar(t, "SELECT size_bytes::text FROM %s WHERE key = 'imp/alice.txt'", "storage_objects"); size != "11" {
+			return fmt.Errorf("recorded size %s, want 11", size)
+		}
+		if o := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'imp/alice.txt'", "storage_objects"); o != alice {
+			return fmt.Errorf("owner %s, want alice", o)
+		}
+
+		// The owner reads her file; another user and an anonymous caller
+		// don't; the developer file is for the service role only.
+		if r := sdkAs("GET", "/v1/storage/imp/alice.txt", env.publicKey, aliceJWT); r.code != 200 || r.body != "alice's doc" {
+			return fmt.Errorf("owner download: %w", r)
+		}
+		if r := sdkAs("GET", "/v1/storage/imp/alice.txt", env.publicKey, bobJWT); r.code != http.StatusNotFound {
+			return fmt.Errorf("another user read an imported file: %w", r)
+		}
+		if r := sdkAs("GET", "/v1/storage/imp/dev.txt", env.publicKey, aliceJWT); r.code != http.StatusNotFound {
+			return fmt.Errorf("an end user read an imported developer file: %w", r)
+		}
+		if r := sdkAs("GET", "/v1/storage/imp/dev.txt", env.secretKey, ""); r.code != 200 || r.body != "dev" {
+			return fmt.Errorf("service download of the developer file: %w", r)
+		}
+
+		// A file the project already had (a console upload, a developer
+		// file of another size) is never replaced by an import.
+		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "imp/existing.txt"); r.code >= 300 {
+			return fmt.Errorf("console upload: %w", r)
+		}
+		// Run again: both are there. Another owner, or none, for a taken
+		// key: conflict, the file untouched.
+		again, err := importBatch(
+			map[string]any{"key": "imp/alice.txt", "size": 11, "owner": alice},
+			map[string]any{"key": "imp/dev.txt", "size": 3},
+			map[string]any{"key": "imp/alice.txt", "size": 11},
+			map[string]any{"key": "imp/dev.txt", "size": 3, "owner": alice},
+			map[string]any{"key": "imp/existing.txt", "size": 1},
+		)
+		if err != nil {
+			return err
+		}
+		got = got[:0]
+		for _, r := range again {
+			got = append(got, r.Status)
+		}
+		if strings.Join(got, ",") != "exists,exists,conflict,conflict,conflict" {
+			return fmt.Errorf("second import: %v", got)
+		}
+		if r := console("GET", "/storage/imp/existing.txt", ""); r.code != 200 || r.body != "hello team" {
+			return fmt.Errorf("the console upload changed: %w", r)
+		}
+		if o := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'imp/dev.txt'", "storage_objects"); o != "<null>" {
+			return fmt.Errorf("a conflicting import changed the owner to %s", o)
+		}
+		// A file that changed since its import (another size) is never
+		// overwritten by running the import again; with the size unknown
+		// (-1) a file that is there counts as there.
+		changed, err := importBatch(
+			map[string]any{"key": "imp/alice.txt", "size": 12, "owner": alice},
+			map[string]any{"key": "imp/alice.txt", "size": -1, "owner": alice},
+		)
+		if err != nil {
+			return err
+		}
+		if changed[0].Status != "conflict" || changed[1].Status != "exists" {
+			return fmt.Errorf("re-import of a changed file: %+v", changed)
+		}
+		// A record whose upload never arrived gets its URL again (an
+		// interrupted import) — until the upload is there.
+		pending, err := importBatch(map[string]any{"key": "imp/pending.txt", "size": 7, "owner": alice})
+		if err != nil {
+			return err
+		}
+		resumed, err := importBatch(map[string]any{"key": "imp/pending.txt", "size": 7, "owner": alice})
+		if err != nil {
+			return err
+		}
+		if pending[0].Status != "upload" || resumed[0].Status != "upload" {
+			return fmt.Errorf("interrupted import: %+v then %+v", pending[0], resumed[0])
+		}
+		if err := put(resumed[0], "pending"); err != nil {
+			return err
+		}
+		if done, err := importBatch(map[string]any{"key": "imp/pending.txt", "size": 7, "owner": alice}); err != nil || done[0].Status != "exists" {
+			return fmt.Errorf("after the upload: %+v %v", done, err)
+		}
+		if size := env.dedScalar(t, "SELECT size_bytes::text FROM %s WHERE key = 'imp/pending.txt'", "storage_objects"); size != "7" {
+			return fmt.Errorf("the re-import recorded size %s, want 7", size)
+		}
+		// A developer file recorded without its bytes (an upload URL
+		// that was never used) is not the import's to fill in.
+		if r := console("POST", "/storage/signed-url", `{"key":"imp/unused-url.txt","operation":"upload","content_type":"text/plain"}`); r.code != 200 {
+			return fmt.Errorf("console upload URL: %w", r)
+		}
+		if unused, err := importBatch(map[string]any{"key": "imp/unused-url.txt", "size": 1}); err != nil || unused[0].Status != "conflict" {
+			return fmt.Errorf("a record the import didn't make: %+v %v", unused, err)
+		}
+
+		// A shared folder holds developer files only.
+		if r := console("POST", "/storage-sharing", `{"prefix":"imp-public/","visibility":"public"}`); r.code >= 300 {
+			if r = console("PUT", "/storage-sharing", `{"prefix":"imp-public/","visibility":"public"}`); r.code >= 300 {
+				return fmt.Errorf("share: %w", r)
+			}
+		}
+		shared, err := importBatch(
+			map[string]any{"key": "imp-public/logo.svg", "size": 4, "owner": alice},
+			map[string]any{"key": "imp-public/logo.svg", "size": 4},
+		)
+		if err != nil {
+			return err
+		}
+		if shared[0].Code != "shared_folder" || shared[1].Status != "upload" {
+			return fmt.Errorf("shared folder: %+v", shared)
+		}
+		if err := put(shared[1], "logo"); err != nil {
+			return err
+		}
+		if r := sdkAs("GET", "/v1/storage/imp-public/logo.svg", env.publicKey, ""); r.code != 200 || r.body != "logo" {
+			return fmt.Errorf("public read of an imported file in a shared folder: %w", r)
+		}
+
+		// One request carries at most 100 files; an SDK key can't import.
+		many := make([]map[string]any, 101)
+		for i := range many {
+			many[i] = map[string]any{"key": fmt.Sprintf("imp/m%d", i), "size": 1}
+		}
+		mb, _ := json.Marshal(map[string]any{"objects": many})
+		if r := console("POST", "/storage/import", string(mb)); r.code != http.StatusBadRequest {
+			return fmt.Errorf("101 files in one request: %w", r)
+		}
+		req := httptest.NewRequest("POST", "http://"+env.slug+".eurobase.test/v1/storage/import", strings.NewReader(`{"objects":[{"key":"x","size":1}]}`))
+		req.Header.Set("apikey", env.secretKey)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code == http.StatusOK {
+			return fmt.Errorf("the SDK route accepted an import: %d %s", rec.Code, rec.Body.String())
+		}
+		return nil
+	})
+
 	check(t, env, "console_storage_upload", func() error {
 		if r := env.upload("", "", "http://api.eurobase.test/platform/projects/"+env.projectID+"/storage/upload", "e2e/console.txt"); r.code >= 300 {
 			return r

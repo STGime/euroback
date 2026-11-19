@@ -54,7 +54,7 @@ Typical flow (each step is its own subcommand):
   2. schema     — translate DDL + RLS policies (Supabase → Eurobase
                   conventions) and apply to the target Eurobase tenant.
   3. data       — stream row data + auth users into Eurobase.
-  4. storage    — copy object bytes + rewrite bucket policies.
+  4. storage    — copy the files of every bucket, with their owners.
   5. functions  — check the edge functions and deploy them; they run as
                   written, with a compatibility layer.
   6. cron       — carry scheduled jobs (pg_cron) over to cron jobs.

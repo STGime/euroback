@@ -306,51 +306,64 @@ the row-for-row comparison.
 
 ---
 
-## 5. Step 4 — `storage` (bucket plan + rclone)
+## 5. Step 4 — `storage` (copy the files)
 
-**Goal:** produce a per-bucket rclone plan; execute it; verify bytes.
-
-```bash
-eurobase import supabase storage
-# prints Markdown to stdout by default
-eurobase import supabase storage --output ./storage-plan.md
-```
-
-### 5.1 Assertions on the plan
-
-- [ ] Each source bucket appears with visibility, object count, total
-      size, file-size limit, allowed MIME types.
-- [ ] Each bucket has a single `rclone sync` command in the report.
-- [ ] The command uses `--checksum` (Supabase mtimes are epoch, size+
-      mtime comparison would re-copy everything on rerun).
-- [ ] The command uses `sync`, not `copy`.
-- [ ] Source is `supabase_src:<bucket>/`, destination is
-      `eurobase_dst:<bucket>/` (trailing slash, no leading slash).
-
-### 5.2 Execute the copy
-
-For each printed command:
+**Goal:** copy every file of the source's buckets into the project, with
+its owner. Run it after `data`, so the owners exist.
 
 ```bash
-rclone sync --checksum --progress --transfers 8 \
-  supabase_src:<bucket>/ \
-  eurobase_dst:<bucket>/
+export SUPABASE_DB_URL='postgresql://…'
+eurobase import supabase storage                 # report, changes nothing
+export SUPABASE_URL='https://<ref>.supabase.co'
+export SUPABASE_SERVICE_ROLE_KEY='…'
+eurobase import supabase storage --apply         # copy
 ```
 
-- [ ] Command completes; object count on destination matches source
-      (`rclone ls eurobase_dst:<bucket>/ | wc -l`).
-- [ ] A sample file downloads with the same bytes on both sides
-      (`rclone cat` + `sha256sum`).
-- [ ] Rerun: nothing new copied (idempotence check — this is why
-      `--checksum` matters).
+### 5.1 Assertions on the report
+
+- [ ] Every bucket is listed with its file count, size and visibility,
+      and the folder it becomes (`<bucket>/`).
+- [ ] A public bucket says its files become developer files in a folder
+      shared with everyone.
+- [ ] A bucket whose size shows 0 with files in it has the note about
+      `metadata->>'size'`.
+
+### 5.2 Assertions on the copy
+
+- [ ] Every file is in the project under `<bucket>/<name>`, byte for
+      byte (compare a few with `sha256sum`).
+- [ ] An end user's file: they can download it with their token; another
+      user and an anonymous caller get 404.
+- [ ] A public bucket's folder is listed under console → Storage →
+      Sharing as public, and its files download without a token.
+- [ ] Stopping the copy (Ctrl-C) and running it again copies only what
+      was missing; a third run reports everything as already there.
+- [ ] A file the project already had under the same name, or one
+      changed in the project since the copy, is left as it is and listed
+      under "Not copied".
+- [ ] A public bucket whose folder already has files in the project, or
+      is shared with signed-in users only, stops the copy before
+      anything is shared.
+- [ ] Files without `metadata.size` count as copied on the second run.
+- [ ] A file whose owner isn't a user is a developer file
+      (`--missing-owner skip` leaves it out).
+- [ ] Sizes in console → Storage match the source.
+- [ ] `.emptyFolderPlaceholder` files are not copied.
+
+`storage_import` in `TestTeamEndToEnd` drives the import API with real
+uploads to the harness's S3 server; `migrate_supabase_storage_copy_test.go`
+covers the CLI's copy against fakes, and `TestListSourceFiles_Fixture`
+(with `ASSESS_SCRATCH_DB_URL`) the listing of `storage.objects`.
 
 ### 5.3 Bug categories
 
-- Bucket name with a dash / underscore mangled in the command.
-- `--bucket <name>` filter with a bad name: the error must list the
-  available buckets, not `available: ` (empty).
-- Buckets with objects but zero total bytes on the report: harmless
-  note about `metadata->>'size'` should appear.
+- A file uploaded but not readable (no record, or recorded with size 0).
+- A file with another owner than on Supabase, or readable by others.
+- An existing file replaced by an import.
+- Names with spaces, `#`, `?`, `%` or non-ASCII characters that arrive
+  under another name.
+- A large file (> 1 GB) that fails part-way, and whether the next run
+  picks it up.
 
 ---
 
