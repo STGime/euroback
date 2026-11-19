@@ -18,6 +18,9 @@ func ProjectsCmd() *cobra.Command {
 	cmd.AddCommand(projectsListCmd())
 	cmd.AddCommand(projectsCreateCmd())
 	cmd.AddCommand(projectsDeleteCmd())
+	// "eurobase switch" is the command; "projects switch" is where people
+	// look for it.
+	cmd.AddCommand(SwitchCmd())
 	return cmd
 }
 

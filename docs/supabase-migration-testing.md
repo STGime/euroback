@@ -124,6 +124,11 @@ eurobase import supabase schema --output ./migrations/1000_from_supabase.sql
 
 ### 3.1 Assertions
 
+- [ ] Every table with RLS has a `eurobase_service_role` policy (service
+      role, every command), also tables whose policies cover only some
+      commands: Supabase's service role skips RLS, so server code could
+      write a table whose policies only let app users read.
+
 `schema` dumps the `public` schema only (Supabase's `storage` schema is
 not copied) and also reads the `anon` / `authenticated` privileges from
 the source.

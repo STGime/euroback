@@ -100,11 +100,14 @@ func Translate(input string) translationResult {
 	// ── Pass 2: statement-level (policies, functions, views) ──
 	final := translateStatements(pass1, &res)
 
-	// Supabase's service_role bypasses RLS, so a table with RLS on and
-	// no policies is closed to app users but open to the service key.
-	// On Eurobase the service key is subject to policies too — give
-	// such tables a service-key-only policy so server code keeps
-	// working. App users stay locked out, as before.
+	// Supabase's service_role bypasses RLS: on every table with RLS it
+	// may read and write every row, whatever the policies say. On
+	// Eurobase the service key is subject to policies too, so every such
+	// table gets a policy that admits the service role for every command.
+	// Without it, a table whose policies cover only some commands (a
+	// SELECT policy, say) could be read but not written by server code.
+	// App users are unaffected: the policy applies to the service role
+	// only.
 	final += serviceOnlyPolicies(final, &res)
 
 	// Sequence defaults: pg_dump writes nextval('public.t_id_seq'::regclass);
@@ -810,9 +813,9 @@ var (
 	rePolicyOnLine = regexp.MustCompile(`(?im)^CREATE\s+POLICY\s+(?:"(?:[^"]|"")*"|\S+)\s+ON\s+("(?:[^"]|"")*"|[^\s;]+)`)
 )
 
-// serviceOnlyPolicies returns policies for the tables in sql that
-// enable RLS but have no policy (matched at line starts, so commented-out
-// statements don't count).
+// serviceOnlyPolicies returns a service-role policy for every table in
+// sql that enables RLS (matched at line starts, so commented-out
+// statements and function bodies don't count).
 func serviceOnlyPolicies(sql string, res *translationResult) string {
 	// Match statements only: text in function bodies, strings and
 	// comments is blanked (quoted names are kept).
@@ -825,17 +828,28 @@ func serviceOnlyPolicies(sql string, res *translationResult) string {
 	seen := map[string]bool{}
 	for _, m := range reEnableRLS.FindAllStringSubmatch(sql, -1) {
 		name := normalizeName(m[1])
-		if withPolicy[name] || seen[name] {
+		if seen[name] {
 			continue
 		}
 		seen[name] = true
 		if b.Len() == 0 {
-			b.WriteString("\n-- eurobase: tables with RLS on and no policies were reachable only with Supabase's\n" +
-				"-- service_role key (it bypasses RLS). On Eurobase the service key follows policies too,\n" +
-				"-- so these policies keep it working. App users stay locked out.\n")
+			b.WriteString("\n-- eurobase: Supabase's service_role key bypasses RLS, so server code could read\n" +
+				"-- and write every row of these tables whatever their policies said. On Eurobase the\n" +
+				"-- service key follows policies too; these policies keep it working for every\n" +
+				"-- command. They apply to the service role only: app users keep the access their\n" +
+				"-- own policies give them.\n")
 		}
 		fmt.Fprintf(&b, "CREATE POLICY eurobase_service_role ON %s USING (public.is_service_role()) WITH CHECK (public.is_service_role());\n", m[1])
-		res.rewrites["add:service-key-only policy (RLS on, no policies)"]++
+		if withPolicy[name] {
+			res.rewrites["add:service-role policy (RLS on, policies for app users)"]++
+		} else {
+			res.rewrites["add:service-key-only policy (RLS on, no policies)"]++
+		}
 	}
 	return b.String()
 }
+
+// TranslateSupabaseSQL returns the translated SQL of a Supabase schema
+// dump, as the schema import writes it. For tests outside this package
+// that apply such SQL to a real project.
+func TranslateSupabaseSQL(sql string) string { return Translate(sql).sql }

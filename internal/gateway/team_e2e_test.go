@@ -2414,6 +2414,21 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 				return fmt.Errorf("setup %q: %w", q, r)
 			}
 		}
+		// A table as Supabase had it — RLS on, a policy for reading only —
+		// brought over by the schema import: the service key must still
+		// write it, as it could on Supabase.
+		for _, stmt := range strings.Split(strings.TrimSpace(cli.TranslateSupabaseSQL(`CREATE TABLE public.compat_log (id serial PRIMARY KEY, note text);
+ALTER TABLE public.compat_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "read" ON public.compat_log FOR SELECT USING (true);
+`)), ";\n") {
+			if strings.TrimSpace(stmt) == "" || strings.HasPrefix(strings.TrimSpace(stmt), "--") && !strings.Contains(stmt, "CREATE") {
+				continue
+			}
+			b, _ := json.Marshal(map[string]string{"sql": strings.TrimSuffix(strings.TrimSpace(stmt), ";")})
+			if r := console("POST", "/data/sql", string(b)); r.code != 200 {
+				return fmt.Errorf("translated schema %q: %w", stmt, r)
+			}
+		}
 		dir := t.TempDir()
 		fnDir := filepath.Join(dir, "supabase", "functions")
 		if err := os.MkdirAll(filepath.Join(fnDir, "compat"), 0o755); err != nil {
@@ -2498,6 +2513,13 @@ serve(async (req) => {
   out.maybe = maybe.data;
   const bad = await admin.from("no_such_table").select("*");
   out.badTable = bad.error ? "error" : "no error";
+  // Errors read like supabase-js's: an Error with a message.
+  out.badError = bad.error instanceof Error ? String(bad.error) : "not an Error";
+  console.log("compat console line", { kind: "log" });
+  // A table whose policies only let app users read: the service key
+  // writes it, as on Supabase.
+  const logged = await admin.from("compat_log").insert({ note: "by the service key" }).select("note").single();
+  out.serviceWrite = logged.error ? String(logged.error) : logged.data.note;
   const total = await admin.rpc("compat_total", { p_min: 6 });
   out.total = total.data;
   out.totalError = total.error?.message ?? null;
@@ -2566,11 +2588,13 @@ serve(async (req) => {
 				SKU string `json:"sku"`
 				Qty int
 			}
-			Count    int
-			NoneCode string
-			Maybe    json.RawMessage
-			BadTable string
-			Total    int
+			Count        int
+			NoneCode     string
+			BadError     string
+			ServiceWrite string
+			Maybe        json.RawMessage
+			BadTable     string
+			Total        int
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			return fmt.Errorf("response %q: %w", rec.Body.String(), err)
@@ -2616,9 +2640,19 @@ serve(async (req) => {
 			return fail("single() on no rows, maybeSingle(), and an unknown table")
 		case got.TotalError != nil || got.Total != 76:
 			return fail("rpc() of a function that returns one value")
+		case !strings.HasPrefix(got.BadError, "PostgrestError: ") || !strings.Contains(got.BadError, "no_such_table"):
+			return fail("a database error should be an Error that names the problem")
+		case got.ServiceWrite != "by the service key":
+			return fail("the service key must write a table whose policies only let app users read")
 		}
 		if n := env.dedCount(t, "compat_items", "sku IN ('a-1','b-2')"); n != 2 {
 			return fmt.Errorf("%d of the function's rows in the project's database, want 2", n)
+		}
+		// console.log lands in the function's log (Supabase functions
+		// log that way): the console's test run returns this run's lines.
+		tr := console("POST", "/functions/e2e-compat/test", `{"method":"POST","body":"{}","user_id":"`+tok.User.ID+`"}`)
+		if tr.code != http.StatusOK || !strings.Contains(tr.body, "compat console line") || !strings.Contains(tr.body, `{\"kind\":\"log\"}`) {
+			return fmt.Errorf("console.log in the function's log: %w", tr)
 		}
 
 		// Opened to calls without a signed-in user. A Eurobase function's
