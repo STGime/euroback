@@ -2572,6 +2572,57 @@ serve(async (req) => {
 		return nil
 	})
 
+	// Jobs carried over from Supabase (pg_cron) by the CLI's import: the
+	// request it builds for each kind of job is accepted by the server as
+	// it is, the job is created switched off, and the SQL one runs.
+	check(t, env, "cron_import_from_supabase", func() error {
+		for _, src := range []struct{ name, schedule, command, wantType, wantAction, wantSchedule string }{
+			{"imported-sql", "0 9 * * MON-FRI", "INSERT INTO public.todos (title) VALUES ('from an imported job');", "sql", "INSERT INTO todos (title) VALUES ('from an imported job')", "0 9 * * 1,2,3,4,5"},
+			{"imported-fn", "0 6 1 */3 *", `select net.http_post(url:='https://abcd.supabase.co/functions/v1/e2e-runner', headers:='{"Authorization": "Bearer not-a-real-key", "X-Source": "cron"}'::jsonb, body:='{"kind":"quarterly"}'::jsonb)`, "function", "e2e-runner", "0 6 1 1,4,7,10 *"},
+		} {
+			body, problems := cli.PlanSupabaseCronJob(1, src.name, src.schedule, src.command, "Europe/Berlin")
+			if len(problems) > 0 {
+				return fmt.Errorf("%s: the import refuses it: %v", src.name, problems)
+			}
+			if strings.Contains(string(body), "not-a-real-key") {
+				return fmt.Errorf("%s: the Supabase key is in the request: %s", src.name, body)
+			}
+			r := console("POST", "/cron", string(body))
+			if r.code != http.StatusCreated {
+				return fmt.Errorf("%s: the server refuses the imported job: %w", src.name, r)
+			}
+			var job struct {
+				ID, Name, Schedule, Timezone, Action string
+				ActionType                           string `json:"action_type"`
+				Enabled                              bool
+				RunAs                                string `json:"run_as"`
+			}
+			if err := json.Unmarshal([]byte(r.body), &job); err != nil {
+				return fmt.Errorf("%s: %w", src.name, r)
+			}
+			defer console("DELETE", "/cron/"+job.ID, "")
+			if job.Enabled || job.ActionType != src.wantType || job.Action != src.wantAction || job.Schedule != src.wantSchedule || job.Timezone != "Europe/Berlin" || job.RunAs != "service" {
+				return fmt.Errorf("%s: created as %s", src.name, r.body)
+			}
+			if src.wantType == "sql" {
+				// The statement the import wrote runs in a test run.
+				test, _ := json.Marshal(map[string]string{"action_type": "sql", "action": job.Action, "run_as": "service"})
+				if tr := console("POST", "/cron/test", string(test)); tr.code != http.StatusOK {
+					return fmt.Errorf("%s: test run of the imported statement: %w", src.name, tr)
+				}
+			}
+			// One at a time: a Free project may have two jobs.
+			if d := console("DELETE", "/cron/"+job.ID, ""); d.code >= 300 {
+				return fmt.Errorf("%s: delete: %w", src.name, d)
+			}
+		}
+		// A job the import can't carry over never reaches the server.
+		if _, problems := cli.PlanSupabaseCronJob(2, "two", "* * * * *", "DELETE FROM a; DELETE FROM b", "UTC"); len(problems) == 0 {
+			return fmt.Errorf("a two-statement command was planned as a job")
+		}
+		return nil
+	})
+
 	// A Team project whose database isn't serving: the Test Run is
 	// refused with the not-ready message, never run on the shared cluster.
 	check(t, env, "cron_refused_without_dedicated_db", func() error {
