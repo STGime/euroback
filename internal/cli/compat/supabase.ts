@@ -20,15 +20,26 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-export const SERVICE_ROLE_KEY = "eurobase-service-role";
 export const ANON_KEY = "eurobase-anon";
 
-function current(): any {
+function scope(): any {
   const e = (globalThis as any).__eurobase;
   if (!e || !e.ctx) {
     throw new Error("Supabase compatibility: no request is being handled (the client can only be used while the function runs)");
   }
-  return e.ctx;
+  return e;
+}
+
+function current(): any {
+  return scope().ctx;
+}
+
+// The value Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") has in this request.
+// The wrapper makes a new random one for every request (unless the
+// project set its own), so nothing a caller sends can equal it.
+function isServiceRoleKey(key: unknown): boolean {
+  const k = scope().serviceKey;
+  return typeof k === "string" && k.length >= 16 && key === k;
 }
 
 function unsupported(what: string, instead: string): never {
@@ -56,14 +67,39 @@ export function quoteIdent(name: string): string {
   return '"' + name.replaceAll('"', '""') + '"';
 }
 
-// A value in a filter or an rpc argument goes to the database as it is:
-// the database decides its type from the column or parameter it meets,
-// and the driver writes the value in that type's form (a JS object for a
-// jsonb column, an array for an array column, true for a boolean).
+// An rpc argument goes to the database as it is: the database decides its
+// type from the function's parameter, and the driver writes the value in
+// that type's form (a JS object for jsonb, an array for an array, true
+// for a boolean).
 export function toParam(v: unknown): unknown {
   if (v === undefined) return null;
   if (typeof v === "bigint") return String(v);
   return v;
+}
+
+// jsonValue is how a value is written into the JSON text that carries
+// rows and filter values.
+function jsonValue(v: unknown): unknown {
+  if (v === undefined) return null;
+  if (typeof v === "bigint") return String(v);
+  return v;
+}
+
+// parseInList reads the value of an "in" filter: an array, or the
+// PostgREST text form "(1,2,3)" / '("a","b")'.
+export function parseInList(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    const m = value.trim().match(/^\((.*)\)$/s);
+    if (m) {
+      if (m[1].trim() === "") return [];
+      return m[1].split(",").map((item) => {
+        const t = item.trim();
+        return t.length >= 2 && t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1).replaceAll('\\"', '"') : t;
+      });
+    }
+  }
+  throw new Error('Supabase compatibility: an "in" filter takes an array or the text form "(a,b,c)"');
 }
 
 // parseColumns turns a PostgREST select list ("id, name, total:amount")
@@ -92,8 +128,9 @@ export function parseColumns(columns: string | undefined): string {
     if (dc > 0) {
       cast = p.slice(dc + 2).trim();
       p = p.slice(0, dc).trim();
-      if (!/^[a-zA-Z_][a-zA-Z0-9_ ]*(\[\])?$/.test(cast)) {
-        throw new Error(`Supabase compatibility: invalid cast in select(${JSON.stringify(text)})`);
+      // One type name, nothing else: this text becomes part of the SQL.
+      if (!/^[a-zA-Z_][a-zA-Z0-9_]*(\[\])?$/.test(cast)) {
+        throw new Error(`Supabase compatibility: invalid cast in select(${JSON.stringify(text)}) — a cast takes one type name`);
       }
     }
     if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(p)) {
@@ -186,22 +223,37 @@ export class QueryBuilder implements PromiseLike<any> {
     return quoteIdent(this.table) + "." + quoteIdent(name);
   }
 
-  private add(v: unknown): string {
-    this.params.push(toParam(v));
-    return "$" + this.params.length;
+  // A filter value travels inside a small JSON text and the database
+  // reads it as the column's own type, the way it reads inserted rows.
+  // So "true" from a query string meets a boolean column as true, an
+  // object meets a jsonb column as that object, and nothing depends on
+  // how the driver would write a value of a type it has to guess.
+  private value(column: string, v: unknown): string {
+    this.col(column);
+    this.params.push(JSON.stringify({ [column]: jsonValue(v) }));
+    const t = quoteIdent(this.table);
+    return `(json_populate_record(null::${t}, $${this.params.length}::text::json)).${quoteIdent(column)}`;
   }
 
   private compare(column: string, op: string, value: unknown, negate = false): this {
     let sql: string;
     if (op in OPERATORS) {
-      sql = `${this.col(column)} ${OPERATORS[op]} ${this.add(value)}`;
+      sql = `${this.col(column)} ${OPERATORS[op]} ${this.value(column, value)}`;
     } else if (op === "is") {
-      const word = value === null ? "NULL" : value === true ? "TRUE" : value === false ? "FALSE" : null;
+      const word = value === null || value === "null" ? "NULL" : value === true || value === "true" ? "TRUE" : value === false || value === "false" ? "FALSE" : null;
       if (!word) throw new Error("Supabase compatibility: is() takes null, true or false");
       sql = `${this.col(column)} IS ${word}`;
     } else if (op === "in") {
-      const list = Array.isArray(value) ? value : [];
-      sql = list.length === 0 ? "FALSE" : `${this.col(column)} IN (${list.map((v) => this.add(v)).join(", ")})`;
+      const list = parseInList(value);
+      if (list.length === 0) {
+        sql = "FALSE";
+      } else {
+        const t = quoteIdent(this.table);
+        const c = quoteIdent(column);
+        this.col(column);
+        this.params.push(JSON.stringify(list.map((v) => ({ [column]: jsonValue(v) }))));
+        sql = `${this.col(column)} IN (SELECT ${c} FROM json_populate_recordset(null::${t}, $${this.params.length}::text::json))`;
+      }
     } else {
       unsupported(`the "${op}" filter`, "write the query as SQL with ctx.db.sql");
     }
@@ -246,13 +298,13 @@ export class QueryBuilder implements PromiseLike<any> {
   }
 
   limit(n: number): this {
-    this.limitN = Math.max(0, Math.floor(Number(n)));
+    this.limitN = wholeNumber(n, "limit()");
     return this;
   }
 
   range(from: number, to: number): this {
-    this.offsetN = Math.max(0, Math.floor(Number(from)));
-    this.limitN = Math.max(0, Math.floor(Number(to)) - this.offsetN + 1);
+    this.offsetN = wholeNumber(from, "range()");
+    this.limitN = Math.max(0, wholeNumber(to, "range()") - this.offsetN + 1);
     return this;
   }
 
@@ -286,14 +338,17 @@ export class QueryBuilder implements PromiseLike<any> {
     return this.where.length ? " WHERE " + this.where.join(" AND ") : "";
   }
 
+  // A key whose value is undefined is not part of the row, as in
+  // supabase-js (JSON has no undefined): update({ a: body.a }) must not
+  // set the column to NULL when the request left it out.
   private rows(): Record<string, unknown>[] {
     const list = Array.isArray(this.values) ? this.values : [this.values];
-    for (const r of list) {
+    return list.map((r: unknown) => {
       if (r === null || typeof r !== "object" || Array.isArray(r)) {
         throw new Error(`Supabase compatibility: ${this.op}() takes an object or an array of objects`);
       }
-    }
-    return list;
+      return Object.fromEntries(Object.entries(r as Record<string, unknown>).filter(([, v]) => v !== undefined));
+    });
   }
 
   // wrap makes a data-changing statement return its rows as JSON, shaped
@@ -305,8 +360,16 @@ export class QueryBuilder implements PromiseLike<any> {
     } FROM _w) _r`;
   }
 
+  private built: { text: string; params: unknown[]; count?: string } | null = null;
+
   /** The SQL and parameters this request runs. Exposed for tests. */
   toSQL(): { text: string; params: unknown[]; count?: string } {
+    // Built once: building adds the rows to the parameters.
+    if (!this.built) this.built = this.build();
+    return this.built;
+  }
+
+  private build(): { text: string; params: unknown[]; count?: string } {
     const t = quoteIdent(this.table);
     switch (this.op) {
       case "select": {
@@ -463,6 +526,12 @@ class RpcBuilder implements PromiseLike<any> {
   }
 }
 
+function wholeNumber(n: unknown, where: string): number {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 0) throw new Error(`Supabase compatibility: ${where} takes a number that is zero or more`);
+  return v;
+}
+
 function safeParse(s: string): unknown {
   try {
     return JSON.parse(s);
@@ -605,13 +674,29 @@ function storageFor() {
 // ── client ──────────────────────────────────────────────────────────
 
 export function createClient(_url?: string, key?: string, _options?: unknown) {
-  const asCaller: Runner = (q, p) => current().db.sql(q, p);
+  // Any key but the service role key means "as the caller". On Supabase a
+  // call without a signed-in user would then be the anon role, with only
+  // what RLS gives everyone. A Eurobase function's SQL has no anon role:
+  // without a user it runs with the service role. So this client refuses
+  // to run SQL when nobody is signed in, instead of quietly doing more
+  // than the code asked for.
+  const asCaller: Runner = (q, p) => {
+    const c = current();
+    if (!c.user) {
+      return Promise.reject(
+        new Error(
+          "Supabase compatibility: this client was made without the service role key and nobody is signed in — on Eurobase such a query would run with the service role, so it is refused. Require sign-in for this function, or use a client made with SUPABASE_SERVICE_ROLE_KEY for what it does on its own behalf",
+        ),
+      );
+    }
+    return c.db.sql(q, p);
+  };
   // Without a signed-in caller the function is the service role already.
   const asService: Runner = (q, p) => {
     const c = current();
     return c.user ? c.db.asService().sql(q, p) : c.db.sql(q, p);
   };
-  const run = key === SERVICE_ROLE_KEY ? asService : asCaller;
+  const run = isServiceRoleKey(key) ? asService : asCaller;
   return {
     auth: authFor(asCaller, asService),
     from: (table: string) => new QueryBuilder(run, table),

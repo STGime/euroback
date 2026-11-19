@@ -154,11 +154,9 @@ Without --deploy nothing is changed anywhere.`,
 				if !fn.Ready() {
 					continue
 				}
-				var allow *bool
-				if fn.UsesServiceRole {
-					yes := true
-					allow = &yes
-				}
+				// Set either way, so a function that no longer uses the
+				// service role key loses the setting on the next import.
+				allow := &fn.UsesServiceRole
 				if _, err := uploadFunction(client, cfg.ActiveProject, fn.Name, fn.code, fn.VerifyJWT, allow); err != nil {
 					failed++
 					fmt.Fprintf(out, "  %-40s ✗ %v\n", fn.Name, err)
@@ -225,6 +223,9 @@ func printFunctionStatus(out interface{ Write([]byte) (int, error) }, fn *supaba
 	for _, f := range fn.Findings {
 		fmt.Fprintf(out, "      %s:%d  %s — %s\n", f.File, f.Line, f.What, f.Instead)
 	}
+	for _, n := range fn.Notes {
+		fmt.Fprintf(out, "      note: %s\n", n)
+	}
 }
 
 // ── one function ────────────────────────────────────────────────────
@@ -244,6 +245,8 @@ type supabaseFunction struct {
 	Secrets []string
 	// UsesServiceRole: the code reads the service role key.
 	UsesServiceRole bool
+	// Notes are things to know that don't stop a deploy.
+	Notes []string
 	// BuildError is why the function can't be bundled.
 	BuildError string
 	SizeKB     int
@@ -398,6 +401,20 @@ var compatGaps = []compatGap{
 		instead: "functions have network access only (fetch); keep files in storage and data in the database"},
 	{re: regexp.MustCompile(`["']postgres(ql)?://|SUPABASE_DB_URL|deno\.land/x/postgres`), what: "a direct database connection",
 		instead: "use ctx.db.sql; functions don't get a database URL"},
+	{re: regexp.MustCompile(`/(rest|functions|auth|storage|realtime)/v1\b`), what: "a direct call to the Supabase API",
+		instead: "there is no such URL on Eurobase; use the client (createClient) or ctx"},
+	{re: regexp.MustCompile(`auth\s*\.\s*(getClaims|updateUser|admin\s*\.\s*signOut)\b`), what: "an auth call the compatibility layer doesn't have",
+		instead: "use auth.getUser() for the caller; change users with the users API or SQL through ctx.db.asService()"},
+	{re: regexp.MustCompile(`\bEdgeRuntime\s*\.\s*waitUntil\b`), what: "EdgeRuntime.waitUntil()",
+		instead: "a function ends with its response; await the work, or hand it to a cron job"},
+	// The service role key in a comparison or sent somewhere: on Supabase
+	// that is how a function recognises a trusted caller (a cron job) or
+	// calls the API as admin. Here the key is a random value per request
+	// unless the project sets one, and the Authorization header of a call
+	// isn't passed to the function.
+	{re: regexp.MustCompile("(===?|!==?)[^;\n]*SERVICE_ROLE_KEY|SERVICE_ROLE_KEY[^;\n]*(===?|!==?)|Bearer[^;\n]*SERVICE_ROLE_KEY|fetch\\s*\\([^;\n]*SERVICE_ROLE_KEY"),
+		what:    "the service role key compared with or sent in a request",
+		instead: "to recognise a trusted caller, set your own secret (eurobase vault set …) and compare a custom header with it — the Authorization header isn't passed to a function, and without a value of your own SUPABASE_SERVICE_ROLE_KEY is a new random value in every request"},
 }
 
 var localImportRe = regexp.MustCompile(`(?:from|import)\s*\(?\s*["'](\.{1,2}/[^"']+)["']`)
@@ -454,6 +471,9 @@ func (fn *supabaseFunction) analyze() {
 		fn.Secrets = append(fn.Secrets, n)
 	}
 	sort.Strings(fn.Secrets)
+	if !fn.VerifyJWT && strings.Contains(strings.Join(sources, "\n"), "SUPABASE_ANON_KEY") {
+		fn.Notes = append(fn.Notes, "takes calls without a signed-in user and makes a client with the anon key: that client's queries are refused when nobody is signed in (function SQL has no anon role on Eurobase) — use the service role key client for what the function does on its own behalf")
+	}
 }
 
 // findCompatGaps scans one file. Lines that are only a comment are

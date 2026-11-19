@@ -2164,11 +2164,11 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			return err
 		}
 		for _, q := range []string{
-			`CREATE TABLE compat_items (id serial PRIMARY KEY, owner uuid, sku text UNIQUE, qty int, tags text[], meta jsonb, due timestamptz, note text DEFAULT 'default-note')`,
+			`CREATE TABLE compat_items (id serial PRIMARY KEY, owner uuid, sku text UNIQUE, qty int, tags text[], meta jsonb, due timestamptz, note text DEFAULT 'default-note', active boolean DEFAULT true)`,
 			`ALTER TABLE compat_items ENABLE ROW LEVEL SECURITY`,
 			`CREATE POLICY compat_read ON compat_items FOR SELECT USING (public.is_service_role() OR owner = public.current_end_user_id())`,
 			`CREATE POLICY compat_write ON compat_items FOR ALL USING (public.is_service_role()) WITH CHECK (public.is_service_role())`,
-			`INSERT INTO compat_items (owner, sku, qty) VALUES (NULL, 'not-mine', 1)`,
+			`INSERT INTO compat_items (owner, sku, qty, active) VALUES (NULL, 'not-mine', 1, false)`,
 			`CREATE FUNCTION compat_total(p_min int) RETURNS int LANGUAGE sql STABLE AS 'SELECT coalesce(sum(qty), 0)::int FROM compat_items WHERE qty >= p_min'`,
 		} {
 			b, _ := json.Marshal(map[string]string{"sql": q})
@@ -2197,6 +2197,22 @@ const SECRET = Deno.env.get("E2E_CONSOLE_SECRET");
 serve(async (req) => {
   const out: Record<string, unknown> = { secret: SECRET };
   const admin = createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
+  // A call with nobody signed in (the function is opened for this part).
+  if (new URL(req.url).searchParams.get("mode") === "open") {
+    const anon = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!);
+    const read = await anon.from("compat_items").select("sku");
+    const write = await anon.from("compat_items").insert({ sku: "by-nobody", qty: 1 });
+    const own = await admin.from("compat_items").select("sku").eq("sku", "not-mine");
+    const u = await anon.auth.getUser("made-up-token");
+    return new Response(JSON.stringify({
+      anonRead: read.error ? "refused" : "read " + (read.data ?? []).length,
+      anonWrite: write.error ? "refused" : "written",
+      serviceRead: (own.data ?? []).length,
+      user: u.data.user,
+      hasAuthHeader: req.headers.get("Authorization") !== null,
+      keyGuessed: new URL(req.url).searchParams.get("key") === Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+    }), { headers: { "Content-Type": "application/json" } });
+  }
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) return new Response(JSON.stringify({ error: "no auth header" }), { status: 401, headers: corsHeaders });
   const { data: userData, error: userError } = await admin.auth.getUser(authHeader.replace("Bearer ", ""));
@@ -2218,8 +2234,18 @@ serve(async (req) => {
   await admin.from("compat_items").insert([{ owner: user.id, sku: "b-2", qty: 7 }, { owner: user.id, sku: "c-3", qty: 9, note: "own" }]);
   const up = await admin.from("compat_items").upsert({ sku: "b-2", qty: 70, owner: user.id }, { onConflict: "sku" }).select("sku, qty").single();
   out.upserted = up.data;
-  const upd = await admin.from("compat_items").update({ qty: 6, meta: { changed: true } }).eq("sku", "a-1").select("qty, meta");
+  // note is undefined, as a field missing from a request body would be:
+  // the column keeps its value.
+  const upd = await admin.from("compat_items").update({ qty: 6, meta: { changed: true }, note: undefined }).eq("sku", "a-1").select("qty, meta, note");
   out.updated = upd.data;
+  // Text that arrives for a boolean column, as from a query string.
+  const active = await admin.from("compat_items").select("sku").eq("active", "true").order("sku");
+  out.active = active.data;
+  const others = await admin.from("compat_items").select("sku").not("sku", "in", "(a-1,b-2)").order("sku");
+  out.others = others.data;
+  // A key a caller could send is not the service role key.
+  const forged = await createClient("x", "eurobase-service-role").from("compat_items").insert({ owner: user.id, sku: "forged", qty: 1 });
+  out.forged = forged.error ? "refused" : "inserted";
   const del = await admin.from("compat_items").delete().eq("sku", "c-3").select("sku");
   out.deleted = del.data;
 
@@ -2295,8 +2321,10 @@ serve(async (req) => {
 			Updated []struct {
 				Qty  int
 				Meta json.RawMessage
+				Note string
 			}
-			Deleted, Mine, All []struct {
+			Forged                             string
+			Deleted, Mine, All, Active, Others []struct {
 				SKU string `json:"sku"`
 				Qty int
 			}
@@ -2332,8 +2360,14 @@ serve(async (req) => {
 			return fail("insert().select().single() with the service role key: array, jsonb, timestamp and a column default")
 		case got.Upserted.SKU != "b-2" || got.Upserted.Qty != 70:
 			return fail("upsert on the sku column")
-		case len(got.Updated) != 1 || got.Updated[0].Qty != 6 || string(got.Updated[0].Meta) != `{"changed":true}`:
-			return fail("update().eq().select()")
+		case len(got.Updated) != 1 || got.Updated[0].Qty != 6 || string(got.Updated[0].Meta) != `{"changed":true}` || got.Updated[0].Note != "default-note":
+			return fail("update().eq().select(), leaving the column whose value was undefined alone")
+		case skus(got.Active) != "a-1=0,b-2=0,c-3=0":
+			return fail(`eq("active", "true") on a boolean column should be the active rows`)
+		case skus(got.Others) != "c-3=0,not-mine=0":
+			return fail(`not("sku", "in", "(a-1,b-2)") should be the other rows`)
+		case got.Forged != "refused":
+			return fail("a client made with a guessed key must run as the caller, not as the service role")
 		case skus(got.Deleted) != "c-3=0":
 			return fail("delete().eq().select()")
 		case skus(got.Mine) != "b-2=70,a-1=6":
@@ -2347,6 +2381,37 @@ serve(async (req) => {
 		}
 		if n := env.dedCount(t, "compat_items", "sku IN ('a-1','b-2')"); n != 2 {
 			return fmt.Errorf("%d of the function's rows in the project's database, want 2", n)
+		}
+
+		// Opened to calls without a signed-in user. A Eurobase function's
+		// SQL without a user is the service role, so a client that was not
+		// made with the service role key refuses instead of reading and
+		// writing everything; the service client still works. No
+		// Authorization header is invented, getUser is nobody, and a
+		// caller can't name the service role key.
+		if r := console("PUT", "/functions/e2e-compat", `{"verify_jwt":false}`); r.code >= 300 {
+			return fmt.Errorf("open the function: %w", r)
+		}
+		open := httptest.NewRequest("POST", "http://"+env.slug+".eurobase.test/v1/functions/e2e-compat?mode=open&key=eurobase-service-role", strings.NewReader(`{}`))
+		open.Header.Set("apikey", env.publicKey)
+		open.Header.Set("Content-Type", "application/json")
+		rec = httptest.NewRecorder()
+		env.router.ServeHTTP(rec, open)
+		var anon struct {
+			AnonRead, AnonWrite string
+			ServiceRead         int
+			User                json.RawMessage
+			HasAuthHeader       bool
+			KeyGuessed          bool
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &anon); err != nil || rec.Code != http.StatusOK {
+			return fmt.Errorf("open call: %d %s", rec.Code, rec.Body.String())
+		}
+		if anon.AnonRead != "refused" || anon.AnonWrite != "refused" || anon.ServiceRead != 1 || string(anon.User) != "null" || anon.HasAuthHeader || anon.KeyGuessed {
+			return fmt.Errorf("call without a signed-in user: %s", rec.Body.String())
+		}
+		if n := env.dedCount(t, "compat_items", "sku IN ('by-nobody','forged','by-user')"); n != 0 {
+			return fmt.Errorf("%d rows were written by a client that must not write", n)
 		}
 		return nil
 	})

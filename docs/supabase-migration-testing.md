@@ -416,6 +416,15 @@ eurobase edge-functions deploy <fn-name> --file supabase/functions/<fn-name>/ind
       `auth.getUser(token)` gets that user.
 - [ ] A client made with the service role key can write a table the
       user can't; a client made with the anon key is limited by RLS.
+- [ ] A client made with a key the caller sends is not the service
+      role (the service role key is a random value per request unless
+      the project sets one).
+- [ ] In a function open to calls without a signed-in user, an
+      anon-key client's queries are refused when nobody is signed in;
+      the service role key client works.
+- [ ] `.eq("flag", "true")` on a boolean column, `update()` with an
+      `undefined` value, and `.not("id", "in", "(1,2)")` behave as on
+      Supabase.
 - [ ] `insert`, `update`, `upsert`, `delete`, `select` with filters,
       `single()` / `maybeSingle()`, and `rpc()` return what the same
       call returned on Supabase (`{ data, error }`).
@@ -431,6 +440,10 @@ through the real runner and database.
   timestamps in `insert` / `update` / filters.
 - A call the layer doesn't have that the check didn't flag (it then
   throws when the function runs, with the call's name).
+- A `select()` string built from request input: a cast must be one type
+  name, and nothing else may become SQL text.
+- A function that trusts a caller because a header equals the service
+  role key.
 - A function that depends on something Supabase-specific outside the
   client: the project URL, `functions.invoke`, database webhooks.
 - A bundle over the 1 MB code limit.

@@ -173,7 +173,13 @@ func bundleFunction(entryPath string, opts bundleOptions) (*bundleResult, error)
 		// Built again inside the wrapper that gives the code what it had
 		// on Supabase; the wrapper needs the names found above.
 		out.Compat = compatSupabase
-		banner, footer = supabaseCompatWrapper(out.EnvNames)
+		lookup := out.EnvNames
+		if out.UsesServiceRole {
+			// A project may set its own service role key (a shared secret
+			// for a cron caller); the wrapper looks for it like any name.
+			lookup = append(append([]string{}, lookup...), "SUPABASE_SERVICE_ROLE_KEY")
+		}
+		banner, footer = supabaseCompatWrapper(lookup)
 		res = build(false)
 		if len(res.Errors) > 0 {
 			return nil, bundleError(res.Errors)

@@ -140,11 +140,17 @@ await Promise.all(` + string(names) + `.filter((n) => !(n in __env)).map(async (
     if (v !== null && v !== undefined) __env[n] = v;
   } catch (_e) { /* not set */ }
 }));
-// Supabase's own settings: the client module only looks at which key it
-// was given.
+// Supabase's own settings. The client module only looks at which key it
+// was given, so the service role key is a new random value for every
+// request: code that compares it with something a caller sent can never
+// be satisfied by a guess. A project that needs a real shared secret
+// there (a cron job calling the function) sets SUPABASE_SERVICE_ROLE_KEY
+// itself, as a function env var or in the Vault.
+if (!(typeof __env.SUPABASE_SERVICE_ROLE_KEY === "string" && __env.SUPABASE_SERVICE_ROLE_KEY.length >= 16)) {
+  __env.SUPABASE_SERVICE_ROLE_KEY = "eb-service-" + crypto.randomUUID() + crypto.randomUUID();
+}
 if (!("SUPABASE_URL" in __env)) __env.SUPABASE_URL = "https://eurobase.invalid";
 if (!("SUPABASE_ANON_KEY" in __env)) __env.SUPABASE_ANON_KEY = "eurobase-anon";
-if (!("SUPABASE_SERVICE_ROLE_KEY" in __env)) __env.SUPABASE_SERVICE_ROLE_KEY = "eurobase-service-role";
 let __served = null;
 const __serve = (a, b) => {
   __served = typeof a === "function" ? a : typeof b === "function" ? b : a && a.handler;
@@ -152,8 +158,8 @@ const __serve = (a, b) => {
 };
 const __envApi = { get: (n) => __env[n], has: (n) => n in __env, toObject: () => Object.assign({}, __env), set() {}, delete() {} };
 const Deno = new Proxy(globalThis.Deno || {}, { get: (t, k) => (k === "env" ? __envApi : k === "serve" ? __serve : t[k]) });
-const process = { env: __env };
-globalThis.__eurobase = { ctx: __ctx, serve: __serve };
+const process = new Proxy(globalThis.process || {}, { get: (t, k) => (k === "env" ? __env : t[k]) });
+globalThis.__eurobase = { ctx: __ctx, serve: __serve, serviceKey: __env.SUPABASE_SERVICE_ROLE_KEY };
 const module = { exports: {} };
 const exports = module.exports;
 (() => {`
