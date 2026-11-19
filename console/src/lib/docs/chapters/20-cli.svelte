@@ -18,7 +18,7 @@
 					Without Homebrew (CI, agents, Linux servers), download the binary for your platform (macOS or Linux, amd64 or arm64):
 				</p>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 space-y-0.5">
-					<div>VER=0.6.5  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
+					<div>VER=0.6.6  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
 					<div>OS=$(uname -s | tr '[:upper:]' '[:lower:]')</div>
 					<div>ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')</div>
 					<div>BASE=https://github.com/STGime/homebrew-tap/releases/download/cli-v$&#123;VER&#125;</div>
@@ -121,7 +121,7 @@
 
 							<tr><td colspan="2" class="px-3 py-1.5 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Edge Functions (serverless TypeScript/JavaScript)</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions list</td><td class="px-3 py-1 text-gray-500">List deployed edge functions</td></tr>
-							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions deploy &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Deploy from functions/&lt;name&gt;.ts (or --file); --no-verify-jwt for public functions</td></tr>
+							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions deploy &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Deploy from functions/&lt;name&gt;.ts or functions/&lt;name&gt;/index.ts (or --file). Imports are bundled into the function; a function written for Supabase runs as written. --no-verify-jwt for public functions, --allow-service-role for ctx.db.asService()</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions get &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Show details and source code</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions invoke &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">Invoke with optional --data JSON body</td></tr>
 							<tr><td class="px-3 py-1 font-mono text-gray-700">edge-functions logs &lt;name&gt;</td><td class="px-3 py-1 text-gray-500">View invocation logs</td></tr>
