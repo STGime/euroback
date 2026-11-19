@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,6 +44,7 @@ func importSupabaseDataCmd() *cobra.Command {
 		skipAuth      bool
 		skipRows      bool
 		tableOnly     string
+		excludeTables []string
 	)
 	cmd := &cobra.Command{
 		Use:   "data",
@@ -133,7 +135,14 @@ Flags:
 
 			counts := map[string]int64{}
 			if !skipRows {
-				n, rowNotes, err := emitRowData(ctx, tx, writer, tableOnly, counts)
+				exclude := map[string]bool{}
+				for _, t := range excludeTables {
+					exclude[strings.TrimSpace(t)] = true
+				}
+				if tableOnly != "" && len(exclude) > 0 {
+					return errors.New("--table and --exclude-table don't go together")
+				}
+				n, rowNotes, err := emitRowData(ctx, tx, writer, tableOnly, exclude, counts)
 				if err != nil {
 					return fmt.Errorf("row data: %w", err)
 				}
@@ -171,6 +180,7 @@ Flags:
 	cmd.Flags().BoolVar(&skipAuth, "skip-auth", false, "Only table rows, no users")
 	cmd.Flags().BoolVar(&skipRows, "skip-rows", false, "Only users, no table rows")
 	cmd.Flags().StringVar(&tableOnly, "table", "", "Only this public-schema table's rows")
+	cmd.Flags().StringSliceVar(&excludeTables, "exclude-table", nil, "Leave out these tables' rows (comma-separated; e.g. to try the import on part of the data first). A table whose rows refer to an excluded table must be excluded too")
 	return cmd
 }
 
@@ -497,7 +507,7 @@ func setvalStatement(st sequenceState) string {
 // writes multi-row INSERTs for each, followed by the sequence positions.
 // Returns the number of tables written and notes for the developer.
 // Per-table row counts land in `counts`.
-func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, tableOnly string, counts map[string]int64) (int, []string, error) {
+func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, tableOnly string, exclude map[string]bool, counts map[string]int64) (int, []string, error) {
 	tables, err := listPublicTables(ctx, q)
 	if err != nil {
 		return 0, nil, fmt.Errorf("list tables: %w", err)
@@ -505,6 +515,9 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 	edges, selfFKs, err := listPublicFKEdges(ctx, q)
 	if err != nil {
 		return 0, nil, fmt.Errorf("list FK edges: %w", err)
+	}
+	if err := checkExcludedTables(tables, edges, exclude); err != nil {
+		return 0, nil, err
 	}
 	ordered, err := sortTablesByFK(tables, edges)
 	if err != nil {
@@ -529,6 +542,10 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 			continue
 		}
 		found = true
+		if exclude[t.name] {
+			notes = append(notes, fmt.Sprintf("table %s left out (--exclude-table)", t.name))
+			continue
+		}
 		if platformTableNames[t.name] {
 			notes = append(notes, fmt.Sprintf("table %s skipped: every Eurobase project already has a table with that name — rename it in Supabase (and in your app), then import again", t.name))
 			continue
@@ -575,7 +592,7 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 		for _, st := range sequences {
 			// Also sequences whose table wasn't copied itself, such as
 			// a partitioned table (its rows are in the partitions).
-			if st.ownerTab == "" || (!written[st.ownerTab] && !platformTableNames[st.ownerTab]) {
+			if st.ownerTab == "" || (!written[st.ownerTab] && !platformTableNames[st.ownerTab] && !exclude[st.ownerTab]) {
 				standalone.WriteString(setvalStatement(st))
 			}
 		}
@@ -589,6 +606,40 @@ func emitRowData(ctx context.Context, q sourceQuerier, writer *sqlFileWriter, ta
 		notes = append(notes, fmt.Sprintf("triggers are switched off while rows are inserted into: %s — the rows arrive as they are on Supabase (a trigger would write its audit rows or timestamps a second time)", strings.Join(paused, ", ")))
 	}
 	return visited, notes, nil
+}
+
+// checkExcludedTables refuses an exclusion that would leave rows
+// pointing at rows that aren't copied: every excluded table must exist,
+// and a table that refers to an excluded one must be excluded too.
+func checkExcludedTables(tables []tableRef, edges []fkEdge, exclude map[string]bool) error {
+	if len(exclude) == 0 {
+		return nil
+	}
+	names := map[string]bool{}
+	for _, t := range tables {
+		names[t.name] = true
+	}
+	var missing []string
+	for name := range exclude {
+		if !names[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("--exclude-table: no table %s in the public schema", strings.Join(missing, ", "))
+	}
+	var refs []string
+	for _, e := range edges {
+		if exclude[e.to] && !exclude[e.from] && e.from != e.to {
+			refs = append(refs, fmt.Sprintf("%s refers to %s", e.from, e.to))
+		}
+	}
+	if len(refs) > 0 {
+		sort.Strings(refs)
+		return fmt.Errorf("--exclude-table: %s — its rows would point at rows that aren't copied; exclude it too", strings.Join(refs, ", "))
+	}
+	return nil
 }
 
 // emitOneTable reads every row from `table` and writes batched INSERTs

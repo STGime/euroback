@@ -55,7 +55,7 @@ func TestDataImport_Fixture(t *testing.T) {
 		t.Fatalf("users: %v", err)
 	}
 	counts := map[string]int64{}
-	nTables, rowNotes, err := emitRowData(ctx, tx, writer, "", counts)
+	nTables, rowNotes, err := emitRowData(ctx, tx, writer, "", nil, counts)
 	if err != nil {
 		t.Fatalf("rows: %v", err)
 	}
