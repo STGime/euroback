@@ -24,6 +24,7 @@
 						<li>Emails are stored in lower case, and phone numbers with a leading <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">+</code>.</li>
 						<li>Sessions and refresh tokens are not copied: every user signs in once on Eurobase.</li>
 						<li>A table whose name a Eurobase project already uses (such as <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">users</code> or <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage_objects</code>) is skipped. Rename it in Supabase and in your app first.</li>
+						<li>Every new project starts with a sample <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">todos</code> table. If your Supabase project has a table with that name, drop the sample table in the new project before you apply the schema migration.</li>
 						<li>Foreign keys that form a cycle between two or more tables stop the import. Drop one of them in the project, import those tables with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">--table</code>, and add it back.</li>
 					</ul>
 				</div>
