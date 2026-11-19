@@ -1042,7 +1042,10 @@ CREATE POLICY p ON public.posts USING (private.is_org_member(org_id));`)
 	}
 }
 
-func TestTranslate_ServiceOnlyPolicyForTablesWithoutPolicies(t *testing.T) {
+// Every table with RLS gets the service-role policy: on Supabase the
+// service key bypasses RLS for every command. A table whose policies
+// cover only SELECT (posts) must still be writable by server code.
+func TestTranslate_ServicePolicyForEveryRLSTable(t *testing.T) {
 	in := `CREATE TABLE public.tokens (id integer);
 CREATE TABLE public.posts (id integer);
 CREATE TABLE public."Mixed" (id integer);
@@ -1055,17 +1058,23 @@ CREATE POLICY "Read" ON public.posts FOR SELECT USING (true);
 	got := Translate(in).sql
 	for _, want := range []string{
 		"CREATE POLICY eurobase_service_role ON tokens USING (public.is_service_role()) WITH CHECK (public.is_service_role());",
+		"CREATE POLICY eurobase_service_role ON posts USING (public.is_service_role()) WITH CHECK (public.is_service_role());",
 		`CREATE POLICY eurobase_service_role ON "Mixed" USING`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Count(got, "eurobase_service_role") != 2 {
-		t.Errorf("service policy added to a table that has policies, or to a commented-out one:\n%s", got)
+	if strings.Count(got, "CREATE POLICY eurobase_service_role") != 3 {
+		t.Errorf("want one service policy per table with RLS, none for a commented-out statement:\n%s", got)
 	}
 	if err := query.ValidateTenantMigrationSQL(got); err != nil {
 		t.Errorf("platform would refuse: %v", err)
+	}
+	// Translating the result again adds nothing: a second policy of the
+	// same name would fail to apply.
+	if again := Translate(got).sql; strings.Count(again, "CREATE POLICY eurobase_service_role") != 3 {
+		t.Errorf("translating twice added service policies:\n%s", again)
 	}
 }
 

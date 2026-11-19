@@ -217,6 +217,21 @@ Deno.test("a database error comes back as error, not as a throw", async () => {
   assertEquals(r.error.message, "permission denied for table subs");
 });
 
+// Like supabase-js's PostgrestError: an Error, so `throw error`,
+// `error instanceof Error` and `String(error)` read well.
+Deno.test("errors are Errors with PostgREST's fields", async () => {
+  withCtx({ reply: () => { throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" }); } });
+  const r = await createClient("x", ANON_KEY).from("subs").insert({ a: 1 });
+  assert(r.error instanceof Error);
+  assertEquals(String(r.error), "PostgrestError: duplicate key value violates unique constraint");
+  assertEquals(r.error.code, "23505");
+  assertEquals(JSON.parse(JSON.stringify(r.error)), { message: "duplicate key value violates unique constraint", details: "", hint: "", code: "23505" });
+  withCtx({ reply: () => [{ data: [] }] });
+  const none = await createClient("x", ANON_KEY).from("t").select("*").single();
+  assert(none.error instanceof Error);
+  assertEquals([none.error.code, none.error.message], ["PGRST116", "JSON object requested, multiple (or no) rows returned"]);
+});
+
 Deno.test("only this request's service role key gives the service role", async () => {
   const ctx = withCtx();
   await createClient("x", SERVICE_KEY).from("t").select("*");

@@ -46,16 +46,32 @@ function unsupported(what: string, instead: string): never {
   throw new Error(`Supabase compatibility: ${what} is not available on Eurobase — ${instead}`);
 }
 
-export interface CompatError {
-  message: string;
+// CompatError is what a call returns as `error`: an Error with
+// PostgREST's fields, like supabase-js's PostgrestError — so code that
+// does `throw error`, `error instanceof Error` or `String(error)` gets a
+// readable message.
+export class CompatError extends Error {
   details: string;
   hint: string;
   code: string;
+  constructor(message: string, code = "", details = "", hint = "") {
+    super(message);
+    this.name = "PostgrestError";
+    this.code = code;
+    this.details = details;
+    this.hint = hint;
+  }
+  toJSON() {
+    return { message: this.message, details: this.details, hint: this.hint, code: this.code };
+  }
 }
 
 function toError(e: unknown, code = ""): CompatError {
   const message = e instanceof Error ? e.message : String(e);
-  return { message, details: "", hint: "", code };
+  // The database's own error code (23505 for a duplicate, …), as
+  // supabase-js reports it.
+  const pgCode = (e as { code?: unknown })?.code;
+  return new CompatError(message, code || (typeof pgCode === "string" ? pgCode : ""));
 }
 
 // ── SQL helpers ─────────────────────────────────────────────────────
@@ -460,12 +476,11 @@ export class QueryBuilder implements PromiseLike<any> {
       } else if (data.length === 0 && this.mode === "maybeSingle") {
         data = null;
       } else {
-        const error: CompatError = {
-          message: "JSON object requested, multiple (or no) rows returned",
-          details: `The result contains ${data.length} rows`,
-          hint: "",
-          code: "PGRST116",
-        };
+        const error = new CompatError(
+          "JSON object requested, multiple (or no) rows returned",
+          "PGRST116",
+          `The result contains ${data.length} rows`,
+        );
         if (this.throwing) throw new Error(error.message);
         return { data: null, error, count, status: 406, statusText: "Not Acceptable" };
       }
