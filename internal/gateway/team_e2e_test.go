@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1984,6 +1985,166 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		}
 		if owner := env.dedScalar(t, "SELECT coalesce(uploaded_by::text, '<null>') FROM %s WHERE key = 'fn/runner.txt'", "storage_objects"); owner != endUser {
 			return fmt.Errorf("user-less re-upload changed the owner to %q, want the end user %s", owner, endUser)
+		}
+		return nil
+	})
+
+	// ctx.db.asService(): SQL with the service identity while a signed-in
+	// user is calling, for a function that has the setting. The user's id
+	// stays visible to the SQL; the next plain ctx.db.sql is the user
+	// again; a function without the setting is refused; switching the
+	// setting off applies to the next call.
+	check(t, env, "function_as_service", func() error {
+		if !env.runnerOn {
+			t.Skip("no deno (TEAM_TEST_DENO); CI runs this with TEAM_TEST_REQUIRE_RUNNER=1")
+		}
+		ctx := context.Background()
+		if err := env.ensureFuncLogins(ctx); err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`CREATE TABLE as_service_ledger (id serial PRIMARY KEY, who text, note text)`,
+			`ALTER TABLE as_service_ledger ENABLE ROW LEVEL SECURITY`,
+			`CREATE POLICY as_service_read ON as_service_ledger FOR SELECT USING (public.is_service_role() OR who = public.current_end_user_id()::text)`,
+			`CREATE POLICY as_service_write ON as_service_ledger FOR INSERT WITH CHECK (public.is_service_role())`,
+			`INSERT INTO as_service_ledger (who, note) VALUES ('someone-else', 'not the caller''s row')`,
+		} {
+			b, _ := json.Marshal(map[string]string{"sql": q})
+			if r := console("POST", "/data/sql", string(b)); r.code != 200 {
+				return fmt.Errorf("setup %q: %w", q, r)
+			}
+		}
+		code := `export default async function handler(req, ctx) {
+  var out = { user: ctx.user && ctx.user.id };
+  try {
+    await ctx.db.sql("INSERT INTO as_service_ledger (who, note) VALUES (auth_uid()::text, 'plain')");
+    out.plain = "inserted";
+  } catch (e) { out.plain = "refused"; }
+  try {
+    var r = await ctx.db.asService().sql("INSERT INTO as_service_ledger (who, note) VALUES (auth_uid()::text, 'service') RETURNING who");
+    out.service = r[0].who;
+    out.serviceSees = (await ctx.db.asService().sql("SELECT count(*)::int AS n FROM as_service_ledger"))[0].n;
+  } catch (e) { out.service = "error: " + e.message; }
+  out.userSees = (await ctx.db.sql("SELECT count(*)::int AS n FROM as_service_ledger"))[0].n;
+  return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
+}`
+		// Created without the setting: that is the default.
+		body, _ := json.Marshal(map[string]any{"name": "e2e-as-service", "code": code, "verify_jwt": true})
+		if r := console("POST", "/functions", string(body)); r.code >= 300 || !strings.Contains(r.body, `"allow_service_role":false`) {
+			return fmt.Errorf("create: %w", r)
+		}
+		// One function for the whole check: the Free scenario may have three.
+		defer console("DELETE", "/functions/e2e-as-service", "")
+		email := "as-service@team.test"
+		sdk("POST", "/v1/auth/signup", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+		si := sdk("POST", "/v1/auth/signin", `{"email":"`+email+`","password":"Correct-horse-9"}`)
+		var tok struct {
+			AccessToken string `json:"access_token"`
+			User        struct {
+				ID string `json:"id"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal([]byte(si.body), &tok); err != nil || tok.AccessToken == "" || tok.User.ID == "" {
+			return fmt.Errorf("sign in: %w", si)
+		}
+		type result struct {
+			User, Plain, Service  string
+			ServiceSees, UserSees int
+		}
+		invoke := func(name string) (result, error) {
+			var got result
+			req := httptest.NewRequest("POST", "http://"+env.slug+".eurobase.test/v1/functions/"+name, strings.NewReader(`{}`))
+			req.Header.Set("apikey", env.publicKey)
+			req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				return got, fmt.Errorf("invoke %s: %d %s", name, rec.Code, rec.Body.String())
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				return got, fmt.Errorf("invoke %s response %q: %w", name, rec.Body.String(), err)
+			}
+			return got, nil
+		}
+
+		// Without the setting asService is refused before any SQL runs,
+		// and the user's own insert is refused by the table's policy.
+		off, err := invoke("e2e-as-service")
+		if err != nil {
+			return err
+		}
+		if off.User != tok.User.ID || off.Plain != "refused" || !strings.Contains(off.Service, "not switched on") || off.UserSees != 0 {
+			return fmt.Errorf("without the setting: %+v, want asService refused and nothing written", off)
+		}
+		if r := console("PUT", "/functions/e2e-as-service", `{"allow_service_role":true}`); r.code >= 300 || !strings.Contains(r.body, `"allow_service_role":true`) {
+			return fmt.Errorf("switch on: %w", r)
+		}
+		// With it, the asService insert goes through and records the
+		// caller; service SQL sees both rows, the user's SQL only their own.
+		on, err := invoke("e2e-as-service")
+		if err != nil {
+			return err
+		}
+		if on.Plain != "refused" || on.Service != tok.User.ID || on.ServiceSees != 2 || on.UserSees != 1 {
+			return fmt.Errorf("with the setting: %+v, want plain refused, service = the user %s, service sees 2, user sees 1", on, tok.User.ID)
+		}
+		// A redeploy that doesn't mention the setting keeps it.
+		redeploy, _ := json.Marshal(map[string]any{"code": code + "\n"})
+		if r := console("PUT", "/functions/e2e-as-service", string(redeploy)); r.code >= 300 || !strings.Contains(r.body, `"allow_service_role":true`) {
+			return fmt.Errorf("redeploy changed the setting: %w", r)
+		}
+		// Switched off: the very next call is refused (no cached "yes").
+		if r := console("PUT", "/functions/e2e-as-service", `{"allow_service_role":false}`); r.code >= 300 {
+			return r
+		}
+		again, err := invoke("e2e-as-service")
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(again.Service, "not switched on") || again.UserSees != 1 {
+			return fmt.Errorf("after switching the setting off: %+v, want asService refused", again)
+		}
+		// Requests at the same time: redeploys must not write an earlier
+		// "on" back over a switch-off, and each change gets a version of
+		// its own (the runner caches per version).
+		versionOf := func(r *httpResult) (int, bool) {
+			var f struct {
+				Version          int  `json:"version"`
+				AllowServiceRole bool `json:"allow_service_role"`
+			}
+			_ = json.Unmarshal([]byte(r.body), &f)
+			return f.Version, f.AllowServiceRole
+		}
+		r := console("PUT", "/functions/e2e-as-service", `{"allow_service_role":true}`)
+		if r.code >= 300 {
+			return r
+		}
+		v0, _ := versionOf(r)
+		const redeploys = 6
+		var wg sync.WaitGroup
+		for i := 0; i <= redeploys; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if i == redeploys {
+					console("PUT", "/functions/e2e-as-service", `{"allow_service_role":false}`)
+					return
+				}
+				b, _ := json.Marshal(map[string]any{"code": code + strings.Repeat("\n", i+2)})
+				console("PUT", "/functions/e2e-as-service", string(b))
+			}(i)
+		}
+		wg.Wait()
+		v1, allowed := versionOf(console("GET", "/functions/e2e-as-service", ""))
+		if allowed || v1 != v0+redeploys+1 {
+			return fmt.Errorf("after %d redeploys and a switch-off at once: setting %v, version %d -> %d (want off, +%d)", redeploys, allowed, v0, v1, redeploys+1)
+		}
+		if last, err := invoke("e2e-as-service"); err != nil || !strings.Contains(last.Service, "not switched on") {
+			return fmt.Errorf("after the concurrent switch-off: %+v %v, want asService refused", last, err)
+		}
+		if n := env.dedCount(t, "as_service_ledger", "note = 'service'"); n != 1 {
+			return fmt.Errorf("%d service rows in the project's database, want 1", n)
 		}
 		return nil
 	})

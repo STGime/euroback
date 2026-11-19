@@ -153,6 +153,25 @@ export interface EdgeContext {
       query: string,
       params?: unknown[],
     ): Promise<TRow[]>
+
+    /**
+     * SQL with the service identity while a signed-in user is calling:
+     * your RLS policies take their `is_service_role()` branch, and
+     * `auth_uid()` is still the caller, so you can record who asked.
+     * Use it for writes the user may not make themselves, after your
+     * code has checked the request.
+     *
+     * Only for a function that has the "allow service role" setting
+     * (`eurobase edge-functions deploy <name> --allow-service-role`);
+     * otherwise the call throws. A call without a signed-in user
+     * already runs as the service role, with or without the setting.
+     */
+    asService(): {
+      sql<TRow = Record<string, unknown>>(
+        query: string,
+        params?: unknown[],
+      ): Promise<TRow[]>
+    }
   }
 
   /**

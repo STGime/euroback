@@ -8,7 +8,7 @@
 // behavior against a real Postgres.
 
 import { assertEquals, assertStrictEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
+import { asServiceError, quoteIdent, rlsContextStatements, tenantFuncRole, validIdentRe } from "./role.ts";
 
 Deno.test("tenantFuncRole appends _func suffix", () => {
   assertEquals(tenantFuncRole("tenant_abc"), "tenant_abc_func");
@@ -123,4 +123,30 @@ Deno.test("the full tenantFuncRole → quoteIdent pipeline produces safe SQL fra
     setPathSQL,
     `SET LOCAL search_path TO "tenant_b24e9fa8_463f_452d_be4e_ee5127c3e8f7"`,
   );
+});
+
+Deno.test("rlsContextStatements: asService keeps the user id and takes the service role", () => {
+  assertEquals(rlsContextStatements("user-1", true), [
+    { sql: "SELECT set_config('app.end_user_id', $1, true)", params: ["user-1"] },
+    { sql: "SELECT set_config('app.end_user_role', 'service', true)", params: [] },
+  ]);
+});
+
+Deno.test("rlsContextStatements: without asService a user stays authenticated", () => {
+  assertEquals(rlsContextStatements("user-1")[1], {
+    sql: "SELECT set_config('app.end_user_role', 'authenticated', true)",
+    params: [],
+  });
+  assertEquals(rlsContextStatements("user-1", false), rlsContextStatements("user-1"));
+});
+
+Deno.test("rlsContextStatements: no user is the service role either way", () => {
+  assertEquals(rlsContextStatements("", true), rlsContextStatements(""));
+});
+
+Deno.test("asServiceError refuses a function without the setting", () => {
+  assertStrictEquals(asServiceError(true), null);
+  const msg = asServiceError(false);
+  assertStrictEquals(typeof msg, "string");
+  assertStrictEquals(msg!.includes("--allow-service-role"), true);
 });

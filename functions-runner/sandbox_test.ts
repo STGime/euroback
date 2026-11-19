@@ -40,7 +40,7 @@ function spawnAndInvoke(opts: {
   env?: Record<string, string>;
   user?: { id: string; email: string } | null;
   // deno-lint-ignore no-explicit-any
-  dbSqlHandler?: (query: string, params: unknown[]) => unknown | Promise<any>;
+  dbSqlHandler?: (query: string, params: unknown[], service?: boolean) => unknown | Promise<any>;
   vaultGetHandler?: (name: string) => string | null;
   timeoutMs?: number;
 }): Promise<InvokeResult> {
@@ -128,7 +128,7 @@ function spawnAndInvoke(opts: {
           rpcCalls.push({ type: "db.sql.call", payload: { query: msg.query, params: msg.params } });
           try {
             const rows = opts.dbSqlHandler
-              ? await opts.dbSqlHandler(msg.query, msg.params)
+              ? await opts.dbSqlHandler(msg.query, msg.params, msg.service === true)
               : [];
             const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };
             worker.postMessage(reply);
@@ -329,6 +329,47 @@ Deno.test("ctx.db.sql proxies to the parent via RPC", async () => {
   const parsed = JSON.parse(result.body!);
   assertEquals(parsed.length, 1);
   assertEquals(parsed[0].id, "u1");
+});
+
+Deno.test("ctx.db.asService().sql marks the call; plain ctx.db.sql does not", async () => {
+  const seen: Array<[string, boolean]> = [];
+  const result = await spawnAndInvoke({
+    userCode: `
+      globalThis.handler = async (req, ctx) => {
+        await ctx.db.sql("SELECT 1");
+        await ctx.db.asService().sql("SELECT 2", []);
+        await ctx.db.sql("SELECT 3");
+        return new Response("ok");
+      };
+    `,
+    dbSqlHandler: (query, _params, service) => {
+      seen.push([query, service === true]);
+      return [];
+    },
+  });
+  assert(result.ok, result.error);
+  assertEquals(seen, [["SELECT 1", false], ["SELECT 2", true], ["SELECT 3", false]]);
+});
+
+Deno.test("a refused ctx.db.asService() call reaches the function as an error", async () => {
+  const result = await spawnAndInvoke({
+    userCode: `
+      globalThis.handler = async (req, ctx) => {
+        try {
+          await ctx.db.asService().sql("SELECT 1");
+          return new Response("ran");
+        } catch (e) {
+          return new Response("refused: " + e.message);
+        }
+      };
+    `,
+    dbSqlHandler: (_q, _p, service) => {
+      if (service) throw new Error("ctx.db.asService() is not switched on for this function");
+      return [];
+    },
+  });
+  assert(result.ok, result.error);
+  assert(result.body!.startsWith("refused: ctx.db.asService() is not switched on"), result.body);
 });
 
 Deno.test("ctx.db.sql RPC error surfaces as a JS Error in user code", async () => {

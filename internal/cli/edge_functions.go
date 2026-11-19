@@ -48,12 +48,13 @@ func efListCmd() *cobra.Command {
 			}
 
 			var fns []struct {
-				Name      string `json:"name"`
-				Status    string `json:"status"`
-				Version   int    `json:"version"`
-				VerifyJWT bool   `json:"verify_jwt"`
-				CreatedAt string `json:"created_at"`
-				UpdatedAt string `json:"updated_at"`
+				Name             string `json:"name"`
+				Status           string `json:"status"`
+				Version          int    `json:"version"`
+				VerifyJWT        bool   `json:"verify_jwt"`
+				AllowServiceRole bool   `json:"allow_service_role"`
+				CreatedAt        string `json:"created_at"`
+				UpdatedAt        string `json:"updated_at"`
 			}
 			if err := json.Unmarshal(data, &fns); err != nil {
 				return fmt.Errorf("parsing response: %w", err)
@@ -65,18 +66,23 @@ func efListCmd() *cobra.Command {
 				return nil
 			}
 
-			headers := []string{"Name", "Status", "Version", "JWT Required", "Updated"}
+			headers := []string{"Name", "Status", "Version", "JWT Required", "asService", "Updated"}
 			var rows [][]string
 			for _, f := range fns {
 				jwt := "no"
 				if f.VerifyJWT {
 					jwt = "yes"
 				}
+				asService := "no"
+				if f.AllowServiceRole {
+					asService = "yes"
+				}
 				rows = append(rows, []string{
 					f.Name,
 					f.Status,
 					fmt.Sprintf("v%d", f.Version),
 					jwt,
+					asService,
 					f.UpdatedAt,
 				})
 			}
@@ -141,6 +147,13 @@ func efDeployCmd() *cobra.Command {
 				"code":       code,
 				"verify_jwt": verifyJWT,
 			}
+			// Only sent when the flag is given, so a plain redeploy keeps
+			// the function's current setting.
+			allowService, _ := cmd.Flags().GetBool("allow-service-role")
+			setAllowService := cmd.Flags().Changed("allow-service-role")
+			if setAllowService {
+				payload["allow_service_role"] = allowService
+			}
 
 			_, err = client.Put("/platform/projects/"+cfg.ActiveProject+"/functions/"+args[0], payload)
 			if err != nil {
@@ -149,6 +162,9 @@ func efDeployCmd() *cobra.Command {
 					"name":       args[0],
 					"code":       code,
 					"verify_jwt": verifyJWT,
+				}
+				if setAllowService {
+					createPayload["allow_service_role"] = allowService
 				}
 				_, createErr := client.Post("/platform/projects/"+cfg.ActiveProject+"/functions", createPayload)
 				if createErr != nil {
@@ -164,6 +180,7 @@ func efDeployCmd() *cobra.Command {
 	}
 	cmd.Flags().StringP("file", "f", "", "Path to the function file")
 	cmd.Flags().Bool("no-verify-jwt", false, "Allow unauthenticated invocations")
+	cmd.Flags().Bool("allow-service-role", false, "Let the function call ctx.db.asService(): SQL with the service identity while a signed-in user is calling (--allow-service-role=false switches it off; leave the flag out to keep the current setting)")
 	return cmd
 }
 
