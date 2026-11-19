@@ -57,6 +57,7 @@ Typical flow (each step is its own subcommand):
   4. storage    — copy object bytes + rewrite bucket policies.
   5. functions  — check the edge functions and deploy them; they run as
                   written, with a compatibility layer.
+  6. cron       — carry scheduled jobs (pg_cron) over to cron jobs.
 
 Every subcommand needs the Supabase source credentials:
 
@@ -74,5 +75,6 @@ into an empty project unless you're comfortable overwriting.`,
 	cmd.AddCommand(importSupabaseDataCmd())
 	cmd.AddCommand(importSupabaseStorageCmd())
 	cmd.AddCommand(importSupabaseFunctionsCmd())
+	cmd.AddCommand(importSupabaseCronCmd())
 	return cmd
 }

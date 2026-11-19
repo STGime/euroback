@@ -76,3 +76,20 @@ func validateCronRPCName(name string) error {
 	// resolve through the implicit pg_catalog search path.
 	return query.ValidateNoCatalogRefs(name)
 }
+
+// The checks a saved job has to pass, for tools that prepare jobs before
+// they send them (the CLI's import from Supabase). The server runs them
+// again when the job is created.
+
+// CheckSchedule reports whether the scheduler can read schedule.
+func CheckSchedule(schedule string) error { return validateCronSchedule(schedule) }
+
+// CheckSQLAction applies the rules for a SQL job's statement. The
+// project's schema isn't known to the caller, so any schema-qualified
+// name other than the allowed public helpers is refused.
+func CheckSQLAction(action string) error {
+	return validateCronSQLAction(action, "tenant_00000000_0000_0000_0000_000000000000")
+}
+
+// CheckFunctionName reports whether name can be an edge function's name.
+func CheckFunctionName(name string) error { return validateFunctionName(name) }
