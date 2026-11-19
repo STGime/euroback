@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -145,7 +146,20 @@ func efDeployCmd() *cobra.Command {
 				}
 				code = string(content)
 			} else {
-				res, err := bundleFunction(file, bundleOptions{})
+				compat, _ := cmd.Flags().GetString("compat")
+				switch compat {
+				case "auto":
+					compat = ""
+					if src, err := os.ReadFile(file); err == nil && looksLikeSupabaseFunction(string(src)) {
+						compat = compatSupabase
+					}
+				case compatNone:
+					compat = ""
+				case compatSupabase:
+				default:
+					return fmt.Errorf("--compat takes auto, supabase or none")
+				}
+				res, err := bundleFunction(file, bundleOptions{Compat: compat})
 				if err != nil {
 					return err
 				}
@@ -157,45 +171,30 @@ func efDeployCmd() *cobra.Command {
 					}
 					fmt.Printf("Bundled %d local and %d remote module(s) into one file (%d KB%s)\n", len(res.Local), len(res.Remote), len(code)/1024, note)
 				}
+				if res.Compat == compatSupabase {
+					fmt.Println("Supabase compatibility is on: Deno.serve, Deno.env.get and createClient() work as written (--compat none switches it off)")
+					if len(res.EnvNames) > 0 {
+						fmt.Printf("  Reads these settings — set each as a function env var or in the Vault (eurobase vault set NAME VALUE): %s\n", strings.Join(res.EnvNames, ", "))
+					}
+					if res.UsesServiceRole && !cmd.Flags().Changed("allow-service-role") {
+						fmt.Println("  Uses the service role key: its service-role queries need --allow-service-role when a signed-in user calls the function")
+					}
+				}
 			}
 
-			verifyJWT := true
-			if noJWT {
-				verifyJWT = false
+			var allowService *bool
+			if cmd.Flags().Changed("allow-service-role") {
+				v, _ := cmd.Flags().GetBool("allow-service-role")
+				allowService = &v
 			}
-
-			// Try update first, create if not found.
-			payload := map[string]interface{}{
-				"code":       code,
-				"verify_jwt": verifyJWT,
-			}
-			// Only sent when the flag is given, so a plain redeploy keeps
-			// the function's current setting.
-			allowService, _ := cmd.Flags().GetBool("allow-service-role")
-			setAllowService := cmd.Flags().Changed("allow-service-role")
-			if setAllowService {
-				payload["allow_service_role"] = allowService
-			}
-
-			_, err = client.Put("/platform/projects/"+cfg.ActiveProject+"/functions/"+args[0], payload)
+			created, err := uploadFunction(client, cfg.ActiveProject, args[0], code, !noJWT, allowService)
 			if err != nil {
-				// Function doesn't exist yet — create it.
-				createPayload := map[string]interface{}{
-					"name":       args[0],
-					"code":       code,
-					"verify_jwt": verifyJWT,
-				}
-				if setAllowService {
-					createPayload["allow_service_role"] = allowService
-				}
-				_, createErr := client.Post("/platform/projects/"+cfg.ActiveProject+"/functions", createPayload)
-				if createErr != nil {
-					return createErr
-				}
+				return err
+			}
+			if created {
 				PrintSuccess(fmt.Sprintf("Function %q created and deployed to %s", args[0], ProjectLabel(cfg)))
 				return nil
 			}
-
 			PrintSuccess(fmt.Sprintf("Function %q deployed to %s", args[0], ProjectLabel(cfg)))
 			return nil
 		},
@@ -203,8 +202,31 @@ func efDeployCmd() *cobra.Command {
 	cmd.Flags().StringP("file", "f", "", "Path to the function file")
 	cmd.Flags().Bool("no-verify-jwt", false, "Allow unauthenticated invocations")
 	cmd.Flags().Bool("no-bundle", false, "Deploy the file as it is, without bundling its imports")
+	cmd.Flags().String("compat", "auto", "Supabase compatibility: auto (on for a function that calls Deno.serve or imports @supabase/supabase-js), supabase, or none")
 	cmd.Flags().Bool("allow-service-role", false, "Let the function call ctx.db.asService(): SQL with the service identity while a signed-in user is calling (--allow-service-role=false switches it off; leave the flag out to keep the current setting)")
 	return cmd
+}
+
+// uploadFunction updates the function, or creates it when it doesn't
+// exist yet. allowService is only sent when set, so a plain redeploy
+// keeps the function's current setting.
+func uploadFunction(client *APIClient, projectID, name, code string, verifyJWT bool, allowService *bool) (created bool, err error) {
+	payload := map[string]interface{}{
+		"code":       code,
+		"verify_jwt": verifyJWT,
+	}
+	if allowService != nil {
+		payload["allow_service_role"] = *allowService
+	}
+	if _, err := client.Put("/platform/projects/"+projectID+"/functions/"+name, payload); err == nil {
+		return false, nil
+	}
+	// The function doesn't exist yet: create it.
+	payload["name"] = name
+	if _, err := client.Post("/platform/projects/"+projectID+"/functions", payload); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func efGetCmd() *cobra.Command {

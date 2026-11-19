@@ -161,6 +161,10 @@ jobs:
         # net for the std assert imports.
         run: deno test --no-check --unstable-worker-options --allow-read --allow-env --allow-net functions-runner/
 
+      - name: Run the CLI's Supabase compatibility tests
+        # The module the CLI bundles into functions written for Supabase.
+        run: deno test --no-check --allow-net internal/cli/compat/
+
   # -------------------------------------------------------------------------
   # MCP server build check
   # -------------------------------------------------------------------------

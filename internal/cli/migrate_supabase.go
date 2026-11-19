@@ -55,8 +55,8 @@ Typical flow (each step is its own subcommand):
                   conventions) and apply to the target Eurobase tenant.
   3. data       — stream row data + auth users into Eurobase.
   4. storage    — copy object bytes + rewrite bucket policies.
-  5. functions  — port Deno edge functions to Eurobase's handler
-                  contract and deploy.
+  5. functions  — check the edge functions and deploy them; they run as
+                  written, with a compatibility layer.
 
 Every subcommand needs the Supabase source credentials:
 
