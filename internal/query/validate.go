@@ -96,35 +96,47 @@ func ValidateColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 
 // GetTableColumns returns all columns with metadata for the given table.
 func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]ColumnInfo, error) {
+	byTable, err := schemaColumns(ctx, pool, schemaName, &tableName)
+	if err != nil {
+		return nil, err
+	}
+	return byTable[tableName], nil
+}
+
+// schemaColumns returns the columns of every table in the schema (or of one
+// table when table is set), keyed by table, in column order. One query for
+// the whole schema, so listing many tables costs one round trip, not one
+// per table.
+func schemaColumns(ctx context.Context, pool *pgxpool.Pool, schemaName string, table *string) (map[string][]ColumnInfo, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT column_name, data_type, is_nullable, column_default
+		`SELECT table_name, column_name, data_type, is_nullable, column_default
 		 FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = $2
-		 ORDER BY ordinal_position`,
-		schemaName, tableName,
+		 WHERE table_schema = $1 AND ($2::text IS NULL OR table_name = $2)
+		 ORDER BY table_name, ordinal_position`,
+		schemaName, table,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query table columns: %w", err)
 	}
 	defer rows.Close()
 
-	var columns []ColumnInfo
+	out := make(map[string][]ColumnInfo)
 	for rows.Next() {
+		var tbl string
 		var ci ColumnInfo
 		var nullable string
 		var defaultVal *string
-		if err := rows.Scan(&ci.Name, &ci.DataType, &nullable, &defaultVal); err != nil {
+		if err := rows.Scan(&tbl, &ci.Name, &ci.DataType, &nullable, &defaultVal); err != nil {
 			return nil, fmt.Errorf("scan column info: %w", err)
 		}
 		ci.IsNullable = (nullable == "YES")
 		ci.DefaultValue = defaultVal
-		columns = append(columns, ci)
+		out[tbl] = append(out[tbl], ci)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate column rows: %w", err)
 	}
-
-	return columns, nil
+	return out, nil
 }
 
 // GetTableConstraints enriches a slice of ColumnInfo with PK, FK, and unique constraint metadata.
@@ -138,8 +150,25 @@ func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 // partitioned table. A partition's own inherited FK (parent on another
 // table) is kept. UNIQUE marks a column only when it is unique on its own.
 func GetTableConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string, columns []ColumnInfo) ([]ColumnInfo, error) {
+	byTable, err := schemaConstraints(ctx, pool, schemaName, &tableName)
+	if err != nil {
+		return columns, err
+	}
+	return applyConstraints(columns, byTable[tableName]), nil
+}
+
+// constraintRow is one column of a PK / FK / single-column UNIQUE constraint.
+type constraintRow struct {
+	kind, name, column string
+	refTable, refCol   *string
+}
+
+// schemaConstraints reads the constraints of every table in the schema (or
+// of one table), keyed by table. Same rules as GetTableConstraints.
+func schemaConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName string, table *string) (map[string][]constraintRow, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT c.contype::text,
+		`SELECT t.relname,
+		        c.contype::text,
 		        c.conname,
 		        a.attname,
 		        rt.relname AS referenced_table,
@@ -151,60 +180,77 @@ func GetTableConstraints(ctx context.Context, pool *pgxpool.Pool, schemaName, ta
 		   JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
 		   LEFT JOIN pg_catalog.pg_class rt     ON rt.oid = c.confrelid
 		   LEFT JOIN pg_catalog.pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[k.ord]
-		  WHERE n.nspname = $1 AND t.relname = $2
+		  WHERE n.nspname = $1 AND ($2::text IS NULL OR t.relname = $2)
 		    AND c.contype IN ('p', 'f', 'u')
 		    AND (c.contype <> 'u' OR cardinality(c.conkey) = 1)
 		    AND (c.conparentid = 0 OR NOT EXISTS (
 		          SELECT 1 FROM pg_catalog.pg_constraint pc
 		           WHERE pc.oid = c.conparentid AND pc.conrelid = c.conrelid))
-		  ORDER BY c.conname, k.ord`,
-		schemaName, tableName,
+		  ORDER BY t.relname, c.conname, k.ord`,
+		schemaName, table,
 	)
 	if err != nil {
-		return columns, fmt.Errorf("query table constraints: %w", err)
+		return nil, fmt.Errorf("query table constraints: %w", err)
 	}
 	defer rows.Close()
 
+	out := make(map[string][]constraintRow)
+	for rows.Next() {
+		var tbl string
+		var cr constraintRow
+		if err := rows.Scan(&tbl, &cr.kind, &cr.name, &cr.column, &cr.refTable, &cr.refCol); err != nil {
+			return nil, fmt.Errorf("scan constraint: %w", err)
+		}
+		out[tbl] = append(out[tbl], cr)
+	}
+	return out, rows.Err()
+}
+
+// applyConstraints marks PK / UNIQUE / FK on the matching columns.
+func applyConstraints(columns []ColumnInfo, cons []constraintRow) []ColumnInfo {
 	colMap := make(map[string]int, len(columns))
 	for i, c := range columns {
 		colMap[c.Name] = i
 	}
-
-	for rows.Next() {
-		var constraintType, constraintName, colName string
-		var refTable, refCol *string
-		if err := rows.Scan(&constraintType, &constraintName, &colName, &refTable, &refCol); err != nil {
-			return columns, fmt.Errorf("scan constraint: %w", err)
-		}
-		idx, ok := colMap[colName]
+	for _, cr := range cons {
+		idx, ok := colMap[cr.column]
 		if !ok {
 			continue
 		}
-		switch constraintType {
+		switch cr.kind {
 		case "p":
 			columns[idx].IsPrimaryKey = true
 		case "u":
 			columns[idx].IsUnique = true
 		case "f":
-			if refTable != nil && refCol != nil {
+			if cr.refTable != nil && cr.refCol != nil {
 				columns[idx].ForeignKey = &ForeignKeyInfo{
-					ConstraintName:   constraintName,
-					ReferencedTable:  *refTable,
-					ReferencedColumn: *refCol,
+					ConstraintName:   cr.name,
+					ReferencedTable:  *cr.refTable,
+					ReferencedColumn: *cr.refCol,
 				}
 			}
 		}
 	}
-
-	return columns, rows.Err()
+	return columns
 }
 
 // GetTableIndexes returns user-created indexes for a table.
 // Indexes that back constraints (PK, unique, FK) are excluded — those are
 // managed via the constraint APIs and cannot be dropped with DROP INDEX.
 func GetTableIndexes(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]IndexInfo, error) {
+	byTable, err := schemaIndexes(ctx, pool, schemaName, &tableName)
+	if err != nil {
+		return nil, err
+	}
+	return byTable[tableName], nil
+}
+
+// schemaIndexes returns the user-created indexes of every table in the
+// schema (or of one table), keyed by table. Same rules as GetTableIndexes.
+func schemaIndexes(ctx context.Context, pool *pgxpool.Pool, schemaName string, table *string) (map[string][]IndexInfo, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT i.indexname, i.indexdef
+		`SELECT i.tablename, i.indexname, i.indexdef
 		 FROM pg_indexes i
 		 LEFT JOIN pg_constraint c
 		   ON c.conindid = (
@@ -212,19 +258,20 @@ func GetTableIndexes(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 		     WHERE relname = i.indexname
 		       AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = i.schemaname)
 		   )
-		 WHERE i.schemaname = $1 AND i.tablename = $2
-		   AND c.oid IS NULL`,
-		schemaName, tableName,
+		 WHERE i.schemaname = $1 AND ($2::text IS NULL OR i.tablename = $2)
+		   AND c.oid IS NULL
+		 ORDER BY i.tablename, i.indexname`,
+		schemaName, table,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query table indexes: %w", err)
 	}
 	defer rows.Close()
 
-	var indexes []IndexInfo
+	out := make(map[string][]IndexInfo)
 	for rows.Next() {
-		var name, def string
-		if err := rows.Scan(&name, &def); err != nil {
+		var tbl, name, def string
+		if err := rows.Scan(&tbl, &name, &def); err != nil {
 			return nil, fmt.Errorf("scan index: %w", err)
 		}
 		isUnique := strings.Contains(strings.ToUpper(def), "UNIQUE")
@@ -235,14 +282,39 @@ func GetTableIndexes(ctx context.Context, pool *pgxpool.Pool, schemaName, tableN
 				col = strings.Trim(def[lparen+1:rparen], " \"")
 			}
 		}
-		indexes = append(indexes, IndexInfo{
+		out[tbl] = append(out[tbl], IndexInfo{
 			Name:     name,
 			Column:   col,
 			IsUnique: isUnique,
 		})
 	}
+	return out, rows.Err()
+}
 
-	return indexes, rows.Err()
+// schemaRLS returns, per table in the schema, whether row-level security
+// is on.
+func schemaRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) (map[string]bool, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT c.relname, c.relrowsecurity
+		   FROM pg_catalog.pg_class c
+		   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')`,
+		schemaName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query rls flags: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var tbl string
+		var on bool
+		if err := rows.Scan(&tbl, &on); err != nil {
+			return nil, fmt.Errorf("scan rls flag: %w", err)
+		}
+		out[tbl] = on
+	}
+	return out, rows.Err()
 }
 
 // GetSchemaTables returns all table names in the given schema.

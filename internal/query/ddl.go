@@ -830,12 +830,26 @@ var allowedTriggerLevels = map[string]bool{"ROW": true, "STATEMENT": true}
 //
 // Decoded into the structured DBTrigger fields below.
 func GetTableTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]DBTrigger, error) {
+	byTable, err := schemaTriggers(ctx, pool, schemaName, &tableName)
+	if err != nil {
+		return nil, err
+	}
+	if t := byTable[tableName]; t != nil {
+		return t, nil
+	}
+	return make([]DBTrigger, 0), nil
+}
+
+// schemaTriggers returns the user-defined triggers of every table in the
+// schema (or of one table), keyed by table. Same rules as GetTableTriggers.
+func schemaTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName string, table *string) (map[string][]DBTrigger, error) {
 	pool, perr := tenantDDLPool(ctx, pool)
 	if perr != nil {
 		return nil, perr
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT t.tgname,
+		`SELECT c.relname,
+		        t.tgname,
 		        ns_p.nspname AS function_schema,
 		        p.proname    AS function_name,
 		        CASE WHEN (t.tgtype & 64) <> 0 THEN 'INSTEAD OF'
@@ -855,25 +869,27 @@ func GetTableTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName, table
 		   JOIN pg_proc       p    ON p.oid = t.tgfoid
 		   JOIN pg_namespace  ns_p ON ns_p.oid = p.pronamespace
 		  WHERE ns_c.nspname = $1
-		    AND c.relname    = $2
+		    AND ($2::text IS NULL OR c.relname = $2)
 		    AND NOT t.tgisinternal
-		  ORDER BY t.tgname`, schemaName, tableName,
+		  ORDER BY c.relname, t.tgname`, schemaName, table,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query triggers: %w", err)
 	}
 	defer rows.Close()
 
-	triggers := make([]DBTrigger, 0)
+	out := make(map[string][]DBTrigger)
 	for rows.Next() {
-		tr := DBTrigger{Table: tableName}
-		if err := rows.Scan(&tr.Name, &tr.FunctionSchema, &tr.FunctionName,
+		var tbl string
+		var tr DBTrigger
+		if err := rows.Scan(&tbl, &tr.Name, &tr.FunctionSchema, &tr.FunctionName,
 			&tr.Timing, &tr.Level, &tr.Events, &tr.WhenClause); err != nil {
 			return nil, fmt.Errorf("scan trigger: %w", err)
 		}
-		triggers = append(triggers, tr)
+		tr.Table = tbl
+		out[tbl] = append(out[tbl], tr)
 	}
-	return triggers, rows.Err()
+	return out, rows.Err()
 }
 
 // ListTriggerFunctions returns the SQL/PL-pgSQL functions in the given
