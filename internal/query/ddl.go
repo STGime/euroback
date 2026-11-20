@@ -862,7 +862,11 @@ func schemaTriggers(ctx context.Context, pool *pgxpool.Pool, schemaName string, 
 		            CASE WHEN (t.tgtype & 8)  <> 0 THEN 'DELETE'   END,
 		            CASE WHEN (t.tgtype & 32) <> 0 THEN 'TRUNCATE' END
 		        ], NULL) AS events,
-		        pg_get_expr(t.tgqual, t.tgrelid) AS when_clause
+		        -- pg_get_expr can't print a trigger's WHEN (NEW/OLD are two
+		        -- relations: error 22023), so it's taken from the definition.
+		        CASE WHEN t.tgqual IS NOT NULL
+		             THEN substring(pg_get_triggerdef(t.oid) from 'WHEN \((.*)\) EXECUTE ')
+		        END AS when_clause
 		   FROM pg_trigger t
 		   JOIN pg_class      c    ON c.oid = t.tgrelid
 		   JOIN pg_namespace  ns_c ON ns_c.oid = c.relnamespace

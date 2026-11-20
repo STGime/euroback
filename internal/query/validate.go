@@ -275,20 +275,42 @@ func schemaIndexes(ctx context.Context, pool *pgxpool.Pool, schemaName string, t
 			return nil, fmt.Errorf("scan index: %w", err)
 		}
 		isUnique := strings.Contains(strings.ToUpper(def), "UNIQUE")
-		// Parse column from indexdef: ... ON schema.table USING btree (column)
-		col := ""
-		if lparen := strings.LastIndex(def, "("); lparen >= 0 {
-			if rparen := strings.LastIndex(def, ")"); rparen > lparen {
-				col = strings.Trim(def[lparen+1:rparen], " \"")
-			}
-		}
 		out[tbl] = append(out[tbl], IndexInfo{
 			Name:     name,
-			Column:   col,
+			Column:   indexColumns(def),
 			IsUnique: isUnique,
 		})
 	}
 	return out, rows.Err()
+}
+
+// indexColumns returns what an index is on, from its definition
+// ("CREATE INDEX i ON s.t USING btree (a, lower(b)) WHERE …" → "a, lower(b)"):
+// the text inside the parentheses after USING <method>, matched as a pair,
+// with a lone quoted column unquoted.
+func indexColumns(def string) string {
+	start := strings.Index(def, " USING ")
+	if start < 0 {
+		start = 0
+	}
+	open := strings.Index(def[start:], "(")
+	if open < 0 {
+		return ""
+	}
+	open += start
+	depth := 0
+	for i := open; i < len(def); i++ {
+		switch def[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return strings.Trim(def[open+1:i], " \"")
+			}
+		}
+	}
+	return ""
 }
 
 // schemaRLS returns, per table in the schema, whether row-level security

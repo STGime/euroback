@@ -55,6 +55,14 @@ func TestSchemaBatchMatchesPerTable_DB(t *testing.T) {
 	q(`CREATE FUNCTION %[1]s.sb_touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`)
 	q(`CREATE TRIGGER sb_books_touch BEFORE INSERT OR UPDATE ON %[1]s.sb_books FOR EACH ROW EXECUTE FUNCTION %[1]s.sb_touch()`)
 	q(`ALTER TABLE %[1]s.sb_books ENABLE ROW LEVEL SECURITY`)
+	// A trigger with a WHEN condition (pg_get_expr can't print those).
+	q(`CREATE TRIGGER sb_books_when AFTER UPDATE ON %[1]s.sb_books FOR EACH ROW WHEN (NEW.title IS DISTINCT FROM OLD.title) EXECUTE FUNCTION %[1]s.sb_touch()`)
+	// Indexes created out of name order; an expression index.
+	q(`CREATE INDEX sb_authors_zz_idx ON %[1]s.sb_authors (name)`)
+	q(`CREATE INDEX sb_authors_aa_idx ON %[1]s.sb_authors (lower(name))`)
+	// A partitioned table with a partition and a foreign key.
+	q(`CREATE TABLE %[1]s.sb_events (id int, at date, author int REFERENCES %[1]s.sb_authors(id), PRIMARY KEY (id, at)) PARTITION BY RANGE (at)`)
+	q(`CREATE TABLE %[1]s.sb_events_2026 PARTITION OF %[1]s.sb_events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`)
 
 	tables, err := GetSchemaTables(ctx, pool, schema)
 	if err != nil {
@@ -127,8 +135,8 @@ func TestSchemaBatchMatchesPerTable_DB(t *testing.T) {
 			t.Errorf("%s rls: batch %v, per-table %v", tbl, rlsBy[tbl], rls)
 		}
 	}
-	if seen != 4 {
-		t.Fatalf("expected the 4 test tables, saw %d", seen)
+	if seen != 6 {
+		t.Fatalf("expected the 6 test tables, saw %d", seen)
 	}
 
 	// Spot-check the content, so a shared bug can't hide behind equality.
@@ -145,10 +153,43 @@ func TestSchemaBatchMatchesPerTable_DB(t *testing.T) {
 	if !authorFK || titleUnique {
 		t.Errorf("sb_books: author FK %v (want true), title unique %v (want false: only a multi-column UNIQUE)", authorFK, titleUnique)
 	}
-	if len(trgBy["sb_books"]) != 1 || !rlsBy["sb_books"] || rlsBy["sb_authors"] {
+	if len(trgBy["sb_books"]) != 2 || !rlsBy["sb_books"] || rlsBy["sb_authors"] {
 		t.Errorf("sb_books trigger/RLS wrong: triggers %d, rls books %v authors %v", len(trgBy["sb_books"]), rlsBy["sb_books"], rlsBy["sb_authors"])
 	}
 	if len(idxBy["sb_books"]) != 1 || len(idxBy["sb_link"]) != 1 || !idxBy["sb_link"][0].IsUnique {
 		t.Errorf("indexes wrong: %+v / %+v", idxBy["sb_books"], idxBy["sb_link"])
+	}
+
+	// Fixed expectations, so a changed query can't pass just by agreeing
+	// with itself.
+	if got := asJSON(idxBy["sb_authors"]); got != `[{"name":"sb_authors_aa_idx","column":"lower(name)","is_unique":false},{"name":"sb_authors_zz_idx","column":"name","is_unique":false}]` {
+		t.Errorf("sb_authors indexes (by name, expression parsed): %s", got)
+	}
+	var when *string
+	for _, tr := range trgBy["sb_books"] {
+		if tr.Name == "sb_books_when" {
+			when = tr.WhenClause
+		}
+	}
+	if when == nil || *when != "(new.title IS DISTINCT FROM old.title)" {
+		t.Errorf("sb_books_when WHEN clause: %v", when)
+	}
+	if len(trgBy["sb_books"]) != 2 {
+		t.Errorf("sb_books triggers: %d, want 2", len(trgBy["sb_books"]))
+	}
+	for _, tbl := range []string{"sb_events", "sb_events_2026"} {
+		var pk []string
+		var fk string
+		for _, c := range applyConstraints(colsBy[tbl], consBy[tbl]) {
+			if c.IsPrimaryKey {
+				pk = append(pk, c.Name)
+			}
+			if c.Name == "author" && c.ForeignKey != nil {
+				fk = c.ForeignKey.ReferencedTable + "." + c.ForeignKey.ReferencedColumn
+			}
+		}
+		if asJSON(pk) != `["id","at"]` || fk != "sb_authors.id" {
+			t.Errorf("%s: primary key %v, author FK %q", tbl, pk, fk)
+		}
 	}
 }
