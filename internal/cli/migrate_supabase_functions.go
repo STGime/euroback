@@ -271,6 +271,9 @@ type functionFinding struct {
 func listSupabaseFunctions(dir string) ([]*supabaseFunction, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no edge functions folder at %s — pass --input with your Supabase project's supabase/functions folder; if the project has no edge functions, there is nothing to import", dir)
+		}
 		return nil, fmt.Errorf("read %s: %w — run this from your Supabase project's root, or pass --input", dir, err)
 	}
 	if !info.IsDir() {

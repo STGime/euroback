@@ -26,6 +26,8 @@ func main() {
 		Short:   "Eurobase CLI — EU-sovereign Backend-as-a-Service",
 		Long:    "Manage your Eurobase projects, database, storage, and more from the terminal.",
 		Version: fmt.Sprintf("%s (commit %s)", version, commit),
+		// main prints the error once; without this cobra prints it too.
+		SilenceErrors: true,
 	}
 
 	// `eurobase version` for discoverability, alongside cobra's --version.
