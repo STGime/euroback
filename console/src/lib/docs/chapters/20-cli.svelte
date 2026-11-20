@@ -1,3 +1,8 @@
+<script lang="ts">
+	import { latestReleases } from '$lib/releases.svelte';
+	const rel = latestReleases();
+</script>
+
 		<section id="cli" class="scroll-mt-20">
 			<h2 class="text-2xl font-bold text-gray-900 mb-1">20. CLI Tool</h2>
 			<p class="text-sm italic text-gray-500 mb-4">Alex wants to manage projects, run queries, and test RLS policies from the terminal.</p>
@@ -9,7 +14,7 @@
 
 				<h3 class="text-lg font-semibold text-gray-900">Installation</h3>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400">
-					<div>brew install stgime/tap/eurobase</div>
+					<div>brew install stgime/tap/eurobase  <span class="text-gray-500"># update: brew upgrade stgime/tap/eurobase (latest: {rel.cli})</span></div>
 					<div class="mt-1 text-gray-500"># or download a binary: github.com/STGime/homebrew-tap/releases</div>
 					<div class="mt-1 text-gray-500"># macOS manual download only: xattr -d com.apple.quarantine ./eurobase (not notarized; brew installs unaffected)</div>
 				</div>
@@ -18,7 +23,7 @@
 					Without Homebrew (CI, agents, Linux servers), download the binary for your platform (macOS or Linux, amd64 or arm64):
 				</p>
 				<div class="rounded-lg bg-gray-900 px-4 py-3 font-mono text-xs text-green-400 space-y-0.5">
-					<div>VER=0.7.0  <span class="text-gray-500"># latest: github.com/STGime/homebrew-tap/releases</span></div>
+					<div>VER={rel.cli}  <span class="text-gray-500"># the latest release{rel.live ? '' : ' when this page was built'}: github.com/STGime/homebrew-tap/releases</span></div>
 					<div>OS=$(uname -s | tr '[:upper:]' '[:lower:]')</div>
 					<div>ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')</div>
 					<div>BASE=https://github.com/STGime/homebrew-tap/releases/download/cli-v$&#123;VER&#125;</div>

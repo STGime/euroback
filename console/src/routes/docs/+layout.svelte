@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { user } from '$lib/stores';
 	import { chapters } from '$lib/docs/registry';
+	import LatestVersions from '$lib/components/LatestVersions.svelte';
 
 	let { children } = $props();
 	let tocOpen = $state(false);
@@ -57,6 +58,9 @@
 						</li>
 					{/each}
 				</ul>
+				<div class="mt-6">
+					<LatestVersions />
+				</div>
 			</div>
 		</nav>
 
