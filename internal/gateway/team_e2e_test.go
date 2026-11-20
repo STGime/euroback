@@ -1415,6 +1415,72 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 		return nil
 	})
 
+	// The SDK user admin API (/v1/auth/admin/users): secret key only, and
+	// every change lands on the project's own database (the dedicated one
+	// for Team) through the runtime pool, as the service role.
+	check(t, env, "sdk_user_admin", func() error {
+		asKey := func(key, method, path, body string) *httpResult {
+			req := httptest.NewRequest(method, "http://"+env.slug+".eurobase.test"+path, strings.NewReader(body))
+			req.Header.Set("apikey", key)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			return &httpResult{req: method + " " + path, code: rec.Code, body: rec.Body.String()}
+		}
+		const base = "/v1/auth/admin/users"
+		if r := asKey(env.publicKey, "GET", base, ""); r.code != http.StatusForbidden || !strings.Contains(r.body, "secret_key_required") {
+			return fmt.Errorf("public key: want 403 secret_key_required: %w", r)
+		}
+		r := asKey(env.secretKey, "POST", base, `{"email":"e2e-admin@team.test","password":"Admin-e2e-pass-1","metadata":{"partner":"acme"}}`)
+		if r.code != http.StatusCreated {
+			return r
+		}
+		var u struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &u); err != nil || u.ID == "" {
+			return fmt.Errorf("create: %s", r.body)
+		}
+		if n := env.dedCount(t, "users", "email = 'e2e-admin@team.test'"); n != 1 {
+			return fmt.Errorf("created user not in the project's database (count %d)", n)
+		}
+		if r := asKey(env.secretKey, "POST", base, `{"email":"e2e-admin@team.test"}`); r.code != http.StatusConflict {
+			return fmt.Errorf("duplicate: want 409: %w", r)
+		}
+		if r := asKey(env.secretKey, "GET", base+"?search=e2e-admin&per_page=5&page=1", ""); r.code != 200 || !strings.Contains(r.body, u.ID) {
+			return fmt.Errorf("list: %w", r)
+		}
+		if r := asKey(env.secretKey, "PATCH", base+"/"+u.ID, `{"display_name":"E2E Admin"}`); r.code != 200 {
+			return r
+		}
+		for _, step := range []struct{ method, path, body string }{
+			{"POST", "/signout", ""},
+			{"POST", "/suspend", ""},
+		} {
+			if r := asKey(env.secretKey, step.method, base+"/"+u.ID+step.path, step.body); r.code != 200 {
+				return r
+			}
+		}
+		if n := env.dedCount(t, "users", "email = 'e2e-admin@team.test' AND banned_at IS NOT NULL"); n != 1 {
+			return fmt.Errorf("suspend not on the project's database (count %d)", n)
+		}
+		for _, step := range []struct{ method, path, body string }{
+			{"DELETE", "/suspend", ""},
+			{"POST", "/password", `{"password":"Admin-e2e-pass-2"}`},
+		} {
+			if r := asKey(env.secretKey, step.method, base+"/"+u.ID+step.path, step.body); r.code != 200 {
+				return r
+			}
+		}
+		if r := asKey(env.secretKey, "DELETE", base+"/"+u.ID, ""); r.code != http.StatusNoContent {
+			return r
+		}
+		if n := env.dedCount(t, "users", "email = 'e2e-admin@team.test'"); n != 0 {
+			return fmt.Errorf("deleted user still in the project's database (count %d)", n)
+		}
+		return nil
+	})
+
 	// Through the real router: a Team project whose dedicated database is
 	// still provisioning (no host yet — its pool can't be opened) gets
 	// 503 on tenant-data routes, never the shared cluster, while its

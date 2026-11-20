@@ -26,6 +26,15 @@ export type {
   RealtimeEventType,
 } from './realtime'
 export { AuthClient, EMAIL_NOT_CONFIRMED } from './auth'
+export { AdminClient, ADMIN_NEEDS_SECRET_KEY } from './admin'
+export type {
+  AdminUser,
+  AdminUserList,
+  AdminListUsersOptions,
+  AdminCreateUserParams,
+  AdminUpdateUserParams,
+  AdminResult,
+} from './admin'
 export { FunctionsClient } from './functions'
 export type {
   FunctionInvokeOptions,

@@ -1667,6 +1667,34 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Post("/passkey/login/begin", enduser.HandlePasskeyLoginBegin(endUserAuthSvc, limiter))
 			r.Post("/passkey/login/finish", enduser.HandlePasskeyLoginFinish(endUserAuthSvc, limiter))
 
+			// User admin API for the developer's server (secret key only;
+			// enduser.AdminRoutes refuses any other key with 403). Same
+			// handlers as the console's /users; the project comes from the
+			// API key, a Team project's pool from sdkTenantPoolMw above (or
+			// 503). Rate-limited like /v1/db, audited with the key as actor.
+			r.Route("/admin/users", func(r chi.Router) {
+				r.Use(enduser.RequireSecretKey)
+				if limiter != nil {
+					var planRPS ratelimit.PlanRPS
+					if limitsSvc != nil {
+						planRPS = func(ctx context.Context, plan string) (int, error) {
+							l, err := limitsSvc.GetLimits(ctx, plan)
+							if err != nil {
+								return 0, err
+							}
+							return l.RateLimitRPS, nil
+						}
+					}
+					r.Use(ratelimit.RateLimitMiddleware(limiter, planRPS))
+				}
+				r.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						next.ServeHTTP(w, r.WithContext(audit.WithContext(r.Context(), auditSvc)))
+					})
+				})
+				r.Mount("/", enduser.AdminRoutes(pool))
+			})
+
 			// GET /v1/auth/user requires end-user JWT.
 			r.Group(func(r chi.Router) {
 				r.Use(endUserMw.Handler)
