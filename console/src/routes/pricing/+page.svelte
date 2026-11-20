@@ -158,7 +158,7 @@
 		{ label: 'Project RBAC (Owner / Admin / Developer / Read-only)', free: false, pro: false, team: 'Coming soon', legal: 'Coming soon' },
 
 		{ category: 'Automation & integrations' },
-		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 3), pro: String(proPlan?.edge_function_limit ?? 500), team: limitOrUnlimited(teamPlan?.edge_function_limit, 'Unlimited'), legal: limitOrUnlimited(legalPlan?.edge_function_limit, 'Unlimited') },
+		{ label: 'Edge functions', free: String(freePlan?.edge_function_limit ?? 50), pro: String(proPlan?.edge_function_limit ?? 500), team: limitOrUnlimited(teamPlan?.edge_function_limit, 'Unlimited'), legal: limitOrUnlimited(legalPlan?.edge_function_limit, 'Unlimited') },
 		{ label: 'Scheduled jobs (cron)', free: '2', pro: 'Unlimited', team: 'Unlimited', legal: 'Unlimited' },
 		{ label: 'Webhooks', free: String(freePlan?.webhook_limit ?? 3), pro: limitOrUnlimited(proPlan?.webhook_limit, 'Unlimited'), team: limitOrUnlimited(teamPlan?.webhook_limit, 'Unlimited'), legal: limitOrUnlimited(legalPlan?.webhook_limit, 'Unlimited') },
 		{ label: 'Custom email templates', free: false, pro: true, team: !!(teamPlan?.custom_templates ?? true), legal: !!(legalPlan?.custom_templates ?? true) },
@@ -310,7 +310,7 @@
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{fmt(freePlan?.db_size_mb, '500 MB')} database, {fmt(freePlan?.storage_mb, '500 MB')} file storage</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{kmau(freePlan?.mau_limit, '5k')} monthly active users</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.ws_connections ?? 50} realtime connections</span></li>
-					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.edge_function_limit ?? 3} edge functions, {freePlan?.webhook_limit ?? 3} webhooks</span></li>
+					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.edge_function_limit ?? 50} edge functions, {freePlan?.webhook_limit ?? 3} webhooks</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>{freePlan?.project_limit ?? 2} projects per organisation</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span>EU-hosted, GDPR-by-design</span></li>
 					<li class="flex gap-2"><span class="text-gray-400">•</span><span class="text-xs italic text-amber-600">Projects auto-pause after 30 days idle</span></li>
