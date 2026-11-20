@@ -52,6 +52,26 @@ func TestBuildSelectWithColumns(t *testing.T) {
 	}
 }
 
+// select=* (what supabase-js and the SDK's select('*') send) means every
+// column; quoting it asked Postgres for a column named "*" (42703).
+func TestBuildSelectStar(t *testing.T) {
+	for _, tc := range []struct {
+		sel  []string
+		want string
+	}{
+		{[]string{"*"}, `SELECT * FROM`},
+		{[]string{"*", "id"}, `SELECT *, "id" FROM`},
+	} {
+		sql, _ := buildSelectQuery("tenant_abc", "posts", QueryParams{Select: tc.sel, Limit: 10})
+		if !strings.Contains(sql, tc.want) {
+			t.Errorf("select %v: want %q in %s", tc.sel, tc.want, sql)
+		}
+		if strings.Contains(sql, `"*"`) {
+			t.Errorf("select %v: * must not be quoted: %s", tc.sel, sql)
+		}
+	}
+}
+
 func TestBuildSelectWithFilters(t *testing.T) {
 	params := QueryParams{
 		Filters: []Filter{

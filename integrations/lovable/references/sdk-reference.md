@@ -1,6 +1,6 @@
 # @eurobase/sdk reference for Lovable apps
 
-Written against `@eurobase/sdk` 0.13.0 (most of it works from 0.8.1; server use and `auth.admin` need 0.13.0). All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
+Written against `@eurobase/sdk` 0.13.0 (most of it works from 0.8.1; server use and `auth.admin` need 0.13.0, `require()` from CommonJS 0.13.1). All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
 
 ## Return shapes
 

@@ -10,6 +10,8 @@ Zero external dependencies. Works in browsers, React Native, Node.js 18+, Deno, 
 npm install @eurobase/sdk
 ```
 
+Works with `import` (ES modules) and, from 0.13.1, `require()` (CommonJS). Use one style per app: mixing both loads the SDK twice.
+
 ## Quick Start
 
 ```ts
