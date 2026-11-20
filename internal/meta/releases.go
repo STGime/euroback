@@ -6,7 +6,10 @@
 // registry for @eurobase/sdk, the public homebrew-tap repository's GitHub
 // releases for the CLI) by the gateway, cached, and served from
 // GET /v1/meta/releases. Browsers only ever talk to the gateway; the
-// lookups carry no visitor data.
+// lookups carry no visitor data: they read public package metadata, server
+// to server, so npm and GitHub don't process anything on our behalf (not
+// sub-processors). If one of them is unreachable, the last known versions
+// are served.
 package meta
 
 import (
@@ -58,9 +61,10 @@ type Service struct {
 	githubURL string
 	now       func() time.Time
 
-	mu        sync.Mutex
-	cached    Releases
-	nextCheck time.Time
+	mu         sync.Mutex
+	cached     Releases
+	nextCheck  time.Time
+	refreshing chan struct{} // closed when the running refresh is done; nil when none runs
 }
 
 // NewService returns a Service reading the public npm registry and GitHub.
@@ -73,36 +77,75 @@ func NewService() *Service {
 	}
 }
 
-// Latest returns the cached versions, refreshing them when they're older
-// than cacheTTL. A failed lookup keeps the previous value for that tool.
+// Latest returns the cached versions. When they're older than cacheTTL, a
+// refresh starts in the background and the cached values are returned
+// right away; only a caller that finds nothing cached yet (a fresh gateway)
+// waits for the refresh, at most until its own ctx ends.
 func (s *Service) Latest(ctx context.Context) Releases {
+	s.mu.Lock()
+	if s.now().Before(s.nextCheck) {
+		c := s.cached
+		s.mu.Unlock()
+		return c
+	}
+	done := s.refreshing
+	if done == nil {
+		done = make(chan struct{})
+		s.refreshing = done
+		go s.refresh(done)
+	}
+	empty := s.cached.SDK == nil && s.cached.CLI == nil
+	c := s.cached
+	s.mu.Unlock()
+	if !empty {
+		return c
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cached
+}
+
+// refresh reads both sources in parallel, independent of any request
+// (a caller that gives up doesn't cancel it). A failed lookup keeps the
+// previous value for that tool and retries after retryAfter.
+func (s *Service) refresh(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var (
+		wg             sync.WaitGroup
+		sdk, cli       *Release
+		sdkErr, cliErr error
+	)
+	wg.Add(2)
+	go func() { defer wg.Done(); sdk, sdkErr = s.fetchSDK(ctx) }()
+	go func() { defer wg.Done(); cli, cliErr = s.fetchCLI(ctx) }()
+	wg.Wait()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if now.Before(s.nextCheck) {
-		return s.cached
-	}
-
-	ok := true
-	if r, err := s.fetchSDK(ctx); err == nil {
-		s.cached.SDK = r
+	if sdkErr == nil {
+		s.cached.SDK = sdk
 	} else {
-		ok = false
-		slog.Warn("meta: reading the latest SDK version failed", "error", err)
+		slog.Warn("meta: reading the latest SDK version failed", "error", sdkErr)
 	}
-	if r, err := s.fetchCLI(ctx); err == nil {
-		s.cached.CLI = r
+	if cliErr == nil {
+		s.cached.CLI = cli
 	} else {
-		ok = false
-		slog.Warn("meta: reading the latest CLI version failed", "error", err)
+		slog.Warn("meta: reading the latest CLI version failed", "error", cliErr)
 	}
 	s.cached.CheckedAt = now.UTC()
-	if ok {
+	if sdkErr == nil && cliErr == nil {
 		s.nextCheck = now.Add(cacheTTL)
 	} else {
 		s.nextCheck = now.Add(retryAfter)
 	}
-	return s.cached
+	s.refreshing = nil
+	close(done)
 }
 
 func (s *Service) getJSON(ctx context.Context, url string, accept string, v any) error {
@@ -149,13 +192,19 @@ func (s *Service) fetchCLI(ctx context.Context) (*Release, error) {
 	if err := s.getJSON(ctx, s.githubURL, "application/vnd.github+json", &doc); err != nil {
 		return nil, err
 	}
-	v := strings.TrimPrefix(strings.TrimPrefix(doc.TagName, "cli-"), "v")
-	if !validVersion(v) {
+	// CLI releases are tagged cli-vX.Y.Z; the docs build download URLs
+	// from that pattern, so nothing else is accepted.
+	v, ok := strings.CutPrefix(doc.TagName, "cli-v")
+	if !ok || !validVersion(v) {
 		return nil, fmt.Errorf("github: unexpected tag %q", doc.TagName)
+	}
+	published := ""
+	if t, err := time.Parse(time.RFC3339, doc.PublishedAt); err == nil {
+		published = t.UTC().Format(time.RFC3339)
 	}
 	return &Release{
 		Version:     v,
-		PublishedAt: doc.PublishedAt,
+		PublishedAt: published,
 		URL:         "https://github.com/" + cliRepo + "/releases/tag/" + doc.TagName,
 		Install:     "brew upgrade stgime/tap/eurobase",
 	}, nil
@@ -167,7 +216,14 @@ func validVersion(v string) bool {
 	if v == "" || len(v) > 32 {
 		return false
 	}
-	core, _, _ := strings.Cut(v, "-")
+	core, pre, hasPre := strings.Cut(v, "-")
+	if hasPre {
+		for _, seg := range strings.Split(pre, ".") {
+			if seg == "" || seg[0] == '-' {
+				return false
+			}
+		}
+	}
 	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
 		return false

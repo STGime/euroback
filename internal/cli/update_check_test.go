@@ -28,7 +28,7 @@ func TestVersionLess(t *testing.T) {
 }
 
 func TestUpdateNotice(t *testing.T) {
-	s := updateCheckState{CheckedAt: time.Now(), Latest: "0.8.0", Install: "brew upgrade stgime/tap/eurobase", URL: "https://example/releases/tag/cli-v0.8.0"}
+	s := updateCheckState{CheckedAt: time.Now(), Latest: "0.8.0"}
 	n := updateNotice("0.7.1", s)
 	for _, want := range []string{"0.7.1 → 0.8.0", "brew upgrade stgime/tap/eurobase", "cli-v0.8.0", "EUROBASE_NO_UPDATE_CHECK=1"} {
 		if !strings.Contains(n, want) {
@@ -40,6 +40,12 @@ func TestUpdateNotice(t *testing.T) {
 	}
 	if updateNotice("0.7.1", updateCheckState{}) != "" {
 		t.Error("no notice without a known latest version")
+	}
+	if updateNotice("0.7.1", updateCheckState{Latest: "0.8.0-rc\x1b[31m"}) != "" {
+		t.Error("control characters in a pre-release must not be printed")
+	}
+	if updateNotice("0.7.1", updateCheckState{Latest: "0.8.0\x1b[31m"}) != "" {
+		t.Error("a stored value that isn't a plain version must not be printed")
 	}
 }
 

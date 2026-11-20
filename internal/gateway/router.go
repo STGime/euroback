@@ -1641,7 +1641,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// Latest released SDK and CLI versions, for the console, the
 		// marketing site and the CLI's update notice. Public, no API key,
 		// any origin; the gateway reads them from npm / GitHub and caches.
-		r.Get("/meta/releases", meta.HandleReleases(releaseSvc))
+		r.Get(strings.TrimPrefix(PublicAnyOriginPath, "/v1"), meta.HandleReleases(releaseSvc))
 
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier

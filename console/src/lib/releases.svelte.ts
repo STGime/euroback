@@ -3,7 +3,7 @@
 // CLI's GitHub releases and caches them, so browsers never contact those).
 // Until the answer arrives (and on prerendered pages, before hydration) the
 // values below are shown; keep them roughly current when releasing, they're
-// only the fallback.
+// only the fallback (the SDK and CLI release checklists in CLAUDE.md say so).
 import { PUBLIC_API_URL } from '$env/static/public';
 
 export const FALLBACK_SDK_VERSION = '0.13.1';
@@ -39,13 +39,15 @@ export function latestReleases(): LatestReleases {
 			.then((res) => (res.ok ? res.json() : null))
 			.then((body) => {
 				if (!body) return;
-				if (body.sdk && VERSION.test(body.sdk.version)) {
+				// Only the version numbers are taken from the response; the
+				// links are built here from them.
+				if (body.sdk && typeof body.sdk.version === 'string' && VERSION.test(body.sdk.version)) {
 					releases.sdk = body.sdk.version;
-					if (typeof body.sdk.url === 'string') releases.sdkUrl = body.sdk.url;
+					releases.sdkUrl = `https://www.npmjs.com/package/@eurobase/sdk/v/${body.sdk.version}`;
 				}
-				if (body.cli && VERSION.test(body.cli.version)) {
+				if (body.cli && typeof body.cli.version === 'string' && VERSION.test(body.cli.version)) {
 					releases.cli = body.cli.version;
-					if (typeof body.cli.url === 'string') releases.cliUrl = body.cli.url;
+					releases.cliUrl = `https://github.com/STGime/homebrew-tap/releases/tag/cli-v${body.cli.version}`;
 				}
 				releases.live = true;
 			})

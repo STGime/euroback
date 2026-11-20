@@ -25,15 +25,21 @@ const (
 	updateCheckTimeout  = 1500 * time.Millisecond
 )
 
+// Only the version comes from the server; the upgrade hint and the link are
+// built here, so nothing else from a response reaches the terminal.
 type updateCheckState struct {
 	CheckedAt time.Time `json:"checked_at"`
 	Latest    string    `json:"latest"`
-	Install   string    `json:"install,omitempty"`
-	URL       string    `json:"url,omitempty"`
 }
 
+// updateCheckPath is ~/.eurobase/update-check.json, or "" without a home
+// directory (then nothing is stored).
 func updateCheckPath() string {
-	return filepath.Join(filepath.Dir(ConfigPath()), "update-check.json")
+	dir := filepath.Dir(ConfigPath())
+	if !filepath.IsAbs(dir) {
+		return ""
+	}
+	return filepath.Join(dir, "update-check.json")
 }
 
 // updateCheckEnabled reports whether a notice may be shown at all.
@@ -58,7 +64,7 @@ func MaybePrintUpdateNotice(current string) {
 		return
 	}
 	state := readUpdateState()
-	if time.Since(state.CheckedAt) > updateCheckInterval {
+	if age := time.Since(state.CheckedAt); age > updateCheckInterval || age < 0 {
 		if fresh, err := fetchLatestCLI(); err == nil {
 			state = fresh
 		} else {
@@ -73,18 +79,12 @@ func MaybePrintUpdateNotice(current string) {
 }
 
 func updateNotice(current string, s updateCheckState) string {
-	if s.Latest == "" || !versionLess(current, s.Latest) {
+	if parseVersion(s.Latest) == nil || !versionLess(current, s.Latest) {
 		return ""
 	}
-	how := s.Install
-	if how == "" {
-		how = "brew upgrade stgime/tap/eurobase"
-	}
-	msg := fmt.Sprintf("\nA new Eurobase CLI is available: %s → %s. Upgrade: %s", current, s.Latest, how)
-	if s.URL != "" {
-		msg += " (or download it from " + s.URL + ")"
-	}
-	return msg + "\nTurn this notice off with EUROBASE_NO_UPDATE_CHECK=1."
+	return fmt.Sprintf("\nA new Eurobase CLI is available: %s → %s. Upgrade: brew upgrade stgime/tap/eurobase\n"+
+		"(or download it from https://github.com/STGime/homebrew-tap/releases/tag/cli-v%s).\n"+
+		"Turn this notice off with EUROBASE_NO_UPDATE_CHECK=1.", current, s.Latest, s.Latest)
 }
 
 func fetchLatestCLI() (updateCheckState, error) {
@@ -109,8 +109,6 @@ func fetchLatestCLI() (updateCheckState, error) {
 	var body struct {
 		CLI *struct {
 			Version string `json:"version"`
-			Install string `json:"install"`
-			URL     string `json:"url"`
 		} `json:"cli"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body); err != nil {
@@ -119,12 +117,16 @@ func fetchLatestCLI() (updateCheckState, error) {
 	if body.CLI == nil || parseVersion(body.CLI.Version) == nil {
 		return updateCheckState{}, fmt.Errorf("no CLI version in the response")
 	}
-	return updateCheckState{CheckedAt: time.Now(), Latest: body.CLI.Version, Install: body.CLI.Install, URL: body.CLI.URL}, nil
+	return updateCheckState{CheckedAt: time.Now(), Latest: body.CLI.Version}, nil
 }
 
 func readUpdateState() updateCheckState {
 	var s updateCheckState
-	if b, err := os.ReadFile(updateCheckPath()); err == nil {
+	p := updateCheckPath()
+	if p == "" {
+		return s
+	}
+	if b, err := os.ReadFile(p); err == nil {
 		_ = json.Unmarshal(b, &s)
 	}
 	return s
@@ -136,6 +138,9 @@ func writeUpdateState(s updateCheckState) {
 		return
 	}
 	p := updateCheckPath()
+	if p == "" {
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return
 	}
@@ -146,6 +151,14 @@ func writeUpdateState(s updateCheckState) {
 // beyond the numbers). Returns nil when it isn't a version.
 func parseVersion(v string) []int {
 	v = strings.TrimPrefix(v, "v")
+	if v == "" || len(v) > 32 {
+		return nil
+	}
+	for _, c := range v {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '.' || c == '-') {
+			return nil
+		}
+	}
 	core, _, _ := strings.Cut(v, "-")
 	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
@@ -153,8 +166,11 @@ func parseVersion(v string) []int {
 	}
 	out := make([]int, 3)
 	for i, p := range parts {
+		if p == "" || strings.Trim(p, "0123456789") != "" {
+			return nil
+		}
 		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 {
+		if err != nil {
 			return nil
 		}
 		out[i] = n
