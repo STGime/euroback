@@ -3,8 +3,9 @@
  */
 
 import type { HttpClient, EurobaseConfig } from './http'
-import { httpClient } from './http'
 import { passkeysSupported, createPasskey, getPasskeyAssertion, passkeyErrorMessage } from './webauthn'
+import { AccessTokenVerifier, stripBearer } from './jwt'
+import type { VerifyAccessTokenOptions, VerifyAccessTokenResult } from './jwt'
 import { AdminClient } from './admin'
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,73 @@ function isSession(value: unknown): value is AuthSession {
 function issuedAt(session: AuthSession): number | null {
   const iat = decodeJwtClaims(session.access_token)?.iat
   return typeof iat === 'number' ? iat : null
+}
+
+/**
+ * True in a browser or React Native app: one user per client is the norm
+ * there. False on a server runtime (Node, Deno, Bun, edge workers).
+ */
+function isUserDevice(): boolean {
+  if (typeof document !== 'undefined') return true
+  const g = globalThis as { WorkerGlobalScope?: unknown; importScripts?: unknown }
+  // A browser's Web Worker or an extension's service worker: one user.
+  // (Server runtimes with worker globals, such as Deno or edge workers,
+  // have no importScripts.)
+  if (typeof g.WorkerGlobalScope !== 'undefined' && typeof g.importScripts === 'function') return true
+  return typeof navigator !== 'undefined' && (navigator as { product?: string }).product === 'ReactNative'
+}
+
+/** The server-runtime warning is printed once per process. */
+let serverSessionWarned = false
+
+/** Accepts a refresh token as a string or as a session-like object. */
+function refreshTokenOf(arg: string | { refresh_token: string } | undefined): string | undefined {
+  if (typeof arg === 'string') return arg
+  if (arg && typeof arg === 'object' && typeof arg.refresh_token === 'string') return arg.refresh_token
+  return undefined
+}
+
+/**
+ * Complete a session for use: the user from the access token when the
+ * response has none, and `expires_at`.
+ */
+function completeSession(session: AuthSession, restored: boolean): AuthSession {
+  // An OAuth callback (and a session stored by SDK ≤ 0.8.0 after one)
+  // has no user yet: take id / email from the access token's claims
+  // (`sub`, `email`) so getSession().user.id is usable right away (#720).
+  // Unverified until the first server call — the gateway verifies every
+  // request; never base client-side authorization on it.
+  if (!session.user?.id) {
+    const claims = decodeJwtClaims(session.access_token)
+    if (claims && typeof claims.sub === 'string' && claims.sub) {
+      session = {
+        ...session,
+        user: {
+          ...session.user,
+          created_at: session.user?.created_at ?? '',
+          updated_at: session.user?.updated_at ?? '',
+          id: claims.sub,
+          // Phone sign-ins put the phone number in `email`; only take an address.
+          email: typeof claims.email === 'string' && claims.email.includes('@')
+            ? claims.email
+            : (session.user?.email ?? ''),
+        },
+      }
+    }
+  }
+  // A session from the server counts expires_in from now; a restored
+  // one keeps its stored expiry (older SDKs didn't store it: use the
+  // token's exp). Counting from now keeps a fresh session independent
+  // of the client's clock.
+  let expiresAt = restored ? session.expires_at : undefined
+  if (restored && typeof expiresAt !== 'number') {
+    const exp = decodeJwtClaims(session.access_token)?.exp
+    if (typeof exp === 'number') expiresAt = exp
+  }
+  if (typeof expiresAt !== 'number') {
+    expiresAt = Math.floor(Date.now() / 1000) + (Number(session.expires_in) || 3600)
+  }
+  return { ...session, expires_at: expiresAt }
 }
 
 /** Error returned when a sign-in response isn't a session. */
@@ -117,6 +185,13 @@ export interface AuthUser {
  * Offer `resendVerification(email)`.
  */
 export const EMAIL_NOT_CONFIRMED = 'email_not_confirmed'
+
+/**
+ * Error string returned by `getUser()` and `refreshSession()` (and by
+ * `verifyAccessToken()` when the gateway checked the token) for a suspended
+ * user.
+ */
+export const ACCOUNT_SUSPENDED = 'account_suspended'
 
 /** Result of `signUp`. */
 export interface SignUpResult {
@@ -247,15 +322,82 @@ export class AuthClient {
   private refreshingGeneration = -1
   /** Failed refresh attempts in a row (temporary errors only). */
   private refreshAttempts = 0
+  /** False in server mode (`auth.persistSession: false`): no session is kept. */
+  private readonly persist: boolean
+  private readonly autoRefresh: boolean
+  private readonly verifier: AccessTokenVerifier
   /** User admin API for your server (secret key only): see ./admin.ts. */
   readonly admin: AdminClient
 
-  constructor(config: EurobaseConfig, http: HttpClient) {
+  /**
+   * @internal `options.verifier` lets clients made by `withAccessToken()`
+   * share the main client's JWKS cache.
+   */
+  constructor(config: EurobaseConfig, http: HttpClient, options?: { verifier?: AccessTokenVerifier }) {
     this.http = http
     this.config = config
     this.admin = new AdminClient(config)
-    this.restoreSession()
-    this.listenToOtherTabs()
+    this.persist = config.auth?.persistSession !== false
+    this.autoRefresh = this.persist && config.auth?.autoRefreshToken !== false
+    this.verifier = options?.verifier ?? new AccessTokenVerifier(config, http)
+    if (this.persist) {
+      this.restoreSession()
+      this.listenToOtherTabs()
+    }
+  }
+
+  /** @internal The JWKS cache, shared with `withAccessToken()` clients. */
+  get accessTokenVerifier(): AccessTokenVerifier {
+    return this.verifier
+  }
+
+  /**
+   * Verify an end-user access token on your server — e.g. the
+   * `Authorization: Bearer …` header your API received from your app
+   * (the `Bearer ` prefix is optional).
+   *
+   * ES256 tokens are checked locally against the project's public key
+   * (`GET /v1/auth/.well-known/jwks.json` on the client's `url`, fetched
+   * once and cached): signature, `exp`, issuer `eurobase`, audience (your
+   * `projectId` when the client has one) and `type: enduser`. When the
+   * runtime can't check locally (no WebCrypto, JWKS unreachable) the
+   * gateway checks it with `GET /v1/auth/user`, unless
+   * `serverFallback: false`. HS256 tokens are refused unless
+   * `allowHS256: true`.
+   *
+   * This checks the **token** only: it stays valid until it expires, also
+   * after sign-out, a password change, suspension or deletion. Use
+   * `getUser(token)` where you need to know the user still exists and
+   * isn't suspended.
+   *
+   * @example
+   * const { data, error } = await eb.auth.verifyAccessToken(req.headers.authorization ?? '')
+   * if (error) return res.status(401).end()
+   * data.userId // the signed-in user
+   */
+  async verifyAccessToken(token: string, options?: VerifyAccessTokenOptions): Promise<VerifyAccessTokenResult> {
+    return this.verifier.verify(token, options)
+  }
+
+  /**
+   * Take a session the server returned. With a kept session (default) it
+   * becomes this client's session and `event` is emitted; in server mode
+   * it is only completed (user from the token, `expires_at`) and returned.
+   */
+  private acceptSession(result: AuthSession, event: AuthEvent): AuthSession {
+    if (!this.persist) return completeSession(result, false)
+    if (!serverSessionWarned && this.config.auth?.persistSession === undefined && !isUserDevice()) {
+      serverSessionWarned = true
+      console.warn(
+        'Eurobase: this client now keeps a signed-in session and sends that user\'s token on every request. ' +
+        'On a server that handles several users, create the client with { auth: { persistSession: false } } ' +
+        'and use withAccessToken(token) per request. Set persistSession explicitly to silence this warning. ' +
+        'See https://console.eurobase.app/docs/server-side',
+      )
+    }
+    const session = this.setSession(result)
+    this.emit(event, session)
+    return session
   }
 
   /**
@@ -289,8 +431,7 @@ export class AuthClient {
     if (!isSession(result)) {
       return { data: null, error: INVALID_SESSION_RESPONSE }
     }
-    const session = this.setSession(result)
-    this.emit('SIGNED_IN', session)
+    const session = this.acceptSession(result, 'SIGNED_IN')
     return { data: session, error: null, user: session.user, confirmationRequired: false }
   }
 
@@ -303,19 +444,28 @@ export class AuthClient {
     if (!isSession(result)) {
       return { data: null, error: INVALID_SESSION_RESPONSE }
     }
-    const session = this.setSession(result)
-    this.emit('SIGNED_IN', session)
+    const session = this.acceptSession(result, 'SIGNED_IN')
     return { data: session, error: null }
   }
 
   /**
    * Sign out the current user. The session is cleared at once (also in
    * the app's other tabs); then the refresh token is revoked on the server.
+   *
+   * On a server (`persistSession: false`) pass the refresh token to revoke
+   * (a string or the session). The access token stays valid until it
+   * expires.
    */
-  async signOut(): Promise<{ error: string | null }> {
-    const refreshToken = this.session?.refresh_token
-    this.clearSession(true)
-    this.emit('SIGNED_OUT', null)
+  async signOut(refreshTokenOrSession?: string | { refresh_token: string }): Promise<{ error: string | null }> {
+    const explicit = refreshTokenOf(refreshTokenOrSession)
+    const refreshToken = explicit ?? this.session?.refresh_token
+    if (this.persist && (!explicit || explicit === this.session?.refresh_token)) {
+      this.clearSession(true)
+      this.emit('SIGNED_OUT', null)
+    }
+    if (!this.persist && !refreshToken) {
+      return { error: 'no refresh token: pass the session or its refresh_token' }
+    }
     if (refreshToken) {
       // keepalive: a SIGNED_OUT listener that navigates away must not
       // cancel the revoke.
@@ -337,8 +487,19 @@ export class AuthClient {
    * Calls made while a refresh is running share it. In a browser, tabs
    * of the same app share the session: only one refreshes at a time, and
    * the others take the session it stores.
+   *
+   * With a refresh token argument (a string or a session), that token is
+   * exchanged for a new session — the way to refresh on a server
+   * (`persistSession: false`), where it's required. Refresh tokens rotate:
+   * store the new `refresh_token` from the result. With a kept session the
+   * result also becomes this client's session.
    */
-  async refreshSession(): Promise<{ data: AuthSession | null; error: string | null }> {
+  async refreshSession(refreshTokenOrSession?: string | { refresh_token: string }): Promise<{ data: AuthSession | null; error: string | null }> {
+    const explicit = refreshTokenOf(refreshTokenOrSession)
+    if (explicit !== undefined || !this.persist) {
+      if (!explicit) return { data: null, error: 'no refresh token: pass the session or its refresh_token' }
+      return this.refreshWith(explicit)
+    }
     if (!this.refreshing || this.refreshingGeneration !== this.generation) {
       const run = this.runRefresh().finally(() => {
         if (this.refreshing === run) this.refreshing = null
@@ -347,6 +508,15 @@ export class AuthClient {
       this.refreshingGeneration = this.generation
     }
     return this.refreshing
+  }
+
+  /** One refresh with a given token; the result is taken like a sign-in. */
+  private async refreshWith(refreshToken: string): Promise<{ data: AuthSession | null; error: string | null }> {
+    const hadSession = !!this.session
+    const result = await this.http.post('/v1/auth/refresh', { refresh_token: refreshToken }, { timeoutMs: REFRESH_TIMEOUT_MS })
+    if (result.error) return { data: null, error: result.error }
+    if (!isSession(result)) return { data: null, error: INVALID_SESSION_RESPONSE }
+    return { data: this.acceptSession(result, hadSession ? 'TOKEN_REFRESHED' : 'SIGNED_IN'), error: null }
   }
 
   private async runRefresh(): Promise<{ data: AuthSession | null; error: string | null }> {
@@ -437,8 +607,7 @@ export class AuthClient {
     if (!isSession(result)) {
       return { data: null, error: INVALID_SESSION_RESPONSE }
     }
-    const session = this.setSession(result)
-    this.emit('SIGNED_IN', session)
+    const session = this.acceptSession(result, 'SIGNED_IN')
     return { data: session, error: null }
   }
 
@@ -494,7 +663,8 @@ export class AuthClient {
    * Requires gateway #808.
    */
   async updatePassword(params: { currentPassword: string; newPassword: string }): Promise<{ data: AuthSession | null; error: string | null }> {
-    if (!this.session) {
+    // On a server: `eb.withAccessToken(token).auth.updatePassword(…)`.
+    if (!this.session && !this.http.getAccessToken()) {
       return { data: null, error: 'not signed in' }
     }
     const result = await this.http.post('/v1/auth/user/password', {
@@ -507,8 +677,7 @@ export class AuthClient {
     if (!isSession(result)) {
       return { data: null, error: INVALID_SESSION_RESPONSE }
     }
-    const session = this.setSession(result)
-    this.emit('TOKEN_REFRESHED', session)
+    const session = this.acceptSession(result, 'TOKEN_REFRESHED')
     return { data: session, error: null }
   }
 
@@ -655,8 +824,7 @@ export class AuthClient {
     if (!isSession(result)) {
       return { data: null, error: INVALID_SESSION_RESPONSE }
     }
-    const session = this.setSession(result)
-    this.emit('SIGNED_IN', session)
+    const session = this.acceptSession(result, 'SIGNED_IN')
     return { data: session, error: null }
   }
 
@@ -742,15 +910,14 @@ export class AuthClient {
       user: { id: '', email: '', created_at: '', updated_at: '' },
     }
 
-    this.setSession(session)
-    this.emit('SIGNED_IN', this.session!)
+    const accepted = this.acceptSession(session, 'SIGNED_IN')
 
     // Clean the URL hash.
     if (typeof window.history !== 'undefined') {
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
     }
 
-    return { data: this.session, error: null }
+    return { data: accepted, error: null }
   }
 
   /**
@@ -758,13 +925,27 @@ export class AuthClient {
    * session's `user` with it (same user id only — the server's profile is
    * authoritative, so cleared fields don't linger), so `getSession().user`
    * carries the full profile afterwards.
+   *
+   * With an access token argument, asks for that token's user instead
+   * (supabase-js compatible `getUser(jwt)`): the server-side check that the
+   * token is valid, the user still exists and isn't suspended. Nothing is
+   * stored.
+   *
+   * A suspended user gets `error: 'account_suspended'` (`ACCOUNT_SUSPENDED`,
+   * HTTP 403; older gateways still return the user); a deleted one
+   * `'user not found'`. Like a 401 here, that doesn't clear this client's
+   * session by itself: its next refresh is refused and ends the session.
    */
-  async getUser(): Promise<{ data: AuthUser | null; error: string | null }> {
-    const result = await this.http.get('/v1/auth/user')
+  async getUser(accessToken?: string): Promise<{ data: AuthUser | null; error: string | null }> {
+    const token = typeof accessToken === 'string' ? stripBearer(accessToken) : undefined
+    if (accessToken !== undefined && !token) {
+      return { data: null, error: 'missing token' }
+    }
+    const result = await this.http.get('/v1/auth/user', undefined, token ? { accessToken: token } : undefined)
     if (result.error) {
       return { data: null, error: result.error }
     }
-    if (this.session && result?.id && result.id === this.session.user?.id) {
+    if (!token && this.session && result?.id && result.id === this.session.user?.id) {
       this.session = { ...this.session, user: result as AuthUser }
       // Only while storage still holds this session: never write an older
       // session over one another tab stored meanwhile.
@@ -841,47 +1022,12 @@ export class AuthClient {
   // ── Internal ──
 
   private setSession(session: AuthSession, restored = false): AuthSession {
-    // An OAuth callback (and a session stored by SDK ≤ 0.8.0 after one)
-    // has no user yet: take id / email from the access token's claims
-    // (`sub`, `email`) so getSession().user.id is usable right away (#720).
-    // Unverified until the first server call — the gateway verifies every
-    // request; never base client-side authorization on it.
-    if (!session.user?.id) {
-      const claims = decodeJwtClaims(session.access_token)
-      if (claims && typeof claims.sub === 'string' && claims.sub) {
-        session = {
-          ...session,
-          user: {
-            ...session.user,
-            created_at: session.user?.created_at ?? '',
-            updated_at: session.user?.updated_at ?? '',
-            id: claims.sub,
-            // Phone sign-ins put the phone number in `email`; only take an address.
-            email: typeof claims.email === 'string' && claims.email.includes('@')
-              ? claims.email
-              : (session.user?.email ?? ''),
-          },
-        }
-      }
-    }
-    // A session from the server counts expires_in from now; a restored
-    // one keeps its stored expiry (older SDKs didn't store it: use the
-    // token's exp). Counting from now keeps a fresh session independent
-    // of the client's clock.
-    let expiresAt = restored ? session.expires_at : undefined
-    if (restored && typeof expiresAt !== 'number') {
-      const exp = decodeJwtClaims(session.access_token)?.exp
-      if (typeof exp === 'number') expiresAt = exp
-    }
-    if (typeof expiresAt !== 'number') {
-      expiresAt = Math.floor(Date.now() / 1000) + (Number(session.expires_in) || 3600)
-    }
-    session = { ...session, expires_at: expiresAt }
+    session = completeSession(session, restored)
     this.generation++
     this.session = session
     this.http.setAccessToken(session.access_token)
     this.persistSession(session)
-    this.scheduleRefresh(expiresAt)
+    if (this.autoRefresh) this.scheduleRefresh(session.expires_at as number)
     return session
   }
 
@@ -926,7 +1072,7 @@ export class AuthClient {
    * try comes before it expires.
    */
   private scheduleRetry() {
-    if (!this.session) return
+    if (!this.session || !this.autoRefresh) return
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer)
       this.refreshTimer = null

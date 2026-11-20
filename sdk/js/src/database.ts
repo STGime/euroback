@@ -16,6 +16,22 @@ export interface QueryResult<T = Record<string, any>> {
   data: T | T[] | null
   count: number | null
   error: string | null
+  /**
+   * On an error: the HTTP status, when a response arrived. 409 means the
+   * write broke a unique constraint ("a record with this … already exists"),
+   * 403 a row-level security or permission refusal.
+   */
+  status?: number
+  /** On an error: the code the gateway sent, if any (e.g. a `RAISE EXCEPTION`'s `P0001`). */
+  code?: string
+}
+
+/** An error result, keeping the HTTP status and code the gateway sent. */
+function queryError<T>(res: { error: string; status?: unknown; code?: unknown }): QueryResult<T> {
+  const out: QueryResult<T> = { data: null, count: null, error: res.error }
+  if (typeof res.status === 'number') out.status = res.status
+  if (typeof res.code === 'string') out.code = res.code
+  return out
 }
 
 /** Result of `db.rpc()`. */
@@ -187,7 +203,7 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
     const res = await this.http.get(`/v1/db/${encodeURIComponent(this.table)}`, params)
 
     if (res.error) {
-      return { data: null, count: null, error: res.error }
+      return queryError(res)
     }
 
     const data = res.data ?? null
@@ -208,7 +224,7 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
     const res = await this.http.post(`/v1/db/${encodeURIComponent(this.table)}`, data)
 
     if (res.error) {
-      return { data: null, count: null, error: res.error }
+      return queryError(res)
     }
 
     return { data: res as T, count: null, error: null }
@@ -222,7 +238,7 @@ export class QueryBuilder<T = Record<string, any>> implements PromiseLike<QueryR
     )
 
     if (res.error) {
-      return { data: null, count: null, error: res.error }
+      return queryError(res)
     }
 
     return { data: res as T, count: null, error: null }

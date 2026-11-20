@@ -502,20 +502,26 @@ func (s *AuthService) SignOut(ctx context.Context, schemaName, rawRefreshToken s
 func (s *AuthService) GetUser(ctx context.Context, schemaName, userID string) (*User, error) {
 	var user User
 	var metadataJSON []byte
+	var bannedAt *time.Time
 	q := fmt.Sprintf(
-		`SELECT id, email, display_name, avatar_url, metadata, email_confirmed_at, created_at, updated_at
+		`SELECT id, email, display_name, avatar_url, metadata, email_confirmed_at, created_at, updated_at, banned_at
 		 FROM %s.users WHERE id = $1`,
 		quoteIdent(schemaName),
 	)
 	err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, q, userID).
-			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt)
+			Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &metadataJSON, &user.EmailConfirmedAt, &user.CreatedAt, &user.UpdatedAt, &bannedAt)
 	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("user not found")
 		}
 		return nil, fmt.Errorf("query user: %w", err)
+	}
+	// A suspended user's access token stays valid until it expires; GET
+	// /v1/auth/user is where a server asks whether the user may still act.
+	if bannedAt != nil {
+		return nil, ErrAccountSuspended
 	}
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
 	return &user, nil

@@ -35,6 +35,29 @@ export interface Subscription {
 /** Event types that can be subscribed to. */
 export type RealtimeEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
 
+/** The claims of an end-user access token (unverified), or null. */
+function tokenClaims(token: string): Record<string, unknown> | null {
+  const parts = token.split('.')
+  if (parts.length !== 3 || typeof atob !== 'function') return null
+  try {
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    b64 += '='.repeat((4 - (b64.length % 4)) % 4)
+    const claims = JSON.parse(atob(b64))
+    return claims && typeof claims === 'object' ? claims : null
+  } catch {
+    return null
+  }
+}
+
+/** The `project_id` claim of an end-user access token (unverified), or null. */
+function projectIdFromToken(token: string): string | null {
+  const id = tokenClaims(token)?.project_id
+  return typeof id === 'string' && id ? id : null
+}
+
+/** Called when the client stops for good (e.g. its access token expired). */
+export type RealtimeErrorCallback = (error: string) => void
+
 // ---------------------------------------------------------------------------
 // RealtimeClient
 // ---------------------------------------------------------------------------
@@ -50,10 +73,50 @@ export class RealtimeClient {
   private maxReconnectDelay = 30_000 // 30 seconds
   private shouldReconnect = true
   private pendingSubscribes: string[] = []
+  /** True for a `withAccessToken()` client: its token is never replaced. */
+  private readonly fixedToken: boolean
+  private errorListeners: RealtimeErrorCallback[] = []
 
-  constructor(config: EurobaseConfig, http: HttpClient) {
+  /** @internal `options.fixedToken`: set by `withAccessToken()`. */
+  constructor(config: EurobaseConfig, http: HttpClient, options?: { fixedToken?: boolean }) {
     this.config = config
     this.http = http
+    this.fixedToken = options?.fixedToken === true
+  }
+
+  /**
+   * Be told when the client stops reconnecting for good — on a
+   * `withAccessToken()` client once its access token has expired (the
+   * gateway refuses it; make a new client with a fresh token). Returns a
+   * function that unsubscribes.
+   */
+  onError(callback: RealtimeErrorCallback): () => void {
+    this.errorListeners.push(callback)
+    return () => {
+      this.errorListeners = this.errorListeners.filter((l) => l !== callback)
+    }
+  }
+
+  /**
+   * A `withAccessToken()` client can't get a new token, so once it has
+   * expired every connection attempt is refused (401): stop instead of
+   * retrying forever, and report it.
+   */
+  private stopIfTokenExpired(): boolean {
+    if (!this.fixedToken) return false
+    const exp = tokenClaims(this.http.getAccessToken() ?? '')?.exp
+    if (typeof exp !== 'number' || exp > Math.floor(Date.now() / 1000)) return false
+    this.shouldReconnect = false
+    const message = 'realtime: access token expired; create a new client with a fresh token'
+    if (this.errorListeners.length === 0) console.warn(`Eurobase ${message}`)
+    for (const l of this.errorListeners) {
+      try {
+        l(message)
+      } catch {
+        // Listener errors must not break the client.
+      }
+    }
+    return true
   }
 
   /**
@@ -105,6 +168,7 @@ export class RealtimeClient {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return
     }
+    if (this.stopIfTokenExpired()) return
     this.connect()
   }
 
@@ -131,8 +195,12 @@ export class RealtimeClient {
     // The end-user JWT path needs project_id to find the right
     // jwt_secret. The apikey path doesn't, but adding it costs nothing
     // — the gateway cross-checks it against the apikey's project.
-    if (this.config.projectId) {
-      params.set('project_id', this.config.projectId)
+    // Without a configured projectId, an end-user token names its own
+    // project (claim `project_id`); the gateway verifies the token against
+    // that project, so a wrong value only fails the connection.
+    const projectId = this.config.projectId || (accessToken ? projectIdFromToken(accessToken) : null)
+    if (projectId) {
+      params.set('project_id', projectId)
     }
     return `${baseUrl}/v1/realtime?${params.toString()}`
   }
@@ -210,8 +278,9 @@ export class RealtimeClient {
       this.maxReconnectDelay,
     )
     this.reconnectAttempts++
+    if (this.stopIfTokenExpired()) return
     setTimeout(() => {
-      if (this.shouldReconnect && this.subscriptions.size > 0) {
+      if (this.shouldReconnect && this.subscriptions.size > 0 && !this.stopIfTokenExpired()) {
         this.connect()
       }
     }, delay)

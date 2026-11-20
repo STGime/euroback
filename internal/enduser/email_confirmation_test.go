@@ -177,6 +177,22 @@ func TestEmailConfirmation_DB(t *testing.T) {
 		t.Fatalf("GetUser: %+v, %v", u, err)
 	}
 
+	// A suspended user: GetUser (GET /v1/auth/user) refuses with
+	// ErrAccountSuspended, so a server checking a token with it learns
+	// about the suspension; lifting it makes GetUser work again.
+	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET banned_at = now() WHERE id = $1`, resp.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetUser(ctx, schema, resp.User.ID); !errors.Is(err, ErrAccountSuspended) {
+		t.Fatalf("GetUser of a suspended user: want ErrAccountSuspended, got %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+quoteIdent(schema)+`.users SET banned_at = NULL WHERE id = $1`, resp.User.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetUser(ctx, schema, resp.User.ID); err != nil {
+		t.Fatalf("GetUser after unsuspend: %v", err)
+	}
+
 	// Without the setting, sign-up signs the user in straight away.
 	openCfg := tenant.ParseAuthConfig([]byte(`{"providers": {"email_password": {"enabled": true}}, "password_min_length": 8, "session_duration": "1h"}`))
 	open, err := svc.SignUp(ctx, schema, jwtSecret, pid, openCfg, SignUpRequest{Email: "other@example.com", Password: password})
