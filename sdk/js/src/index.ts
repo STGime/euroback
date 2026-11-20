@@ -30,6 +30,15 @@ export type {
   RealtimeErrorCallback,
 } from './realtime'
 export { AuthClient, EMAIL_NOT_CONFIRMED, ACCOUNT_SUSPENDED } from './auth'
+export { AdminClient, ADMIN_NEEDS_SECRET_KEY } from './admin'
+export type {
+  AdminUser,
+  AdminUserList,
+  AdminListUsersOptions,
+  AdminCreateUserParams,
+  AdminUpdateUserParams,
+  AdminResult,
+} from './admin'
 export { FunctionsClient } from './functions'
 export type {
   FunctionInvokeOptions,

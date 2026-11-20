@@ -6,6 +6,7 @@ import type { HttpClient, EurobaseConfig } from './http'
 import { passkeysSupported, createPasskey, getPasskeyAssertion, passkeyErrorMessage } from './webauthn'
 import { AccessTokenVerifier, stripBearer } from './jwt'
 import type { VerifyAccessTokenOptions, VerifyAccessTokenResult } from './jwt'
+import { AdminClient } from './admin'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -325,6 +326,8 @@ export class AuthClient {
   private readonly persist: boolean
   private readonly autoRefresh: boolean
   private readonly verifier: AccessTokenVerifier
+  /** User admin API for your server (secret key only): see ./admin.ts. */
+  readonly admin: AdminClient
 
   /**
    * @internal `options.verifier` lets clients made by `withAccessToken()`
@@ -333,6 +336,7 @@ export class AuthClient {
   constructor(config: EurobaseConfig, http: HttpClient, options?: { verifier?: AccessTokenVerifier }) {
     this.http = http
     this.config = config
+    this.admin = new AdminClient(config)
     this.persist = config.auth?.persistSession !== false
     this.autoRefresh = this.persist && config.auth?.autoRefreshToken !== false
     this.verifier = options?.verifier ?? new AccessTokenVerifier(config, http)
