@@ -9,6 +9,33 @@ export interface EurobaseConfig {
   /** Project UUID (optional; required for end-user JWT realtime). See
    * client.ts for the user-facing docs. */
   projectId?: string
+  /** Session handling of `auth` (server mode: `{ persistSession: false }`). */
+  auth?: EurobaseAuthOptions
+}
+
+/** Session handling of the client's `auth`. */
+export interface EurobaseAuthOptions {
+  /**
+   * Keep the signed-in user's session on this client (default `true`).
+   *
+   * `true`: after a sign-in the client stores the session (localStorage
+   * in a browser, memory elsewhere) and sends that user's access token on
+   * every later `db` / `storage` / `functions` / `realtime` call.
+   *
+   * `false` (server mode): the client keeps **no** session at all — not in
+   * storage, not in memory. `signIn` / `signUp` / `refreshSession(token)`
+   * still return the session, but the client never sends it and emits no
+   * auth events. Use this for a client shared by the requests of many
+   * users (a Node / Deno / Bun / edge server), and act as a user with
+   * `withAccessToken(token)`. Unlike supabase-js, where
+   * `persistSession: false` still keeps the session in memory.
+   */
+  persistSession?: boolean
+  /**
+   * Refresh the stored session shortly before its access token expires
+   * (default `true`). Only applies with `persistSession: true`.
+   */
+  autoRefreshToken?: boolean
 }
 
 /**
@@ -24,10 +51,12 @@ export interface RequestOptions {
   timeoutMs?: number
   /** Let the request finish even if the page navigates away. */
   keepalive?: boolean
+  /** Send this end-user access token instead of the client's own. */
+  accessToken?: string
 }
 
 export interface HttpClient {
-  get(path: string, params?: QueryParams): Promise<any>
+  get(path: string, params?: QueryParams, options?: RequestOptions): Promise<any>
   post(path: string, body?: any, options?: RequestOptions): Promise<any>
   patch(path: string, body?: any): Promise<any>
   del(path: string): Promise<any>
@@ -54,12 +83,13 @@ export function httpClient(config: EurobaseConfig): HttpClient {
     return url
   }
 
-  function headers(contentType?: string): Record<string, string> {
+  function headers(contentType?: string, options?: RequestOptions): Record<string, string> {
     const h: Record<string, string> = {
       'apikey': config.apiKey,
     }
-    if (accessToken) {
-      h['Authorization'] = `Bearer ${accessToken}`
+    const token = options?.accessToken ?? accessToken
+    if (token) {
+      h['Authorization'] = `Bearer ${token}`
     }
     if (contentType) {
       h['Content-Type'] = contentType
@@ -111,11 +141,11 @@ export function httpClient(config: EurobaseConfig): HttpClient {
       return accessToken
     },
 
-    async get(path: string, params?: QueryParams): Promise<any> {
+    async get(path: string, params?: QueryParams, options?: RequestOptions): Promise<any> {
       try {
         const res = await fetch(buildUrl(path, params), {
           method: 'GET',
-          headers: headers(),
+          headers: headers(undefined, options),
         })
         // `await` here, so a body that fails to parse lands in the catch
         // below instead of rejecting the caller (#814).
@@ -129,7 +159,7 @@ export function httpClient(config: EurobaseConfig): HttpClient {
       try {
         const init: RequestInit = {
           method: 'POST',
-          headers: headers('application/json'),
+          headers: headers('application/json', options),
           body: body !== undefined ? JSON.stringify(body) : undefined,
         }
         if (options?.keepalive) init.keepalive = true

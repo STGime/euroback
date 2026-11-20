@@ -1,11 +1,14 @@
 /**
  * @eurobase/sdk — EU-sovereign Backend-as-a-Service TypeScript SDK
  *
- * Zero external dependencies. Works in browsers and Node.js 18+.
+ * Zero external dependencies. Works in browsers, Node.js 18+, Deno, Bun and
+ * edge runtimes. On a server, see `auth: { persistSession: false }` and
+ * `withAccessToken()`.
  */
 
 export { createClient } from './client'
-export type { EurobaseClient, EurobaseConfig } from './client'
+export type { EurobaseClient, EurobaseConfig, EurobaseUserClient, EurobaseAuthOptions } from './client'
+export type { VerifiedAccessToken, VerifyAccessTokenOptions, VerifyAccessTokenResult } from './jwt'
 export { QueryBuilder, DatabaseClient } from './database'
 export type { QueryResult, RpcResult } from './database'
 export { StorageClient } from './storage'

@@ -9,6 +9,10 @@ import { StorageClient } from './storage'
 import { RealtimeClient } from './realtime'
 import { VaultClient } from './vault'
 import { httpClient } from './http'
+import type { EurobaseAuthOptions } from './http'
+import { stripBearer } from './jwt'
+
+export type { EurobaseAuthOptions } from './http'
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -30,8 +34,34 @@ export interface EurobaseConfig {
    * Connection strings of the form
    * `eurobase://API_KEY@SLUG.eurobase.app` do NOT populate this — set
    * it explicitly if you need end-user JWT realtime.
+   *
+   * `auth.verifyAccessToken()` also checks a token's audience against it.
    */
   projectId?: string
+  /**
+   * Session handling. On a server that handles requests of several users,
+   * use `{ persistSession: false }` (server mode: the client keeps no
+   * session) and `withAccessToken(token)` per request.
+   */
+  auth?: EurobaseAuthOptions
+}
+
+/**
+ * A client that acts as one end user: every `db`, `storage`, `functions`
+ * and `realtime` call sends that user's access token, so RLS applies as
+ * that user. Made by `withAccessToken()`; it shares nothing mutable with
+ * other clients and keeps no session.
+ */
+export interface EurobaseUserClient {
+  /** The user's own account calls (`getUser()`, `updatePassword()`, …). */
+  auth: AuthClient
+  db: DatabaseClient
+  functions: FunctionsClient
+  storage: StorageClient
+  /** Call `realtime.disconnect()` when you are done with a subscription. */
+  realtime: RealtimeClient
+  /** The access token this client sends. */
+  readonly accessToken: string
 }
 
 /** The top-level Eurobase client with database, storage, realtime, and auth access. */
@@ -50,6 +80,18 @@ export interface EurobaseClient {
   vault: VaultClient
   /** Check connectivity to the Eurobase gateway. */
   status(): Promise<{ ok: boolean; latency_ms: number }>
+  /**
+   * A lightweight client that acts as the end user whose access token you
+   * pass (e.g. from the `Authorization` header your server received).
+   * Create one per request; RLS applies as that user. It does not check
+   * the token — verify it first with `auth.verifyAccessToken()`; the
+   * gateway refuses an invalid one (401) either way.
+   *
+   * Needs a client created with the **public** key: with the secret key
+   * the gateway runs every call as the service role, which skips RLS, so
+   * this throws.
+   */
+  withAccessToken(accessToken: string): EurobaseUserClient
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +198,31 @@ export function createClient(configOrConnectionString: EurobaseConfig | string):
       } catch {
         const latency_ms = Date.now() - start
         return { ok: false, latency_ms }
+      }
+    },
+    withAccessToken(accessToken: string): EurobaseUserClient {
+      const token = typeof accessToken === 'string' ? stripBearer(accessToken) : ''
+      if (!token) {
+        throw new Error('Eurobase: withAccessToken() needs an access token')
+      }
+      if (config.apiKey.startsWith('eb_sk_')) {
+        throw new Error(
+          'Eurobase: withAccessToken() needs a client created with the public key (eb_pk_…). ' +
+          'With the secret key every call runs as the service role and RLS does not apply.',
+        )
+      }
+      // Own config copy and HTTP client: nothing here is shared with the
+      // parent client or other requests except the JWKS cache.
+      const userConfig = { ...config, auth: { persistSession: false, autoRefreshToken: false } }
+      const userHttp = httpClient(userConfig)
+      userHttp.setAccessToken(token)
+      return {
+        auth: new AuthClient(userConfig, userHttp, { verifier: authClient.accessTokenVerifier }),
+        db: new DatabaseClient(userConfig, userHttp),
+        functions: new FunctionsClient(userConfig, userHttp),
+        storage: new StorageClient(userConfig, userHttp),
+        realtime: new RealtimeClient(userConfig, userHttp),
+        accessToken: token,
       }
     },
   }

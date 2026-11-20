@@ -2,7 +2,7 @@
 
 The official TypeScript SDK for [Eurobase](https://eurobase.app) — the EU-sovereign Backend-as-a-Service platform.
 
-Zero external dependencies. Works in browsers and Node.js 18+.
+Zero external dependencies. Works in browsers, React Native, Node.js 18+, Deno, Bun and edge runtimes — on a server, see [On a server](#on-a-server-node-deno-bun-edge-runtimes).
 
 ## Install
 
@@ -163,6 +163,35 @@ if (data) {
 ```
 
 The polling loop is left to the caller — apps know whether they want a tight poll, a push notification, or email-on-ready.
+
+### On a server (Node, Deno, Bun, edge runtimes)
+
+By default a client keeps the signed-in user's session and sends that user's token on every later call — right for an app, wrong for a server that handles many users with one client. On a server, keep no session and act as a user per request:
+
+```ts
+// Once, at startup: server mode — sign-in/refresh return the session but the client keeps none.
+const eb = createClient({ url, apiKey: 'eb_pk_...', projectId, auth: { persistSession: false } })
+const admin = createClient({ url, apiKey: process.env.EUROBASE_SECRET_KEY, auth: { persistSession: false } })
+
+// Per request: check the caller's access token (ES256, verified locally against the
+// project's JWKS, cached; HS256 tokens are checked with the gateway)…
+const { data: caller, error } = await eb.auth.verifyAccessToken(req.headers.authorization ?? '')
+if (error) return res.status(401).end()
+
+// …and act as that user, under RLS (db, storage, functions, realtime).
+const asUser = eb.withAccessToken(req.headers.authorization!)
+const { data: todos } = await asUser.db.from('todos').select('*')
+
+// Privileged work with the secret key (service role, RLS skipped) — after your own checks.
+await admin.db.from('credits').insert({ user_id: caller.userId, amount: 10 })
+```
+
+- `refreshSession(refreshToken)` and `signOut(refreshToken)` take the token explicitly in server mode; refresh tokens rotate, so store the new one.
+- `getUser(accessToken)` asks the gateway for the token's user (supabase-js `getUser(jwt)`).
+- `withAccessToken()` needs the public-key client: with the secret key every call is the service role, so it throws.
+- A server runtime that signs in on a default client prints a one-time warning; set `auth.persistSession` explicitly to silence it.
+
+Full guide with Express, Next.js, cron and mobile-backend examples: [Server-side use](https://console.eurobase.app/docs/server-side).
 
 ## Database
 

@@ -35,6 +35,20 @@ export interface Subscription {
 /** Event types that can be subscribed to. */
 export type RealtimeEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
 
+/** The `project_id` claim of an end-user access token (unverified), or null. */
+function projectIdFromToken(token: string): string | null {
+  const parts = token.split('.')
+  if (parts.length !== 3 || typeof atob !== 'function') return null
+  try {
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    b64 += '='.repeat((4 - (b64.length % 4)) % 4)
+    const claims = JSON.parse(atob(b64))
+    return typeof claims?.project_id === 'string' && claims.project_id ? claims.project_id : null
+  } catch {
+    return null
+  }
+}
+
 // ---------------------------------------------------------------------------
 // RealtimeClient
 // ---------------------------------------------------------------------------
@@ -131,8 +145,12 @@ export class RealtimeClient {
     // The end-user JWT path needs project_id to find the right
     // jwt_secret. The apikey path doesn't, but adding it costs nothing
     // — the gateway cross-checks it against the apikey's project.
-    if (this.config.projectId) {
-      params.set('project_id', this.config.projectId)
+    // Without a configured projectId, an end-user token names its own
+    // project (claim `project_id`); the gateway verifies the token against
+    // that project, so a wrong value only fails the connection.
+    const projectId = this.config.projectId || (accessToken ? projectIdFromToken(accessToken) : null)
+    if (projectId) {
+      params.set('project_id', projectId)
     }
     return `${baseUrl}/v1/realtime?${params.toString()}`
   }
