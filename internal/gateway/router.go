@@ -1692,7 +1692,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 						next.ServeHTTP(w, r.WithContext(audit.WithContext(r.Context(), auditSvc)))
 					})
 				})
-				r.Mount("/", enduser.AdminRoutes(pool))
+				r.Mount("/", enduser.AdminRoutes(pool, limiter))
 			})
 
 			// GET /v1/auth/user requires end-user JWT.

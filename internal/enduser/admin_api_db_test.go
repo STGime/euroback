@@ -11,6 +11,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/auth"
+	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,6 +67,13 @@ func TestAdminAPI_DB(t *testing.T) {
 	})
 
 	auditSvc := audit.NewService(admin)
+	// Optional Redis for the password-hashing limit (ENDUSER_REDIS_TEST_URL).
+	var limiter *ratelimit.RateLimiter
+	if redisURL := os.Getenv("ENDUSER_REDIS_TEST_URL"); redisURL != "" {
+		if limiter, err = ratelimit.NewRateLimiter(redisURL); err != nil {
+			t.Fatal(err)
+		}
+	}
 	router := func(keyType string) http.Handler {
 		r := chi.NewRouter()
 		r.Use(func(next http.Handler) http.Handler {
@@ -74,13 +82,14 @@ func TestAdminAPI_DB(t *testing.T) {
 				next.ServeHTTP(w, r.WithContext(audit.WithContext(c, auditSvc)))
 			})
 		})
-		r.Mount("/v1/auth/admin/users", AdminRoutes(pool))
+		r.Mount("/v1/auth/admin/users", AdminRoutes(pool, limiter))
 		return r
 	}
 	secret, public := router("secret"), router("public")
 	call := func(h http.Handler, method, path, body string) (int, string) {
 		req := httptest.NewRequest(method, "/v1/auth/admin/users"+path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("apikey", "eb_sk_test")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code, rec.Body.String()
@@ -124,6 +133,12 @@ func TestAdminAPI_DB(t *testing.T) {
 	_ = json.Unmarshal([]byte(body), &list)
 	if code != 200 || list.Total != 3 || len(list.Users) != 1 {
 		t.Fatalf("page 2 of 2-per-page: %d total=%d users=%d", code, list.Total, len(list.Users))
+	}
+	// search is literal: % and _ are not wildcards.
+	code, body = call(secret, "GET", "?search=%25", "")
+	_ = json.Unmarshal([]byte(body), &list)
+	if code != 200 || list.Total != 0 {
+		t.Fatalf("search %%: %d %s (want no match)", code, body)
 	}
 	code, body = call(secret, "GET", "?search=partner", "")
 	_ = json.Unmarshal([]byte(body), &list)
@@ -250,5 +265,17 @@ func TestAdminAPI_DB(t *testing.T) {
 	}
 	if seen[audit.ActionEndUserCreated] != 3 {
 		t.Errorf("created entries = %d, want 3 (refused creates aren't audited)", seen[audit.ActionEndUserCreated])
+	}
+
+	// Password hashing is limited per project: 10 per 5 s, then 429.
+	if limiter != nil {
+		var got429 bool
+		for i := 0; i < 12 && !got429; i++ {
+			code, _ := call(secret, "POST", "/"+uuid.NewString()+"/password", `{"password":"Rate-limit-pass-1"}`)
+			got429 = code == http.StatusTooManyRequests
+		}
+		if !got429 {
+			t.Fatal("no 429 after 12 password sets in a row")
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/compliance"
@@ -101,7 +102,7 @@ type PoolResolver func(ctx context.Context, projectID string) *pgxpool.Pool
 func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimit.RateLimiter, catalog *pgxpool.Pool) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", handleListUsers(pool, resolver))
-	r.Post("/", handleCreateUser(pool, resolver))
+	r.Post("/", handleCreateUser(pool, resolver, limiter))
 	r.Post("/batch", handleBatchCreateUsers(pool, resolver))
 	r.Route("/{userId}", func(r chi.Router) {
 		r.Use(requireUserID)
@@ -110,11 +111,86 @@ func PlatformRoutes(pool *pgxpool.Pool, resolver PoolResolver, limiter *ratelimi
 		r.Delete("/", handleDeleteUser(pool, resolver))
 		r.Post("/suspend", handleSuspendUser(pool, resolver))
 		r.Delete("/suspend", handleUnsuspendUser(pool, resolver))
-		r.Post("/reset-password", handleResetPassword(pool, resolver))
+		r.Post("/reset-password", handleResetPassword(pool, resolver, limiter))
 		r.Post("/signout", handleSignOutUser(pool, resolver))
 		r.Get("/export", HandleGDPRExport(pool, catalog, limiter))
 	})
 	return r
+}
+
+// Request-size limits for the user write endpoints (console and SDK admin
+// API): the body, a display name, and the encoded metadata object.
+const (
+	maxUserBodyBytes     = 64 << 10
+	maxDisplayNameRunes  = 256
+	maxUserMetadataBytes = 16 << 10
+)
+
+// decodeUserBody reads a JSON body of at most maxUserBodyBytes into dst,
+// answering 413 (too large) or 400 itself. Returns false when it answered.
+func decodeUserBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUserBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSON(w, map[string]string{"error": "request body too large (max 64 KiB)", "code": "body_too_large"}, http.StatusRequestEntityTooLarge)
+			return false
+		}
+		writeJSON(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// userFieldsError checks the size of a display name and of the metadata
+// object a create / update sets.
+func userFieldsError(displayName *string, metadata map[string]interface{}) string {
+	if displayName != nil && utf8.RuneCountInString(*displayName) > maxDisplayNameRunes {
+		return "display_name must be at most 256 characters"
+	}
+	if metadata != nil {
+		b, err := json.Marshal(metadata)
+		if err != nil {
+			return "metadata must be a JSON object"
+		}
+		if len(b) > maxUserMetadataBytes {
+			return "metadata must be at most 16 KiB as JSON"
+		}
+	}
+	return ""
+}
+
+// Password hashing (bcrypt, cost 12) is the expensive part of creating a
+// user with a password and of setting one. Per project, at most
+// hashRateLimit of these calls per hashRateWindow (an average of two a
+// second, bursts of ten); beyond that 429 with Retry-After. Shared by the
+// console and the SDK admin API. Without a limiter (no Redis) it allows.
+const (
+	hashRateLimit  = 10
+	hashRateWindow = 5 * time.Second
+)
+
+// checkHashRate answers 429 and returns true when the project is over its
+// password-hashing budget.
+func checkHashRate(rl *ratelimit.RateLimiter, w http.ResponseWriter, r *http.Request) bool {
+	projectID := query.ProjectIDFromContext(r.Context())
+	if rl == nil || projectID == "" {
+		return false
+	}
+	return ratelimit.CheckAuthRateForProject(rl, w, r.Context(), "admin_password_hash", projectID, "project", hashRateLimit, hashRateWindow)
+}
+
+func optionalLimiter(limiter []*ratelimit.RateLimiter) *ratelimit.RateLimiter {
+	if len(limiter) > 0 {
+		return limiter[0]
+	}
+	return nil
+}
+
+// escapeILIKE escapes ILIKE's wildcards (and its escape character) so a
+// search matches the text literally.
+func escapeILIKE(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // requireUserID answers 404 for a {userId} that isn't a UUID, so a typo
@@ -167,18 +243,22 @@ func auditUserAction(r *http.Request, action, userID string, meta map[string]int
 		meta = map[string]interface{}{}
 	}
 	actorID, actorEmail := audit.ActorFromContext(ctx)
-	if actorEmail == "" {
-		if query.KeyTypeFromContext(ctx) != "secret" {
+	if actorID == "" {
+		if query.KeyTypeFromContext(ctx) == "secret" {
+			actorEmail = "secret API key"
+			meta["via"] = "secret_key"
+		} else if actorEmail == "" {
 			return // no identifiable actor: not an admin request
 		}
-		actorEmail = "secret API key"
-		meta["via"] = "secret_key"
 	}
 	ip := audit.ClientIPFromContext(ctx)
 	if ip == "" {
 		ip = r.RemoteAddr
 	}
-	svc.Log(ctx, query.ProjectIDFromContext(ctx), actorID, actorEmail, action,
+	// The change is done: record it even if the client has gone away.
+	logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	svc.Log(logCtx, query.ProjectIDFromContext(ctx), actorID, actorEmail, action,
 		audit.WithTarget("end_user", userID),
 		audit.WithMetadata(meta),
 		audit.WithIP(ip),
@@ -306,7 +386,7 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 			// formatting (E.164 vs national vs spaces) makes ILIKE
 			// flaky and the picker UI already covers phone-only
 			// users via display_name when one is set.
-			pattern := "%" + search + "%"
+			pattern := "%" + escapeILIKE(search) + "%"
 			countQ = fmt.Sprintf(`SELECT count(*) FROM %s.users WHERE email ILIKE $1 OR display_name ILIKE $1 OR id::text ILIKE $1`, qs)
 			listQ = fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.email ILIKE $1 OR u.display_name ILIKE $1 OR u.id::text ILIKE $1 ORDER BY u.created_at DESC LIMIT $2 OFFSET $3`, userCols, qs)
 			args = []interface{}{pattern, limit, offset}
@@ -383,7 +463,8 @@ func handleGetUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 	}
 }
 
-func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
+func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	rl := optionalLimiter(limiter)
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -392,8 +473,11 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		}
 
 		var req createUserRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		if !decodeUserBody(w, r, &req) {
+			return
+		}
+		if msg := userFieldsError(req.DisplayName, req.Metadata); msg != "" {
+			writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
 			return
 		}
 
@@ -410,6 +494,9 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		if req.Password != "" {
 			if msg := adminPasswordError(req.Password); msg != "" {
 				writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
+				return
+			}
+			if checkHashRate(rl, w, r) {
 				return
 			}
 			hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
@@ -475,8 +562,11 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		userID := chi.URLParam(r, "userId")
 
 		var req updateUserRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		if !decodeUserBody(w, r, &req) {
+			return
+		}
+		if msg := userFieldsError(req.DisplayName, req.Metadata); msg != "" {
+			writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
 			return
 		}
 
@@ -604,7 +694,15 @@ func handleDeleteUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 				"table":  "users",
 				"pkey":   map[string]any{"id": userID},
 			}
-			if hold, herr := hs.IsHeld(r.Context(), projectID, compliance.TargetRow, targetRef); herr == nil && hold != nil {
+			hold, herr := hs.IsHeld(r.Context(), projectID, compliance.TargetRow, targetRef)
+			if herr != nil {
+				// Can't tell whether a retention hold applies: refuse
+				// rather than delete a user who may be held.
+				slog.Error("retention hold lookup failed", "error", herr, "project_id", projectID, "user_id", userID)
+				writeJSON(w, map[string]string{"error": "could not check retention holds; try again"}, http.StatusServiceUnavailable)
+				return
+			}
+			if hold != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusConflict)
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -744,7 +842,8 @@ func handleUnsuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 	}
 }
 
-func handleResetPassword(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
+func handleResetPassword(pool *pgxpool.Pool, resolver PoolResolver, limiter ...*ratelimit.RateLimiter) http.HandlerFunc {
+	rl := optionalLimiter(limiter)
 	return func(w http.ResponseWriter, r *http.Request) {
 		schema := query.SchemaFromContext(r.Context())
 		if schema == "" {
@@ -755,12 +854,14 @@ func handleResetPassword(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 		userID := chi.URLParam(r, "userId")
 
 		var req resetPasswordRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		if !decodeUserBody(w, r, &req) {
 			return
 		}
 		if msg := adminPasswordError(req.Password); msg != "" {
 			writeJSON(w, map[string]string{"error": msg}, http.StatusBadRequest)
+			return
+		}
+		if checkHashRate(rl, w, r) {
 			return
 		}
 

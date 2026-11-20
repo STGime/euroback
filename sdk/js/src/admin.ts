@@ -82,6 +82,8 @@ export interface AdminResult<T> {
   status?: number
   /** Machine-readable code when the gateway sends one, e.g. `email_exists`, `secret_key_required`. */
   code?: string
+  /** Seconds to wait before retrying, from a 429 response's Retry-After. */
+  retryAfter?: number
 }
 
 /** The error for a client created with a public key: no request is sent. */
@@ -128,6 +130,8 @@ export class AdminClient {
           status: res.status,
         }
         if (json && typeof json.code === 'string') out.code = json.code
+        const retryAfter = Number(res.headers?.get?.('retry-after'))
+        if (res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) out.retryAfter = retryAfter
         return out
       }
       return { data: json as T, error: null }
@@ -150,7 +154,11 @@ export class AdminClient {
     return this.request('GET', qs ? '?' + qs : '')
   }
 
-  /** Create a user. A taken email answers `{ status: 409, code: 'email_exists' }`. */
+  /**
+   * Create a user. A taken email answers `{ status: 409, code: 'email_exists' }`.
+   * With a password, calls are limited per project (password hashing is
+   * expensive): beyond it `{ status: 429, retryAfter }`.
+   */
   createUser(params: AdminCreateUserParams): Promise<AdminResult<AdminUser>> {
     const body: Record<string, unknown> = { email: params.email }
     if (params.password !== undefined) body.password = params.password
@@ -197,7 +205,10 @@ export class AdminClient {
     return this.request('DELETE', this.userPath(id, '/suspend'))
   }
 
-  /** Set a new password (8–72 bytes). Revokes every refresh token of the user. */
+  /**
+   * Set a new password (8–72 bytes). Revokes every refresh token of the user.
+   * Limited per project like `createUser` with a password (429, `retryAfter`).
+   */
   setPassword(id: string, password: string): Promise<AdminResult<{ status: string }>> {
     return this.request('POST', this.userPath(id, '/password'), { password })
   }

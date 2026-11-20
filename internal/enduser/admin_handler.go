@@ -6,6 +6,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/auth"
 	"github.com/eurobase/euroback/internal/query"
+	"github.com/eurobase/euroback/internal/ratelimit"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,7 +26,10 @@ const ErrSecretKeyRequiredMessage = "the user admin API needs the project's secr
 // request plays no part. Every query runs as the service role on the
 // pool on the request, or the shared pool for a project without a
 // dedicated database — never the shared cluster for one with.
-func AdminRoutes(pool *pgxpool.Pool) chi.Router {
+//
+// limiter (may be nil) caps password hashing per project (create with a
+// password, set a password), as on the console.
+func AdminRoutes(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) chi.Router {
 	resolver := PoolResolver(func(ctx context.Context, _ string) *pgxpool.Pool {
 		return query.TenantPoolFromContext(ctx)
 	})
@@ -33,7 +37,7 @@ func AdminRoutes(pool *pgxpool.Pool) chi.Router {
 	r.Use(RequireSecretKey)
 	r.Use(adminTenantContext)
 	r.Get("/", handleListUsers(pool, resolver))
-	r.Post("/", handleCreateUser(pool, resolver))
+	r.Post("/", handleCreateUser(pool, resolver, limiter))
 	r.Route("/{userId}", func(r chi.Router) {
 		r.Use(requireUserID)
 		r.Get("/", handleGetUser(pool, resolver))
@@ -41,7 +45,7 @@ func AdminRoutes(pool *pgxpool.Pool) chi.Router {
 		r.Delete("/", handleDeleteUser(pool, resolver))
 		r.Post("/suspend", handleSuspendUser(pool, resolver))
 		r.Delete("/suspend", handleUnsuspendUser(pool, resolver))
-		r.Post("/password", handleResetPassword(pool, resolver))
+		r.Post("/password", handleResetPassword(pool, resolver, limiter))
 		r.Post("/signout", handleSignOutUser(pool, resolver))
 	})
 	return r
@@ -50,6 +54,12 @@ func AdminRoutes(pool *pgxpool.Pool) chi.Router {
 // RequireSecretKey refuses (403) every request whose API key isn't the
 // project's secret key. Public keys ship in browsers and apps; the admin
 // API reads and changes every account of the project.
+//
+// The key must come in the apikey header: the API-key middleware also
+// accepts ?apikey= (for browser redirects), but a secret key in a URL
+// ends up in access logs, browser history and proxies. The middleware
+// reads the header first and the query only when the header is empty, so
+// an empty header means the key came from the URL.
 func RequireSecretKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pc, ok := auth.ProjectFromContext(r.Context())
@@ -59,6 +69,10 @@ func RequireSecretKey(next http.Handler) http.Handler {
 		}
 		if pc.KeyType != "secret" {
 			writeJSON(w, map[string]string{"error": ErrSecretKeyRequiredMessage, "code": "secret_key_required"}, http.StatusForbidden)
+			return
+		}
+		if r.Header.Get("apikey") == "" {
+			writeJSON(w, map[string]string{"error": "send the secret key in the apikey header, not in the URL", "code": "apikey_header_required"}, http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

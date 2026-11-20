@@ -23,13 +23,13 @@ globalThis.fetch = async (url, init) => {
   let body
   if (init && typeof init.body === 'string') body = JSON.parse(init.body)
   calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers ?? {}, body })
-  const { status = 200, json = {}, statusText = 'OK' } = nextResponse ?? {}
+  const { status = 200, json = {}, statusText = 'OK', headers = {} } = nextResponse ?? {}
   const text = status === 204 ? '' : JSON.stringify(json)
   return {
     ok: status >= 200 && status < 300,
     status,
     statusText,
-    headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+    headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : headers[k.toLowerCase()] ?? null) },
     async text() { return text },
     async json() { return JSON.parse(text) },
   }
@@ -78,6 +78,13 @@ const base = `${URL_BASE}/v1/auth/admin/users`
   reset({ status: 409, statusText: 'Conflict', json: { error: 'a user with this email already exists', code: 'email_exists' } })
   const res = await eb.auth.admin.createUser({ email: 'ana@partner.example' })
   assert.deepEqual(res, { data: null, error: 'a user with this email already exists', status: 409, code: 'email_exists' })
+}
+
+// ── 429 → retryAfter from Retry-After ───────────────────────────────
+{
+  reset({ status: 429, statusText: 'Too Many Requests', json: { error: 'too many requests, try again in 3 seconds' }, headers: { 'retry-after': '3' } })
+  const res = await eb.auth.admin.setPassword(ID, 'New-pass-123')
+  assert.deepEqual(res, { data: null, error: 'too many requests, try again in 3 seconds', status: 429, retryAfter: 3 })
 }
 
 // ── listUsers: page / per_page / search ─────────────────────────────

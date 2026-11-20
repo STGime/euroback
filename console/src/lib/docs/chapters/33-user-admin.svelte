@@ -74,24 +74,56 @@ curl -s -X POST "$EB/$USER_ID/password" -H "apikey: $KEY" -H "Content-Type: appl
 # Sign out everywhere (revoke every refresh token)
 curl -s -X POST "$EB/$USER_ID/signout" -H "apikey: $KEY"`;
 
-	const partnerCode = `// Your backend creates accounts for a B2B customer's employees.
-// They sign in with a magic link or "forgot password", so no password is set.
-export async function onboardPartner(company, employees) {
+	const partnerSql = `-- Which company each account belongs to. Your backend writes it; users only read their own row.
+CREATE TABLE company_members (
+  user_id    uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  company_id uuid NOT NULL REFERENCES companies(id),
+  role       text NOT NULL DEFAULT 'member'
+);
+ALTER TABLE company_members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own_membership ON company_members
+  FOR SELECT USING (user_id = auth_uid());
+-- Your server (secret key) reads and writes every row.
+CREATE POLICY server_manages ON company_members
+  FOR ALL USING (is_service_role()) WITH CHECK (is_service_role());
+
+-- Example: everyone in a company sees the company's invoices.
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY company_invoices ON invoices
+  FOR SELECT USING (company_id IN (
+    SELECT company_id FROM company_members WHERE user_id = auth_uid()
+  ));`;
+
+	const partnerCode = `// Your backend creates accounts for a company's employees, records the
+// membership, and sends each person a link to choose their password.
+export async function onboardCompany(company, employees) {
   const results = []
   for (const person of employees) {
     const { data, error, code } = await eb.auth.admin.createUser({
       email: person.email,
-      emailConfirmed: true, // you vouch for the address
+      emailConfirmed: true,                  // you vouch for the address
       displayName: person.name,
-      metadata: { company: company.name, companyId: company.id, role: person.role },
+      metadata: { company: company.name },  // a label for your UI, not for access rules
     })
     if (code === 'email_exists') {
       results.push({ email: person.email, status: 'exists' })
-    } else if (error) {
-      results.push({ email: person.email, status: 'failed', error })
-    } else {
-      results.push({ email: person.email, status: 'created', id: data.id })
+      continue
     }
+    if (error) {
+      results.push({ email: person.email, status: 'failed', error })
+      continue
+    }
+
+    // Access comes from this table (see the policies above), written with the secret key.
+    await eb.db.from('company_members').insert({ user_id: data.id, company_id: company.id, role: person.role })
+
+    // Creating an account sends no email. Send the "set your password" link:
+    const sent = await eb.auth.forgotPassword(person.email, {
+      emailRedirectTo: 'https://app.example.com/set-password', // one of your allowed redirect URLs
+    })
+    results.push({ email: person.email, status: 'created', id: data.id, invited: !sent.error })
+
+    await new Promise((r) => setTimeout(r, 250)) // pace large batches
   }
   return results
 }`;
@@ -189,14 +221,22 @@ const eb = createClient({ url: process.env.EUROBASE_URL, apiKey: process.env.EUR
 const [header, ...lines] = (await readFile(process.argv[2], 'utf8')).trim().split(/\\r?\\n/)
 const cols = header.split(',').map((s) => s.trim())
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
 let created = 0, existing = 0, failed = 0
 for (const line of lines) {
   const row = Object.fromEntries(line.split(',').map((v, i) => [cols[i], v.trim()]))
-  const { error, code } = await eb.auth.admin.createUser({
-    email: row.email,
-    displayName: row.name,
-    metadata: { company: row.company, importedAt: new Date().toISOString() },
-  })
+  let res
+  for (let attempt = 0; attempt < 5; attempt++) {
+    res = await eb.auth.admin.createUser({
+      email: row.email,
+      displayName: row.name,
+      metadata: { company: row.company, importedAt: new Date().toISOString() },
+    })
+    if (res.status !== 429) break
+    await sleep((res.retryAfter ?? 5) * 1000) // over the rate limit: wait, then retry
+  }
+  const { error, code } = res
   if (!error) created++
   else if (code === 'email_exists') existing++ // safe to re-run
   else { failed++; console.error(row.email, error) }
@@ -213,7 +253,7 @@ console.log({ created, existing, failed })`;
 			Everything the console's <a href="/docs/users" class="text-eurobase-700 hover:underline">Users</a> page does is also an API for your backend: <code class={c}>/v1/auth/admin/users</code>, and in the SDK <code class={c}>eb.auth.admin</code>. It is the counterpart of Supabase's <code class={c}>auth.admin</code>: the same names, so code moving from Supabase changes little. The same rules as the console apply: email checks, passwords of 8–72 bytes, bcrypt with cost 12.
 		</p>
 		<p class="text-sm text-amber-800 bg-amber-50 border-l-4 border-amber-400 px-3 py-2 rounded leading-relaxed">
-			<strong>Secret key only.</strong> The admin API reads and changes every account of the project, so it answers only to the secret key (<code class={c}>eb_sk_…</code>, console → Settings → API keys). Use it on a server, in a script or an edge function's environment — never in a browser, a mobile app or anything you ship to users. A public key gets <code class={c}>403</code> (<code class={c}>secret_key_required</code>); the SDK returns that error without sending a request. An end user's access token on the request plays no part: the key alone authorises.
+			<strong>Secret key only.</strong> The admin API reads and changes every account of the project, so it answers only to the secret key (<code class={c}>eb_sk_…</code>, console → Settings → API keys). Use it on a server or in a script — never in a browser, a mobile app or anything you ship to users. Edge functions can't call it (they can't reach your project's API URL); inside an edge function use <code class={c}>ctx.db.sql</code>, or <code class={c}>ctx.db.asService()</code> where the function must act as the service. Send the key in the <code class={c}>apikey</code> header (the SDK does): a key in the URL (<code class={c}>?apikey=</code>) is refused, because URLs end up in logs. A public key gets <code class={c}>403</code> (<code class={c}>secret_key_required</code>); the SDK returns that error without sending a request. An end user's access token on the request plays no part: the key alone authorises.
 		</p>
 
 		<h3 id="setup" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Setup</h3>
@@ -250,7 +290,7 @@ console.log({ created, existing, failed })`;
 		<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto"><pre>{userJson}</pre></div>
 
 		<h3 id="curl" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">The same with curl</h3>
-		<p class="text-sm text-gray-700 leading-relaxed">Send the key in the <code class={c}>apikey</code> header, not in the URL (URLs end up in logs).</p>
+		<p class="text-sm text-gray-700 leading-relaxed">The key goes in the <code class={c}>apikey</code> header; the API refuses it in the URL.</p>
 		<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 			<button onclick={() => copyCode(curlCode, 'curl')} class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer">{copiedId === 'curl' ? 'Copied!' : 'Copy'}</button>
 			<pre>{curlCode}</pre>
@@ -259,13 +299,14 @@ console.log({ created, existing, failed })`;
 		<h3 id="errors" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Errors</h3>
 		<p class="text-sm text-gray-700 leading-relaxed">Error bodies are <code class={c}>{'{'} "error": "…", "code": "…" {'}'}</code> (<code class={c}>code</code> where listed). The SDK returns them as <code class={c}>{'{'} data: null, error, status, code {'}'}</code>.</p>
 		<ul class="list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
-			<li><strong>400</strong> — invalid email, a password outside 8–72 bytes, an unreadable body, or an update with no fields.</li>
+			<li><strong>400</strong> — invalid email, a password outside 8–72 bytes, a display name over 256 characters, metadata over 16 KiB (as JSON), an unreadable body, or an update with no fields.</li>
 			<li><strong>401</strong> — no API key, or an unknown one.</li>
-			<li><strong>403</strong> <code class={c}>secret_key_required</code> — any key other than the secret key.</li>
+			<li><strong>403</strong> <code class={c}>secret_key_required</code> — any key other than the secret key. <code class={c}>apikey_header_required</code> — the secret key was sent in the URL instead of the header.</li>
 			<li><strong>404</strong> — no user with that id (also for an id that isn't a UUID); suspending a user who is already suspended, or lifting a suspension that isn't there.</li>
 			<li><strong>409</strong> <code class={c}>email_exists</code> — another user has that email (create, or changing the email). <code class={c}>user_referenced</code> — deleting a user that other rows still point to without <code class={c}>ON DELETE CASCADE</code>, for example files they uploaded or your own tables; remove or reassign those first. <code class={c}>retention_hold_active</code> — the user is under a retention hold (Legal Team).</li>
-			<li><strong>429</strong> — rate limit, per your plan's requests per second, like the data API.</li>
-			<li><strong>503</strong> — maintenance, or a Team project's database is not reachable (never served from anywhere else).</li>
+			<li><strong>413</strong> <code class={c}>body_too_large</code> — a request body over 64 KiB.</li>
+			<li><strong>429</strong> — too many requests, with a <code class={c}>Retry-After</code> header (the SDK's <code class={c}>retryAfter</code>, in seconds). Two limits apply: your plan's requests per second, like the data API; and, per project, at most 10 calls in 5 seconds that hash a password (<code class={c}>createUser</code> with a password, <code class={c}>setPassword</code>) — hashing is deliberately slow. Wait and retry.</li>
+			<li><strong>503</strong> — maintenance, a Team project's database is not reachable (never served from anywhere else), or a delete whose retention-hold check couldn't run; retry.</li>
 		</ul>
 
 		<h3 id="suspend-delete" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">What suspend, sign-out and delete do — and don't</h3>
@@ -274,7 +315,7 @@ console.log({ created, existing, failed })`;
 			<li><strong>Sign out</strong> revokes all refresh tokens (every device) without suspending: the user can sign in again.</li>
 			<li><strong>Set password</strong> also revokes all refresh tokens.</li>
 			<li><strong>Delete</strong> removes the user, their sign-in methods and tokens, and rows of your tables that reference them with <code class={c}>ON DELETE CASCADE</code>. Files in storage are not deleted for you.</li>
-			<li><strong>Access tokens already issued stay valid until they expire</strong>, after any of these: a token is checked by its signature, not looked up. Keep <strong>Session duration</strong> short (Auth settings) and, where it matters, check the user with <code class={c}>GET /v1/auth/user</code> — it fails once the user is deleted.</li>
+			<li><strong>Access tokens already issued stay valid until they expire</strong>, after any of these. Keep <strong>Session duration</strong> short (Auth settings). Where it matters, ask the server about the user, not only the token: <code class={c}>GET /v1/auth/user</code> with their token (the SDK's <code class={c}>getUser</code>) fails for a deleted or suspended user, while verifying the token locally (JWKS, or the SDK's <code class={c}>verifyAccessToken</code>) checks only the token's signature and expiry. With the secret key, <code class={c}>admin.getUserById(id)</code> shows <code class={c}>banned_at</code> for a suspended user and 404 for a deleted one.</li>
 		</ul>
 
 		<h3 id="audit" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Audit log</h3>
@@ -282,8 +323,14 @@ console.log({ created, existing, failed })`;
 
 		<h3 id="use-cases" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Use cases</h3>
 
-		<h4 class="text-base font-semibold text-gray-900 mt-4">1. Accounts for a partner's employees (B2B)</h4>
-		<p class="text-sm text-gray-700 leading-relaxed">Your backend creates confirmed accounts with the customer's company in <code class={c}>metadata</code>; RLS policies or your API can read it from there. Without a password, users sign in with a magic link or set one with "forgot password".</p>
+		<h4 class="text-base font-semibold text-gray-900 mt-4">1. Accounts for a company's employees, or a partner's customers (B2B)</h4>
+		<p class="text-sm text-gray-700 leading-relaxed">Two common shapes: <strong>B2B seats</strong> — a company buys accounts for its employees and you create them, instead of each person signing up; and <strong>partner integrations</strong> — another platform creates accounts for its customers through your API, and your server creates the Eurobase users behind it.</p>
+		<p class="text-sm text-gray-700 leading-relaxed">Decide access with a table your backend fills, not with <code class={c}>metadata</code>: keep the company there only as a label. App users can only read their own row of <code class={c}>company_members</code>, so they can't move themselves into another company; your server writes it with the secret key, which the <code class={c}>is_service_role()</code> policy admits.</p>
+		<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
+			<button onclick={() => copyCode(partnerSql, 'partner-sql')} class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer">{copiedId === 'partner-sql' ? 'Copied!' : 'Copy'}</button>
+			<pre>{partnerSql}</pre>
+		</div>
+		<p class="text-sm text-gray-700 leading-relaxed">Creating an account sends no email. Without a password, each person sets one through the reset link that <code class={c}>auth.forgotPassword(email, {'{'} emailRedirectTo {'}'})</code> sends (or signs in with a magic link). Those emails count towards your project's email sending (see <a href="/docs/rate-limits" class="text-eurobase-700 hover:underline">Rate Limits</a>): 3 per address per 15 minutes, and 60 reset emails an hour per client IP — and since the client IP isn't always told apart today, count that 60 as shared with the reset requests of the rest of your project. A batch of 20 fits; for more than about 50 an hour, spread the invitations out, or use a magic link or your own email with a link to your sign-in page.</p>
 		<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 			<button onclick={() => copyCode(partnerCode, 'partner')} class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer">{copiedId === 'partner' ? 'Copied!' : 'Copy'}</button>
 			<pre>{partnerCode}</pre>
@@ -311,7 +358,7 @@ console.log({ created, existing, failed })`;
 		</div>
 
 		<h4 class="text-base font-semibold text-gray-900 mt-4">5. A one-off script that imports users from a CSV file</h4>
-		<p class="text-sm text-gray-700 leading-relaxed">Re-running it is safe: existing emails answer <code class={c}>email_exists</code> and are left unchanged. For large imports with existing password hashes or ids, use the console's batch import (<a href="/docs/users" class="text-eurobase-700 hover:underline">Managing End Users</a>) or the CLI's Supabase import instead.</p>
+		<p class="text-sm text-gray-700 leading-relaxed">Re-running it is safe: existing emails answer <code class={c}>email_exists</code> and are left unchanged. It goes one user at a time and waits when it gets a 429; without passwords the per-project hashing limit doesn't apply, only your plan's request rate. For large imports with existing password hashes or ids, use the console's batch import (<a href="/docs/users" class="text-eurobase-700 hover:underline">Managing End Users</a>) or the CLI's Supabase import instead.</p>
 		<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
 			<button onclick={() => copyCode(csvCode, 'csv')} class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer">{copiedId === 'csv' ? 'Copied!' : 'Copy'}</button>
 			<pre>{csvCode}</pre>
