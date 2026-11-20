@@ -27,6 +27,14 @@ func buildSelectQuery(schemaName, tableName string, params QueryParams) (string,
 	if len(params.Select) > 0 {
 		quoted := make([]string, len(params.Select))
 		for i, c := range params.Select {
+			// "*" means every column (select=* or select=*,id), as in
+			// PostgREST; quoting it would ask for a column named "*".
+			// Sensitive columns of platform tables are removed from the
+			// rows afterwards (stripDeniedColumns), as with no select.
+			if c == "*" {
+				quoted[i] = "*"
+				continue
+			}
 			quoted[i] = quoteIdent(c)
 		}
 		colExpr = strings.Join(quoted, ", ")

@@ -2,6 +2,15 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.13.1 — 2026-11-20
+
+### Fixed
+
+- **CommonJS:** `require('@eurobase/sdk')` works. The package now ships a CommonJS build (`dist/cjs`) next to the ES module build, with `require` / `import` entries in `exports`. Before, a CommonJS backend (`"type": "commonjs"`, or TypeScript compiling to CommonJS) type-checked and then failed at runtime with `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+- **TypeScript with `moduleResolution: node16` / `nodenext`:** the type declarations of the ES module build use `.js` extensions on relative imports, so ESM projects in those modes type-check (they reported TS2835 before).
+
+Gateway: `select('*')` (and `select('*', 'other(*)')`) returns every column; before, the gateway looked for a column named `*` and the request failed. `select()` or no `select` did the same already.
+
 ## 0.13.0 — 2026-11-20
 
 ### Added — `auth.admin`: manage users from your server
