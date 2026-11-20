@@ -279,6 +279,11 @@ const {'{'} payload {'}'} = await jwtVerify(token, JWKS, {'{'}
 					A token stays valid until it expires, even after the user signs out, changes their password, or is suspended or deleted: local verification can't see those. Keep <strong>Session duration</strong> short, and call <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> with the token where you need to confirm the user still exists and read their current profile. Tokens issued before ES256 signing was switched on (header <code class="bg-gray-100 border border-gray-200 rounded px-1">alg: HS256</code>) can't be verified locally; check those with <code class="bg-gray-100 border border-gray-200 rounded px-1">GET /v1/auth/user</code> until they are refreshed.
 				</p>
 
+				<h3 class="text-lg font-semibold text-gray-900 mt-6">Managing users from your server</h3>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					To create, list, update, suspend or delete users from your backend or a script &mdash; like Supabase's <code class="bg-gray-100 border border-gray-200 rounded px-1">auth.admin</code> &mdash; use <code class="bg-gray-100 border border-gray-200 rounded px-1">eb.auth.admin</code> with the project's secret key. See <a href="/docs/user-admin" class="text-eurobase-700 hover:underline">User admin API</a>.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Magic Links (passwordless)</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Magic links let users sign in without a password. They enter their email, receive a link, and click it to sign in. The link expires after 15 minutes and can only be used once. Email is automatically verified on first magic link sign-in.

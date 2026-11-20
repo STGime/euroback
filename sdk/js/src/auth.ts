@@ -5,6 +5,7 @@
 import type { HttpClient, EurobaseConfig } from './http'
 import { httpClient } from './http'
 import { passkeysSupported, createPasskey, getPasskeyAssertion, passkeyErrorMessage } from './webauthn'
+import { AdminClient } from './admin'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -246,10 +247,13 @@ export class AuthClient {
   private refreshingGeneration = -1
   /** Failed refresh attempts in a row (temporary errors only). */
   private refreshAttempts = 0
+  /** User admin API for your server (secret key only): see ./admin.ts. */
+  readonly admin: AdminClient
 
   constructor(config: EurobaseConfig, http: HttpClient) {
     this.http = http
     this.config = config
+    this.admin = new AdminClient(config)
     this.restoreSession()
     this.listenToOtherTabs()
   }

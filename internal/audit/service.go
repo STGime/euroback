@@ -72,6 +72,18 @@ const (
 	// self-service path can't do.
 	ActionUserDeleted = "user.deleted"
 
+	// A project's end users (its app's accounts, not platform users),
+	// changed by an admin from the console or by the project's server
+	// with the secret key (/v1/auth/admin/users). Key-authenticated
+	// entries carry metadata via=secret_key and no actor id.
+	ActionEndUserCreated     = "end_user.created"
+	ActionEndUserUpdated     = "end_user.updated"
+	ActionEndUserDeleted     = "end_user.deleted"
+	ActionEndUserSuspended   = "end_user.suspended"
+	ActionEndUserUnsuspended = "end_user.unsuspended"
+	ActionEndUserPasswordSet = "end_user.password_set"
+	ActionEndUserSignedOut   = "end_user.signed_out"
+
 	// Legal-Team-tier closed-beta grants (Team-tier M2b).
 	// Separate flag from team_beta_access — Legal Team is a premium
 	// tier bundling the German legal-tech compliance pack (§203 /

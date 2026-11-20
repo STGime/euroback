@@ -319,7 +319,7 @@ Try a deployed function in the console → Functions → select it → **Test**:
 
 Schedules (cron) are created in the console → Cron & RPC, not from the browser.
 
-Server-only parts of the SDK — they need the secret key (`eb_sk_…`), so they belong in your backend or a script, never in the app: `eb.vault.list / get / set / delete`, `eb.functions.schedules.create / update / get / list / delete / createOrUpdate`, and `eb.db.schema.createTable / dropTable / addColumn / dropColumn`. `eb.status()` checks the connection.
+Server-only parts of the SDK — they need the secret key (`eb_sk_…`), so they belong in your backend or a script, never in the app: `eb.vault.list / get / set / delete`, `eb.functions.schedules.create / update / get / list / delete / createOrUpdate`, `eb.db.schema.createTable / dropTable / addColumn / dropColumn`, and `eb.auth.admin.listUsers / createUser / getUserById / updateUserById / deleteUser / suspendUser / unsuspendUser / setPassword / signOutUser` (managing the app's users from your server). `eb.status()` checks the connection.
 
 ## Common errors
 

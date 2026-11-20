@@ -46,6 +46,7 @@ export const chapters: DocChapter[] = [
 	{"id": "next", "num": 29, "label": "What's Next", "title": "What's Next", "description": "Alex has a fully configured backend. Time to build LexVault's frontend.", "file": "29-next.svelte"},
 	{"id": "migrating-from-supabase", "num": 30, "label": "30. Migrating from Supabase (FAQ)", "title": "30. Migrating from Supabase (FAQ)", "description": "Common questions from teams moving an existing Supabase project to Eurobase — what ports cleanly, what needs a rewrite, and where we're honest about the differences.", "file": "30-migrating-from-supabase.svelte"},
 	{"id": "migrating-step-by-step", "num": 31, "label": "31. Migrating from Supabase, step by step", "title": "31. Migrating from Supabase, step by step", "description": "Move a Supabase project — schema, users, data, files, edge functions, scheduled jobs and the app's code — with the CLI, or let Claude do it with the migration skill.", "file": "31-migrating-step-by-step.svelte"},
+	{"id": "user-admin", "num": 33, "label": "33. User admin API (server-side)", "title": "33. User admin API (server-side)", "description": "Create, list, change, suspend and delete your app's users from your own server, with the project's secret key.", "file": "33-user-admin.svelte"},
 ];
 
 export const chapterById: Record<string, DocChapter> = Object.fromEntries(chapters.map((c) => [c.id, c]));
