@@ -329,7 +329,7 @@ func gradeFunctions(fns []sbFunction) []item {
 		qualified := f.Schema + "." + f.Name
 		switch {
 		case f.SecDef:
-			note := "SECURITY DEFINER: it runs with its owner's rights and skips RLS, so Eurobase doesn't accept it. Rewrite it as SECURITY INVOKER with RLS policies that allow what it needs, or move the work into server code that uses your secret key, or into an edge function"
+			note := "SECURITY DEFINER: it runs with its owner's rights and skips RLS. The `schema` step converts it into a normal (SECURITY INVOKER) function that runs with the caller's rights, as one of the access changes you accept. Review what it needs the owner's rights for: grant that with RLS policies, move the work into server code that uses your secret key or into an edge function, or close the function to app users with an is_service_role() check"
 			if f.Schema != "public" {
 				note += fmt.Sprintf(". It is also in schema %s, which the `schema` step doesn't copy; policies or triggers that call it fail on import", ident(f.Schema))
 			}

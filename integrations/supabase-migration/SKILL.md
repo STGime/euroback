@@ -15,7 +15,7 @@ The developer's Supabase project keeps running throughout. Nothing here writes t
 2. **Migrate into a fresh Eurobase project first** — a test project. Only after it checks out, do the same into the project that goes live (or keep the test project).
 3. **Secrets never enter chat, code or commits.** The Supabase database URL contains a password, and the service role key is an admin key. Ask the developer to put them in environment variables in *their* terminal (or a `.env` that git ignores), and refer to them by name. If one is pasted into the conversation, tell the developer to rotate it after the migration. Never print them, never write them into files you create.
 4. **Stop and ask at every decision point below** (marked **Decision**). Don't pick for the developer, and don't pass `--accept-access-changes`, `--deploy`, `--apply` or `--enable` on your own, and never run `eurobase keys rotate-secret` or `regenerate` yourself.
-5. **Copying real users or real data is a decision** too: a test project then holds personal data. Say so, and offer `--exclude-table` to leave large or sensitive tables out of a first test.
+5. **Copying real users or real data is a decision** too: a test project then holds personal data. Say so, and offer `--exclude-table` to leave large or sensitive tables out of a first test. Copied rows can also hold the app's own credentials — social-login tokens the app encrypted, API token hashes, OAuth `code_verifier`s — mention them. Look at generated data files by their column lists only (`grep -o 'INSERT INTO [^(]*([^)]*)'`), never print rows.
 6. **Report what each command printed** — especially its "Read before applying" / "needs changes" lists. They are the migration's to-do list.
 
 ## Before you start
@@ -39,7 +39,7 @@ mkdir migration && cd migration
 
 `eurobase migrations up` applies `./migrations` of the current folder, and many apps already have a `migrations/` folder of their own — run from the root, the import would land next to the app's migrations and apply them too. From `migration/`, point at the app's files with `../`: `--functions-dir ../supabase/functions`, `--input ../supabase/functions`. Generated files contain user data from Step 3 on; make sure `migration/` isn't committed (add it to `.gitignore`).
 
-**Plan:** Free projects allow 50 edge functions, Pro 500, Team unlimited; database and file storage limits are in console → Usage. Compare with what Step 1 reports before going further.
+**Plan:** Free projects allow 50 edge functions, Pro 500, Team unlimited; database, file storage and user limits: `eurobase status` (or console → Usage). Compare with what Step 1 reports before going further.
 
 ## Step 1 — Assess (read-only)
 
@@ -54,12 +54,12 @@ It writes a Markdown report: tables, policies, functions, triggers, extensions, 
 - **GRANT / REVOKE restrictions** (a column hidden from `anon`) — not carried over; a view doesn't hide columns on Eurobase. Restricted columns move to their own table with stricter policies, or behind an edge function.
 - **Owner-run views** — become `security_invoker` views (they apply RLS for the caller).
 - **Extensions** not available — listed with what to use instead.
-- **Database webhooks** (`pg_net` / `supabase_functions.http_request` triggers, e.g. on `auth.users`) — their definitions can contain secret URLs (a Slack incoming webhook, a token in a query string). Don't print the URL; say where it points by host. They become Eurobase webhooks (console → Webhooks) or code.
+- **Database webhooks** (`pg_net` / `supabase_functions.http_request` triggers, e.g. on `auth.users`) — their definitions can contain secret URLs (a Slack incoming webhook, a token in a query string). Don't print the URL; say where it points by host — read only the host: `SELECT tgrelid::regclass, tgname, substring(encode(tgargs, 'escape') from 'https?://([^/]+)') FROM pg_trigger WHERE NOT tgisinternal AND encode(tgargs, 'escape') LIKE '%http%'`. They become Eurobase webhooks (console → Webhooks) or code; a Slack incoming webhook expects Slack's own payload, so that one becomes code.
 
 Also look at the app itself — the report covers the database, not the code:
 
 - **Direct database connections.** `grep -rnE "pg-boss|from 'pg'|require\('pg'\)|from 'postgres'|DATABASE_URL|prisma|drizzle|knex|kysely|typeorm|sequelize"` — Free and Pro projects never get a database URL (data goes through the SDK and REST); a Team project's dedicated database comes with an owner URL. A queue like pg-boss that needs its own Postgres keeps it (a small EU Postgres used only for the queue), or its jobs move to Eurobase cron jobs + edge functions. Tell the developer early: it can decide the plan.
-- **App-level schedulers** (pg-boss, node-cron, BullMQ, Cloud Scheduler) — Step 6 only carries pg_cron over.
+- **App-level schedulers** (pg-boss, node-cron, BullMQ, Cloud Scheduler, `setInterval` loops: `grep -rnE "node-cron|cron\.schedule|bullmq|setInterval\("`) — Step 6 only carries pg_cron over.
 - **A backend that uses supabase-js on the server** (`auth.admin.*`, `createClient` with a user's token, `auth.getUser(jwt)`) — see Step 7, "Backends".
 
 ## Step 2 — Schema
@@ -70,7 +70,7 @@ eurobase import supabase schema --migrations-dir ./migrations     # from migrati
 
 If access rules can't be carried over, it refuses to write and lists them. **Decision:** go through the list with the developer. Only when they accept it, run again with `--accept-access-changes`. The accepted list is written at the top of the migration file.
 
-Before asking, work out for each item what it means in practice (read-only queries on Supabase are fine):
+Before asking, work out for each item what it means in practice (read-only queries on Supabase are fine; `pg_policies` shows each table's policies readably):
 
 - **A revoked EXECUTE** (`anon` / `authenticated` couldn't call a function): on Eurobase any app caller could call it with `eb.db.rpc`. Who calls it in the code — the browser, or a backend with the service role key? What does it write, and do that table's policies stop an app user anyway (RLS on, no policy = nobody but the service role)?
 - **SECURITY DEFINER → invoker**: what did it need the owner's rights for? A trigger fired by service-role writes keeps working; one fired by app users' writes now writes with their rights.
@@ -89,9 +89,9 @@ BEGIN
 END $$;
 ```
 
-Write `public.is_service_role()` qualified — edge functions and cron jobs run with only the project's schema on the search path. A `LANGUAGE sql` function can't raise: rewrite it as `plpgsql` — `RETURN (<the SELECT>)` for a single value, `RETURN QUERY <the SELECT>` for a set, plain statements (`PERFORM` for a SELECT whose result isn't used) for `void`; same signature and result. Create the file with `eurobase migrations new service_only_functions` so it sorts after the schema migration. App callers get HTTP 403 with code `42501` ("permission denied"; the function's own message isn't passed on). Show the migration to the developer before applying it.
+Write `public.is_service_role()` qualified — edge functions and cron jobs run with only the project's schema on the search path. A `LANGUAGE sql` function can't raise: rewrite it as `plpgsql` — `RETURN (<the SELECT>)` for a single value, `RETURN QUERY <the SELECT>` for a set, plain statements (`PERFORM` for a SELECT whose result isn't used) for `void`; same signature and result. Create the file with `eurobase migrations new service_only_functions` so it sorts after the schema migration. App callers get HTTP 403 with code `42501` ("permission denied"; the function's own message isn't passed on). A guarded function that another guarded function calls (a helper) keeps working: the caller already runs with the service role. Show the migration to the developer and **wait for their yes before `migrations up`** — in auto mode, applying without it is blocked.
 
-**Check the guard** with curl, keys by name: the public key must get 403 for every guarded function, the secret key must get past the check (call only functions that write nothing with test arguments), and one unguarded function must still answer the public key — that shows the 403 comes from the guard.
+**Check the guard** with curl, keys by name: the public key must get 403 for every guarded function, the secret key must get past the check (call only functions that write nothing — use ids that don't exist, so the function returns early; read the body first), and one unguarded function must still answer the public key — that shows the 403 comes from the guard.
 
 ```bash
 curl -s -X POST "$EB_URL/v1/db/rpc/claim_trial" -H "apikey: $EB_PUBLIC_KEY" \
@@ -113,8 +113,10 @@ If `migrations up` fails, read the error. A missing table usually means the Supa
 ## Step 3 — Users and data
 
 ```bash
-eurobase import supabase data --migrations-dir ./migrations
+eurobase import supabase data --migrations-dir ./migrations 2>&1 | tee data-import.log
 ```
+
+Keep the full output (`tee`, in the git-ignored migration folder): the "Read before applying" list isn't written into the files, and running the import again writes a second set. CLI 0.7.1 and later print it last; older ones print it before the list of files.
 
 Users come first (ids, emails, bcrypt password hashes, OAuth links), then every table's rows, parents before children. Sessions are not copied: every user signs in once on Eurobase. The import is for a project without data: it is not incremental, and applying it twice writes the rows twice — also if you run the import twice before applying (the second run writes a second set of files). The data comes as several migration files of at most about 450 KB each.
 
@@ -138,7 +140,7 @@ FROM t;
 
 (`::text` because JSON output rounds big numbers.)
 
-Use `extract(epoch FROM col)` instead of `col::text` for timestamps (the text form depends on the session's time zone). For users, compare `auth.users` on Supabase with `users` on Eurobase: `id`, `email`, `encrypted_password` ↔ `password_hash`, `email_confirmed_at`, `created_at`, `last_sign_in_at`. The import changes some of it, so on the Supabase side use `WHERE deleted_at IS NULL AND NOT is_sso_user`, `lower(trim(email))` and `nullif(encrypted_password, '')`, and expect the users whose hashes "Read before applying" listed as unusable to differ.
+Use `extract(epoch FROM col)` instead of `col::text` for timestamps (the text form depends on the session's time zone). Expect `auth.identities` on Supabase to have more rows than `user_identities`: Eurobase keeps only OAuth links, not the `email` identities. For users, compare `auth.users` on Supabase with `users` on Eurobase: `id`, `email`, `encrypted_password` ↔ `password_hash`, `email_confirmed_at`, `created_at`, `last_sign_in_at`. The import changes some of it, so on the Supabase side use `WHERE deleted_at IS NULL AND NOT is_sso_user`, `lower(trim(email))` and `nullif(encrypted_password, '')`, and expect the users whose hashes "Read before applying" listed as unusable to differ.
 
 ## Step 4 — Files (storage)
 
@@ -153,9 +155,11 @@ eurobase import supabase storage --apply         # copy
 - a **public** bucket becomes a folder shared with everyone, and its files become developer files — their uploaders can no longer replace or delete them from the app;
 - the copy isn't checked against the plan's storage limit — compare the total first.
 
-The copy streams each file straight from Supabase to the project; it can be stopped and run again (files already there are skipped; nothing in the project is ever replaced). Supabase's `.emptyFolderPlaceholder` objects are skipped by the copy, so the report counts one more object for each folder that has one. **Check:** run `--apply` a second time — it should report every file as already there. Spot-check a few files: `eurobase storage download <bucket>/<path> /tmp/a`, the same file from Supabase (`curl -s -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" "$SUPABASE_URL/storage/v1/object/<bucket>/<path>" -o /tmp/b`, a read), compare `md5`, then delete both copies.
+The copy streams each file straight from Supabase to the project; it can be stopped and run again (files already there are skipped; nothing in the project is ever replaced). Supabase's `.emptyFolderPlaceholder` objects are skipped by the copy, so the report counts one more object for each folder that has one. **Check:** run `--apply` a second time — it should report every file as already there. Spot-check a few files: `eurobase storage download <bucket>/<path> a.bin` (in the migration folder), the same file from Supabase (`curl -s -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" "$SUPABASE_URL/storage/v1/object/<bucket>/<url-encoded path>" -o b.bin`, a read — ask the developer first, it uses the service role key), compare `md5`, then delete both copies. Without that, compare sizes: `SELECT name, metadata->>'size' FROM storage.objects WHERE bucket_id = '<bucket>'` on Supabase against the download (Supabase's eTags aren't MD5s).
 
 ## Step 5 — Edge functions
+
+No `supabase/functions` folder (and `supabase functions list` shows none)? Skip this step.
 
 ```bash
 eurobase import supabase functions --input ../supabase/functions
@@ -208,8 +212,9 @@ Replace `@supabase/supabase-js` with `@eurobase/sdk`. Don't rename things that d
 | `auth.signOut()` | `eb.auth.signOut()` |
 | `auth.resend({ type: 'signup', email })` | `eb.auth.resendVerification(email, { emailRedirectTo })` |
 | `(await auth.getSession()).data.session` | `eb.auth.getSession()` (synchronous) |
-| `(await auth.getUser()).data.user` | `(await eb.auth.getUser()).data` |
+| `(await auth.getUser()).data.user` | `(await eb.auth.getUser()).data` — the user's extra fields are `metadata` and `display_name`, not `user_metadata` |
 | `auth.onAuthStateChange(cb)` → `data.subscription.unsubscribe()` | `const off = eb.auth.onAuthStateChange(cb)` → `off()` |
+| `from('t').select('*')` / `select()` | `eb.db.from('t').select()` (or no `select`); `select('*')` works too on current gateways |
 | `from('t').select('id, name')` | `eb.db.from('t').select('id', 'name')` |
 | `from('t').select('*, author:profiles(*)')` (to-one) | `eb.db.from('t').select('*', 'profiles(*)')` — named by the **table**, no alias or `!fk` hint; one level, along a foreign key of `t`; with two foreign keys to the same table, one of them is used — load the other with a second query. `users(*)` is refused from the app |
 | `from('t').select('*, comments(*)')` (to-many) | a second query: `eb.db.from('comments').in('post_id', ids)` |
@@ -248,6 +253,8 @@ Password reset: Supabase signs the user in from the reset link and then calls `u
 
 ### Backends (supabase-js on a server)
 
+`@eurobase/sdk` 0.13.0 or later; a CommonJS backend (`require`, or TypeScript compiling to CommonJS) needs 0.13.1 or later.
+
 A browser client holds one signed-in user. On a server, never share a signed-in client between requests — one user's session would serve the next request. Read console → Docs → *Using the SDK on a server* (chapter 32) and *User admin API (server-side)* (chapter 33) before changing a backend. A backend usually needs **two clients**: one with the secret key (service role, `eb.auth.admin`), one with the public key for acting as users.
 
 | supabase-js on a server | @eurobase/sdk |
@@ -260,7 +267,7 @@ A browser client holds one signed-in user. On a server, never share a signed-in 
 | `auth.admin.listUsers()` / `getUserById(id)` / `deleteUser(id)` | `admin.auth.admin.listUsers({ page, perPage, search })` → `{ users, total }` / `getUserById(id)` / `deleteUser(id)` |
 | `auth.admin.updateUserById(id, { email, user_metadata })` | `admin.auth.admin.updateUserById(id, { email, metadata, displayName, emailConfirmed })` — `metadata` replaces the whole object |
 | `auth.admin.updateUserById(id, { password })` | `admin.auth.admin.setPassword(id, password)` |
-| `auth.admin.signOut(jwt)` / `updateUserById(id, { ban_duration })` | `admin.auth.admin.signOutUser(id)` / `suspendUser(id)` (access tokens already issued stay valid until they expire) |
+| `auth.admin.signOut(jwt)` / `updateUserById(id, { ban_duration })` | `admin.auth.admin.signOutUser(id)` — signs out every session, not only one / `suspendUser(id)` (access tokens already issued stay valid until they expire) |
 | `auth.exchangeCodeForSession(code)` (server-side OAuth) | not available — OAuth sign-in finishes in the browser (`handleOAuthCallback`); send the session to the backend from there |
 | `auth.admin.generateLink`, `inviteUserByEmail` | not available — `createUser` + `eb.auth.forgotPassword(email)` sends a set-password link |
 

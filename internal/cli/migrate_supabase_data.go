@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -152,25 +153,18 @@ Flags:
 					notes = append(notes, "--skip-auth: rows that reference a user fail to apply unless the users are already in the project")
 				}
 			}
-			if len(notes) > 0 {
-				fmt.Fprintln(cmd.ErrOrStderr(), "\n── Read before applying: ──")
-				for _, note := range notes {
-					fmt.Fprintf(cmd.ErrOrStderr(), "  - %s\n", note)
-				}
-				fmt.Fprintln(cmd.ErrOrStderr())
-			}
-
 			paths, err := writer.Close()
 			if err != nil {
 				return fmt.Errorf("finalise output: %w", err)
 			}
 			if len(paths) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "Nothing to write — the source project has no data (or the --skip flags left nothing).")
+				printReadBeforeApplying(cmd.ErrOrStderr(), notes)
 				return nil
 			}
-			for _, p := range paths {
-				fmt.Fprintf(cmd.OutOrStdout(), "Migration written to %s\n", p)
-			}
+			printWrittenFiles(cmd.OutOrStdout(), paths)
+			// Last, so it isn't scrolled away by a long file list.
+			printReadBeforeApplying(cmd.ErrOrStderr(), notes)
 			fmt.Fprintln(cmd.OutOrStdout(), "Next: `eurobase migrations up` to apply (to a project that has the schema and no data yet).")
 			return nil
 		},
@@ -997,4 +991,37 @@ func readAuthIdentities(ctx context.Context, q sourceQuerier) ([]supabaseIdentit
 		notes = append(notes, fmt.Sprintf("%d OAuth link(s) without a provider id skipped", skipped))
 	}
 	return out, notes, rows.Err()
+}
+
+// printWrittenFiles lists the migration files the data import wrote; a long
+// list (a big project writes hundreds) is shortened to its first and last
+// files.
+func printWrittenFiles(w io.Writer, paths []string) {
+	const show = 3
+	if len(paths) <= 2*show+1 {
+		for _, p := range paths {
+			fmt.Fprintf(w, "Migration written to %s\n", p)
+		}
+		return
+	}
+	fmt.Fprintf(w, "%d migration files written to %s:\n", len(paths), filepath.Dir(paths[0]))
+	for _, p := range paths[:show] {
+		fmt.Fprintf(w, "  %s\n", filepath.Base(p))
+	}
+	fmt.Fprintf(w, "  … %d more …\n", len(paths)-2*show)
+	for _, p := range paths[len(paths)-show:] {
+		fmt.Fprintf(w, "  %s\n", filepath.Base(p))
+	}
+}
+
+// printReadBeforeApplying prints what the import changed or left out.
+func printReadBeforeApplying(w io.Writer, notes []string) {
+	if len(notes) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\n── Read before applying: ──")
+	for _, note := range notes {
+		fmt.Fprintf(w, "  - %s\n", note)
+	}
+	fmt.Fprintln(w)
 }
