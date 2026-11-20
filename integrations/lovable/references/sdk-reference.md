@@ -1,6 +1,6 @@
 # @eurobase/sdk reference for Lovable apps
 
-Written against `@eurobase/sdk` 0.12.0 (most of it works from 0.8.1). All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
+Written against `@eurobase/sdk` 0.13.0 (most of it works from 0.8.1; server use and `auth.admin` need 0.13.0). All examples assume the shared client and helper from `SKILL.md`: `import { eb, currentUserId } from '@/lib/eurobase'`.
 
 ## Return shapes
 
@@ -131,7 +131,7 @@ Protected page: while `loading`, render a spinner; if `!session`, navigate to `/
 
 Newer Lovable projects render pages on the server, where there is no `localStorage` and so no session. Call `eb.auth.*`, `eb.db.*`, `eb.storage.*` and `eb.realtime.*` only in the browser — `useEffect`, event handlers, client-side TanStack Query hooks — and never in route `loader`s, `beforeLoad` or server functions: they'd see a signed-out user, and a module-level client on the server is shared between visitors. Put auth checks in a client component, not in `beforeLoad`. Older React + Vite projects run entirely in the browser.
 
-This advice is for the Lovable app's own rendering. A real backend (an Express / Hono API, a Next.js route handler, a worker) uses the SDK differently: a client created with `auth: { persistSession: false }`, the caller's token checked with `eb.auth.verifyAccessToken(token)`, and `eb.withAccessToken(token)` per request to act as that user under RLS (SDK after 0.12.0 — see the CHANGELOG's Unreleased section). The full guide is the docs chapter [Server-side use](https://console.eurobase.app/docs/server-side).
+This advice is for the Lovable app's own rendering. A real backend (an Express / Hono API, a Next.js route handler, a worker) uses the SDK differently: a client created with `auth: { persistSession: false }`, the caller's token checked with `eb.auth.verifyAccessToken(token)`, and `eb.withAccessToken(token)` per request to act as that user under RLS (`@eurobase/sdk` 0.13.0 or later). The full guide is the docs chapter [Server-side use](https://console.eurobase.app/docs/server-side).
 
 Sign in / sign up:
 
