@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { INTERNAL_TABLES } from '$lib/utils';
+	import { latestReleases } from '$lib/releases.svelte';
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
 	import { getContext, onDestroy } from 'svelte';
 	import { api, type ConnectInfo, type AuthConfig, type Project } from '$lib/api.js';
 	import { lovableSkill, lovableSdkReference, lovableAppOrigins, lovableEntries } from '$lib/lovable';
 	import ProjectTokenButton, { forgetProjectToken } from '$lib/components/ProjectTokenButton.svelte';
+	const latest = latestReleases();
 	// A token created here is shown until Done or until leaving the page.
 	onDestroy(forgetProjectToken);
 
@@ -756,7 +758,7 @@
 						<div class="flex items-center justify-between mb-3">
 							<div>
 								<p class="text-sm font-semibold text-gray-900">1. Install the SDK</p>
-								<p class="text-xs text-gray-500">Add the Eurobase JavaScript SDK to your project</p>
+								<p class="text-xs text-gray-500">Add the Eurobase JavaScript SDK to your project — latest: {latest.sdk}</p>
 							</div>
 							<button
 								onclick={() => copyToClipboard('npm install @eurobase/sdk', 'install')}

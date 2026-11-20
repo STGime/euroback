@@ -25,6 +25,7 @@ import (
 	"github.com/eurobase/euroback/internal/enduser"
 	"github.com/eurobase/euroback/internal/events"
 	"github.com/eurobase/euroback/internal/functions"
+	"github.com/eurobase/euroback/internal/meta"
 	"github.com/eurobase/euroback/internal/metrics"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/query"
@@ -1589,6 +1590,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 	}
 
 	// ── SDK routes (API key authenticated) ──
+	releaseSvc := meta.NewService()
 	r.Route("/v1", func(r chi.Router) {
 		// Personal-data access logging (Tier-1 GDPR #4). Stash the recorder and
 		// the resolved client IP in the request context so the db/storage/auth
@@ -1635,6 +1637,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// tokens locally. Public, no API key; the project comes from the
 		// subdomain. No database access beyond the subdomain lookup.
 		r.Get(strings.TrimPrefix(auth.EndUserJWKSPath, "/v1"), auth.HandleEndUserJWKS)
+
+		// Latest released SDK and CLI versions, for the console, the
+		// marketing site and the CLI's update notice. Public, no API key,
+		// any origin; the gateway reads them from npm / GitHub and caches.
+		r.Get(strings.TrimPrefix(PublicAnyOriginPath, "/v1"), meta.HandleReleases(releaseSvc))
 
 		// Auth endpoints (only need API key, no end-user JWT).
 		// sdkTenantPoolMw stashes the runtime pool for Team-tier

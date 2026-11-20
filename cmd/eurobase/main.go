@@ -68,8 +68,14 @@ func main() {
 	// aliases to `migrate` for DDL migrations.
 	root.AddCommand(cli.ImportCmd())
 
-	if err := root.Execute(); err != nil {
+	err := root.Execute()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+	}
+	// After the command: at most once a day, tell the user about a newer
+	// CLI release (quiet in CI, when piped, and with EUROBASE_NO_UPDATE_CHECK).
+	cli.MaybePrintUpdateNotice(version)
+	if err != nil {
 		os.Exit(1)
 	}
 }

@@ -133,7 +133,7 @@ When adding a third-party data processor: (1) insert it into `sub_processors` (m
 - **Any new platform endpoint that runs SQL a developer wrote must record it** (`sqllog.FromRequest` + `FromContext(ctx).Record`), including its refusal paths. Errors from the platform's own checks are `query.RefusedError` (`refused` in the log), not plain errors. SDK traffic isn't logged here. Deleting a project keeps its rows (no FK) and clears their text/detail/IP (trigger, 000140; the hourly cleanup scrubs rows written after the delete).
 
 ## SDK releases (`@eurobase/sdk`)
-In order: (1) bump `sdk/js/package.json` + CHANGELOG; (2) tag the merge commit `sdk-vX.Y.Z` and push; (3) `npm publish` from `sdk/js`; (4) GitHub Release from the tag, marked Latest; (5) update version mentions that advertise the latest SDK (console docs, marketing site). Tag the CLI `cli-vX.Y.Z`.
+In order: (1) bump `sdk/js/package.json` + CHANGELOG; (2) tag the merge commit `sdk-vX.Y.Z` and push; (3) `npm publish` from `sdk/js`; (4) GitHub Release from the tag, marked Latest; (5) update version mentions that advertise the latest SDK (console docs, marketing site). Tag the CLI `cli-vX.Y.Z`. Both releases also update the fallback versions shown before the live ones load (`GET /v1/meta/releases`): `console/src/lib/releases.svelte.ts` and the marketing site's `src/composables/useLatestReleases.ts`.
 
 ## Sovereignty
 - All infrastructure runs in the EU (France) on Scaleway. No US cloud services (AWS, GCP, Azure, Cloudflare, Stripe, Vercel).

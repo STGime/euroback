@@ -33,6 +33,10 @@ import (
 // context is available at preflight time — those fall back to the
 // global allowlist. Beta testers hitting `{slug}.eurobase.app` get
 // per-project CORS automatically.
+// PublicAnyOriginPath is answered to any origin by its handler
+// (GET /v1/meta/releases), so a foreign origin there isn't logged.
+const PublicAnyOriginPath = "/v1/meta/releases"
+
 func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 	check := BuildOriginChecker(allowedOrigins)
 
@@ -45,6 +49,13 @@ func NewCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 			}
 
 			allowed := check(r)
+
+			if !allowed && r.URL.Path == PublicAnyOriginPath {
+				// Public data readable from any page (the handler sets
+				// Access-Control-Allow-Origin: *); not worth a warning.
+				next.ServeHTTP(w, r)
+				return
+			}
 
 			if !allowed {
 				// Not allowed by global or per-project. For preflight
@@ -155,10 +166,10 @@ func BuildOriginChecker(allowedOrigins []string) func(*http.Request) bool {
 }
 
 type originPattern struct {
-	scheme  string
-	host    string // either exact host or "*.suffix"
-	isWild  bool
-	suffix  string // set when isWild; leading dot included ("" for top-level wild is rejected)
+	scheme string
+	host   string // either exact host or "*.suffix"
+	isWild bool
+	suffix string // set when isWild; leading dot included ("" for top-level wild is rejected)
 }
 
 func compileOriginPattern(raw string) originPattern {
