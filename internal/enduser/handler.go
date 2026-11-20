@@ -272,12 +272,11 @@ func HandleGetUser(svc *AuthService) http.HandlerFunc {
 
 		user, err := svc.GetUser(r.Context(), pc.SchemaName, claims.UserID)
 		if err != nil {
-			slog.Error("get user failed", "error", err, "user_id", claims.UserID)
-			if strings.Contains(err.Error(), "not found") {
-				writeJSON(w, map[string]string{"error": "user not found"}, http.StatusNotFound)
-			} else {
-				writeJSON(w, map[string]string{"error": "internal server error"}, http.StatusInternalServerError)
+			status, body := getUserErrorResponse(err)
+			if status >= 500 {
+				slog.Error("get user failed", "error", err, "user_id", claims.UserID)
 			}
+			writeJSON(w, body, status)
 			return
 		}
 
@@ -295,6 +294,21 @@ func HandleGetUser(svc *AuthService) http.HandlerFunc {
 		}
 
 		writeJSON(w, user, http.StatusOK)
+	}
+}
+
+// getUserErrorResponse maps a GetUser error to its HTTP answer. A suspended
+// user is 403 account_suspended (the same error /v1/auth/refresh gives), so
+// a server checking a still-valid access token with GET /v1/auth/user
+// learns about the suspension, and the SDK ends the session as for a 401.
+func getUserErrorResponse(err error) (int, map[string]string) {
+	switch {
+	case errors.Is(err, ErrAccountSuspended):
+		return http.StatusForbidden, map[string]string{"error": ErrAccountSuspended.Error(), "code": ErrAccountSuspended.Error()}
+	case strings.Contains(err.Error(), "not found"):
+		return http.StatusNotFound, map[string]string{"error": "user not found"}
+	default:
+		return http.StatusInternalServerError, map[string]string{"error": "internal server error"}
 	}
 }
 

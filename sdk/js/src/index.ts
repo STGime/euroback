@@ -27,8 +27,9 @@ export type {
   SubscriptionCallback,
   Subscription,
   RealtimeEventType,
+  RealtimeErrorCallback,
 } from './realtime'
-export { AuthClient, EMAIL_NOT_CONFIRMED } from './auth'
+export { AuthClient, EMAIL_NOT_CONFIRMED, ACCOUNT_SUSPENDED } from './auth'
 export { FunctionsClient } from './functions'
 export type {
   FunctionInvokeOptions,

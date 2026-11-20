@@ -29,3 +29,27 @@ func TestRefreshErrorResponse(t *testing.T) {
 		}
 	}
 }
+
+// GET /v1/auth/user answers 403 account_suspended for a suspended user, so
+// a server that checks a still-valid access token learns about it.
+func TestGetUserErrorResponse(t *testing.T) {
+	cases := []struct {
+		err      error
+		want     int
+		wantCode string
+	}{
+		{ErrAccountSuspended, http.StatusForbidden, "account_suspended"},
+		{fmt.Errorf("wrapped: %w", ErrAccountSuspended), http.StatusForbidden, "account_suspended"},
+		{errors.New("user not found"), http.StatusNotFound, ""},
+		{errors.New("query user: connection refused"), http.StatusInternalServerError, ""},
+	}
+	for _, c := range cases {
+		got, body := getUserErrorResponse(c.err)
+		if got != c.want || body["code"] != c.wantCode {
+			t.Errorf("getUserErrorResponse(%v) = %d %v, want %d code %q", c.err, got, body, c.want, c.wantCode)
+		}
+		if body["error"] == "" {
+			t.Errorf("getUserErrorResponse(%v): empty error", c.err)
+		}
+	}
+}

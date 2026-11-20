@@ -174,7 +174,7 @@ const eb = createClient({ url, apiKey: 'eb_pk_...', projectId, auth: { persistSe
 const admin = createClient({ url, apiKey: process.env.EUROBASE_SECRET_KEY, auth: { persistSession: false } })
 
 // Per request: check the caller's access token (ES256, verified locally against the
-// project's JWKS, cached; HS256 tokens are checked with the gateway)…
+// project's JWKS, cached; HS256 tokens are refused unless { allowHS256: true })…
 const { data: caller, error } = await eb.auth.verifyAccessToken(req.headers.authorization ?? '')
 if (error) return res.status(401).end()
 
@@ -187,7 +187,7 @@ await admin.db.from('credits').insert({ user_id: caller.userId, amount: 10 })
 ```
 
 - `refreshSession(refreshToken)` and `signOut(refreshToken)` take the token explicitly in server mode; refresh tokens rotate, so store the new one.
-- `getUser(accessToken)` asks the gateway for the token's user (supabase-js `getUser(jwt)`).
+- `verifyAccessToken` checks the token only. `getUser(accessToken)` asks the gateway for the token's user (supabase-js `getUser(jwt)`) and also refuses deleted and suspended (`account_suspended`) users.
 - `withAccessToken()` needs the public-key client: with the secret key every call is the service role, so it throws.
 - A server runtime that signs in on a default client prints a one-time warning; set `auth.persistSession` explicitly to silence it.
 

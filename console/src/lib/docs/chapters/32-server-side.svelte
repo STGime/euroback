@@ -30,7 +30,7 @@ export const admin = createClient({ ...config, apiKey: process.env.EUROBASE_SECR
 
 	const verifyCode = `const { data, error } = await eb.auth.verifyAccessToken(req.headers.authorization ?? '')
 if (error) {
-  // 'missing token' | 'invalid token' | 'token expired' | a gateway error
+  // 'missing token' | 'invalid token' | 'token expired' | 'HS256 tokens are not accepted'
   return res.status(401).json({ error })
 }
 data.userId      // the user's id (claim sub)
@@ -125,14 +125,19 @@ app.post('/api/credits/daily', requireUser, async (req, res) => {
 
   // The service role writes what the user can't. The user id comes from the
   // verified token — never from the request body.
-  const { data, error } = await admin.db.from('credit_grants').insert({
+  const { data, error, status } = await admin.db.from('credit_grants').insert({
     user_id: req.user.userId,
     kind: 'daily',
     day: new Date().toISOString().slice(0, 10),
     amount: 10,
   })
-  // The UNIQUE constraint makes a second claim the same day fail.
-  if (error) return res.status(409).json({ error: 'already claimed today' })
+  // The UNIQUE constraint makes a second claim the same day fail: the
+  // gateway answers 409 ("a record with this … already exists").
+  if (status === 409) return res.status(409).json({ error: 'already claimed today' })
+  if (error) {
+    console.error('credit grant failed:', status, error)
+    return res.status(500).json({ error: 'could not grant credits' })
+  }
   res.status(201).json(data)
 })
 
@@ -199,8 +204,10 @@ export async function POST() {
   if (!refreshToken) return NextResponse.json({ error: 'signed out' }, { status: 401 })
   const { data, error } = await eb.auth.refreshSession(refreshToken)
   if (error || !data) {
-    jar.delete(ACCESS_COOKIE)
-    jar.delete(REFRESH_COOKIE)
+    // Don't delete the cookies here. Refresh tokens are single-use: when two
+    // tabs refresh at once, one wins and the other is refused with the old
+    // token — deleting the cookies in that response would sign out the
+    // winner too. Your sign-out route deletes them.
     return NextResponse.json({ error: error ?? 'signed out' }, { status: 401 })
   }
   jar.set(ACCESS_COOKIE, data.access_token, { ...cookie, maxAge: data.expires_in })
@@ -309,6 +316,9 @@ app.post('/auth/signout', async (req, res) => {
   res.status(204).end()
 })
 
+// Sending emails through your server shares one per-IP sending ceiling among
+// all your users (see the rate-limit note below); the app can call
+// eb.auth.forgotPassword() directly with the public key instead.
 app.post('/auth/forgot-password', async (req, res) => {
   await eb.auth.forgotPassword(String(req.body.email ?? ''), {
     emailRedirectTo: 'https://example.com/reset-password',
@@ -342,14 +352,11 @@ export async function signIn(email, password) {
   await SecureStore.setItemAsync('refresh_token', body.refresh_token)
 }
 
-// Calls your API; on 401 refreshes once and retries.
-export async function api(path, init = {}) {
-  const call = () => fetch(API + path, {
-    ...init,
-    headers: { ...init.headers, authorization: 'Bearer ' + accessToken },
-  })
-  let res = await call()
-  if (res.status === 401) {
+// One refresh at a time: refresh tokens are single-use, so parallel 401s
+// must share one refresh instead of each using the same token.
+let refreshing = null
+function refresh() {
+  refreshing ??= (async () => {
     const refresh_token = await SecureStore.getItemAsync('refresh_token')
     const r = await fetch(API + '/auth/refresh', {
       method: 'POST',
@@ -360,6 +367,19 @@ export async function api(path, init = {}) {
     const session = await r.json()
     accessToken = session.access_token
     await SecureStore.setItemAsync('refresh_token', session.refresh_token)
+  })().finally(() => { refreshing = null })
+  return refreshing
+}
+
+// Calls your API; on 401 refreshes (shared) and retries once.
+export async function api(path, init = {}) {
+  const call = () => fetch(API + path, {
+    ...init,
+    headers: { ...init.headers, authorization: 'Bearer ' + accessToken },
+  })
+  let res = await call()
+  if (res.status === 401) {
+    await refresh()
     res = await call()
   }
   return res
@@ -374,10 +394,32 @@ if (session) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ access_token: session.access_token, refresh_token: session.refresh_token }),
   })
-}
-// Your backend checks the access token with eb.auth.verifyAccessToken() before
-// it stores anything, and refreshes it right away if you want to be sure the
-// refresh token is live.`;
+}`;
+
+	const oauthServerCode = `// app/api/auth/session/route.ts — takes the session from the callback page.
+import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
+import { eb, ACCESS_COOKIE, REFRESH_COOKIE } from '@/lib/eurobase'
+
+const APP_ORIGIN = 'https://app.example.com'
+const cookie = { httpOnly: true, secure: true, sameSite: 'lax' as const, path: '/' }
+
+export async function POST(request: Request) {
+  // Login CSRF: without these checks another site could post ITS session here
+  // and sign your visitor into the attacker's account. A cross-site form can't
+  // send JSON, and the browser sets Origin itself.
+  if (request.headers.get('content-type')?.split(';')[0].trim() !== 'application/json'
+      || request.headers.get('origin') !== APP_ORIGIN) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { access_token, refresh_token } = await request.json()
+  const { data, error } = await eb.auth.verifyAccessToken(String(access_token ?? ''))
+  if (error || typeof refresh_token !== 'string') return NextResponse.json({ error: 'invalid session' }, { status: 401 })
+  const jar = await cookies()
+  jar.set(ACCESS_COOKIE, access_token, { ...cookie, maxAge: data.expiresAt - Math.floor(Date.now() / 1000) })
+  jar.set(REFRESH_COOKIE, refresh_token, { ...cookie, maxAge: 60 * 60 * 24 * 30 })
+  return NextResponse.json({ user: { id: data.userId, email: data.email } })
+}`;
 </script>
 
 {#snippet code(id: string, src: string)}
@@ -435,12 +477,13 @@ if (session) {
 					<li><strong>Locally, no request per token.</strong> Access tokens are signed with ES256 using your project's own key pair (see <a href="/docs/auth" class="text-eurobase-700 hover:underline">Authentication</a>). The SDK fetches the public key once from <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">/v1/auth/.well-known/jwks.json</code> on the client's <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">url</code> — so <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">url</code> must be your project's own address, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">https://&lt;project&gt;.eurobase.app</code> — and verifies the signature with WebCrypto.</li>
 					<li><strong>What is checked:</strong> the signature, expiry (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">exp</code>), issuer <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eurobase</code>, audience (your project ID; set <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">projectId</code> on the client so it's compared) and that it is an end-user token. Platform tokens, tokens of other projects and anything unsigned are refused.</li>
 					<li><strong>Cache:</strong> the key is kept for an hour and survives a failed re-read. A token naming a key the SDK doesn't know makes it re-read the key set at most once a minute; such tokens are refused, never sent on to the gateway.</li>
-					<li><strong>Fallback to the gateway:</strong> tokens signed with HS256 (issued before ES256 signing), runtimes without WebCrypto (Node 18) and a key set that can't be fetched are checked with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /v1/auth/user</code> instead (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">verifiedBy: 'server'</code>). Pass <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">&#123; serverFallback: false &#125;</code> to refuse those instead.</li>
-					<li><strong>Current state:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.auth.getUser(token)</code> asks the gateway for the token's user — use it where you need the live profile or must know the user still exists (it costs a request).</li>
+					<li><strong>Fallback to the gateway:</strong> when the runtime can't check locally — no WebCrypto (Node 18), or the key set can't be fetched — the token is checked with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">GET /v1/auth/user</code> instead (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">verifiedBy: 'server'</code>). A token the gateway refused is refused again for 60 seconds without a request. Pass <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">&#123; serverFallback: false &#125;</code> to refuse those cases instead.</li>
+					<li><strong>HS256 tokens are refused</strong> (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">'HS256 tokens are not accepted'</code>): new tokens are ES256, and anyone can write a token that claims HS256 — sending each one to the gateway would spend your server's request budget. Only tokens issued before ES256 signing was switched on are HS256; while yours may still have such tokens in use, pass <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">&#123; allowHS256: true &#125;</code> to have the gateway check them.</li>
+					<li><strong>The token, not the user:</strong> <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">verifyAccessToken</code> checks the token only. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.auth.getUser(token)</code> asks the gateway, which also checks that the user still exists (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">'user not found'</code>) and isn't suspended (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">'account_suspended'</code>, HTTP 403), and returns the current profile. It costs a request; use it before sensitive actions.</li>
 				</ul>
 
 				<h3 id="as-user" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Acting as the user</h3>
-				<p class="text-sm text-gray-700 leading-relaxed"><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.withAccessToken(token)</code> returns a small client with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">db</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">functions</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">realtime</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth</code> that sends that token on every call. The gateway checks the token on each request and applies your RLS policies as that user, exactly as if the app had made the call; edge functions see the user as <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">ctx.user</code>. Creating one is cheap and it holds no shared state, so make one per request. Its <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth</code> covers the user's own account: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">getUser()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">updatePassword()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">exportMyData()</code>. If you open a realtime subscription with it, call <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">realtime.disconnect()</code> when you are done.</p>
+				<p class="text-sm text-gray-700 leading-relaxed"><code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.withAccessToken(token)</code> returns a small client with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">db</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">storage</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">functions</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">realtime</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth</code> that sends that token on every call. The gateway checks the token on each request and applies your RLS policies as that user, exactly as if the app had made the call; edge functions see the user as <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">ctx.user</code>. Creating one is cheap and it holds no shared state, so make one per request. Its <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">auth</code> covers the user's own account: <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">getUser()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">updatePassword()</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">exportMyData()</code>. If you open a realtime subscription with it, call <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">realtime.disconnect()</code> when you are done. Its token can't be renewed: once it expires the client stops reconnecting and reports it through <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">realtime.onError(cb)</code> (a warning in the log without a listener); open a new one with a fresh token.</p>
 
 				<h3 id="express" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Example: an Express API</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">Middleware that checks the token and puts the user and a per-request client on <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">req</code>; routes that read and write the caller's rows under RLS. It uses <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">lib/eurobase.mjs</code> from above.</p>
@@ -457,6 +500,7 @@ if (session) {
 				{@render code('next-lib', nextLibCode)}
 				{@render code('next-signin', nextSigninCode)}
 				{@render code('next-refresh', nextRefreshCode)}
+				<p class="text-sm text-gray-700 leading-relaxed">In the browser, call the refresh route single-flight: keep the pending request in a variable and let every 401 in the tab wait for that one, then retry once. Tabs can still collide; after a refused refresh, retry the original request once (another tab may have stored new cookies) before you show the sign-in page.</p>
 				{@render code('next-route', nextRouteCode)}
 				{@render code('next-action', nextActionCode)}
 
@@ -471,7 +515,13 @@ if (session) {
 				<ul class="list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
 					<li><strong>Refresh tokens rotate:</strong> each refresh returns a new one and the old one stops working. Store the new one every time, and don't refresh the same token twice in parallel.</li>
 					<li><strong>If your server stores refresh tokens</strong> (cookies are fine; a database is a choice), treat them like passwords: encrypt them, never log them, and revoke them with <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">signOut(refreshToken)</code> when the user signs out.</li>
-					<li><strong>Rate limits count your server's address.</strong> Sign-up, sign-in, refresh and password-reset limits are per IP (<a href="/docs/rate-limits" class="text-eurobase-700 hover:underline">Rate limits</a>); when every user comes through your backend, they all share one IP. Raise the limits there and rate-limit by client address on your own backend.</li>
+					<li><strong>Rate limits count your server's address.</strong> When every user comes through your backend, they all share its IP (see <a href="/docs/rate-limits" class="text-eurobase-700 hover:underline">Rate limits</a>).
+						<ul class="list-[circle] pl-5 mt-1 space-y-1">
+							<li><strong>You can raise</strong> (Auth → Rate Limits) the per-IP limits on sign-up + sign-in (at most 30 per 5 minutes), token refresh, and token verification (magic-link sign-in, phone OTP, completing a password reset, email verification; at most 150 per 5 minutes).</li>
+							<li><strong>You can't raise</strong> the per-IP sending ceilings — 60 password-reset emails, 60 verification resends and 300 magic-link requests an hour, 30 SMS codes an hour — nor the per-address limits (3 password-reset emails and 3 magic links per 15 minutes, one verification resend per 5 minutes) or the sign-in failure limit (5 wrong passwords per email address per 15 minutes). The per-address limits are per user, so a proxy doesn't make them shared; the per-IP ceilings are. Let the app call <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">forgotPassword</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">requestMagicLink</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">resendVerification</code> directly with the public key, so each user counts against their own address.</li>
+							<li>Rate-limit by client address on your own backend too.</li>
+						</ul>
+					</li>
 					<li><strong>Email confirmation:</strong> with <strong>Require email confirmation</strong> on, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">signUp</code> returns <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">confirmationRequired: true</code> and no session, and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">signIn</code> answers <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email_not_confirmed</code> until the user confirms; offer <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">resendVerification(email)</code>.</li>
 				</ul>
 
@@ -488,6 +538,8 @@ if (session) {
 					<li><strong>OAuth sign-in</strong> (Google, Apple, …) is a browser redirect flow. The gateway sends the user back to your <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">redirect_url</code> with the session in the URL fragment (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">#access_token=…</code>), which browsers never send to a server — so a server can't complete it. Start it in the browser (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">signInWithOAuth</code>) or the app (an in-app browser with a deep-link redirect URL in your allowlist), read the session on the callback page, and pass it to your backend if it needs one:</li>
 				</ul>
 				{@render code('oauth', oauthCode)}
+				<p class="text-sm text-gray-700 leading-relaxed">The route that receives it must accept only JSON from your own origin: otherwise another site could post its own session to it and sign your visitor into the attacker's account (login CSRF).</p>
+				{@render code('oauth-server', oauthServerCode)}
 				<ul class="list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
 					<li><strong>Passkeys</strong> need the browser's or device's authenticator; <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">passkeysSupported()</code> is always false on a server.</li>
 					<li><strong>Realtime</strong> with a user's token works from a server too, but the token travels in the WebSocket URL; with the secret key, don't use <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">eb.realtime</code> — connect with a WebSocket client that sends the key in a header (see the SDK README, "Realtime → Server-side clients"). Realtime filters by the owner column, not by custom RLS policies.</li>
@@ -495,7 +547,7 @@ if (session) {
 
 				<h3 id="limits" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Limits</h3>
 				<ul class="list-disc pl-5 text-sm text-gray-700 leading-relaxed space-y-1">
-					<li><strong>An access token stays valid until it expires</strong> — also after the user signs out, changes their password, or is suspended or deleted. Local verification can't see those, and neither can the gateway's check of the token itself. Keep <strong>Session duration</strong> short (Auth settings), and call <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">getUser(token)</code> before sensitive actions to confirm the user still exists and read their current profile.</li>
+					<li><strong>An access token stays valid until it expires</strong> — also after the user signs out, changes their password, or is suspended or deleted. <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">verifyAccessToken</code> can't see those, and the gateway still accepts the token for data calls (<code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">withAccessToken</code>) until it expires. Keep <strong>Session duration</strong> short (Auth settings), and call <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">getUser(token)</code> before sensitive actions: it refuses deleted and suspended users. A suspended user's refresh is refused, so their session ends at the next refresh.</li>
 					<li>Signing out revokes the refresh token only.</li>
 					<li>Node 18 has no WebCrypto global: tokens are then checked by the gateway, one request each. Node 20 or later, Deno, Bun and edge runtimes verify locally.</li>
 				</ul>
@@ -520,7 +572,7 @@ if (session) {
 						</tr>
 						<tr class="border-b border-gray-100 align-top">
 							<td class="py-2 pr-3"><code class="text-xs font-mono">supabase.auth.getUser(jwt)</code></td>
-							<td class="py-2"><code class="text-xs font-mono">eb.auth.getUser(jwt)</code> (asks the gateway), or <code class="text-xs font-mono">eb.auth.verifyAccessToken(jwt)</code> (local)</td>
+							<td class="py-2"><code class="text-xs font-mono">eb.auth.getUser(jwt)</code> (asks the gateway; also refuses suspended and deleted users), or <code class="text-xs font-mono">eb.auth.verifyAccessToken(jwt)</code> (local)</td>
 						</tr>
 						<tr class="border-b border-gray-100 align-top">
 							<td class="py-2 pr-3"><code class="text-xs font-mono">supabase.auth.getClaims(jwt)</code> / <code class="text-xs font-mono">jose</code> with the JWT secret</td>

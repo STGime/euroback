@@ -65,6 +65,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.endsWith('/v1/auth/signout')) return json(200, { status: 'ok' })
   if (u.endsWith('/v1/auth/user/password')) return json(200, session('at-pw', 'rt-pw'))
   if (u.includes('/v1/storage')) return json(200, { objects: [], has_more: false })
+  if (u.endsWith('/v1/db/dupes')) return json(409, { error: 'a record with this day already exists' })
   return json(200, { data: [], count: 0 })
 }
 
@@ -227,6 +228,10 @@ console.warn = (...args) => warnings.push(args.join(' '))
   await bad(await es256(goodClaims({ iss: 'someone' })), 'wrong issuer')
   await bad(await es256(goodClaims({ type: 'platform' })), 'not an end-user token')
   await bad(await es256(goodClaims({ project_id: 'other' })), 'project_id differs from aud')
+  // Another project's token whose aud and project_id agree: only the
+  // configured projectId catches it.
+  await bad(await es256(goodClaims({ aud: 'other', project_id: 'other' })), 'audience is not the configured project')
+  await bad(await es256(goodClaims({ nbf: now() + 300 })), 'not valid yet (nbf)')
   await bad(await es256(goodClaims(), { key: otherPair.privateKey }), 'signed with another key')
   const parts = token.split('.')
   await bad(`${parts[0]}.${enc({ ...goodClaims(), sub: 'attacker' })}.${parts[2]}`, 'tampered payload')
@@ -253,33 +258,92 @@ console.warn = (...args) => warnings.push(args.join(' '))
 
 // ── 5. verifyAccessToken: fallbacks ────────────────────────────────
 {
-  // HS256 → the gateway decides.
+  // HS256: refused locally by default — a forged HS256 header costs no request.
   const eb = createClient({ url: URL_BASE, apiKey: PUBLIC_KEY, auth: { persistSession: false } })
   calls.length = 0
   const hs = hs256(goodClaims({ aud: undefined }))
-  const r = await eb.auth.verifyAccessToken(hs)
+  const def = await eb.auth.verifyAccessToken(hs)
+  assert.equal(def.data, null)
+  assert.equal(def.error, 'HS256 tokens are not accepted')
+  assert.equal(calls.length, 0, 'HS256 is not sent to the gateway by default')
+
+  // Opt-in: the gateway decides.
+  const opt = { allowHS256: true }
+  const r = await eb.auth.verifyAccessToken(hs, opt)
   assert.equal(r.error, null)
   assert.equal(r.data.verifiedBy, 'server')
   assert.equal(r.data.userId, 'user-1')
   assert.equal(r.data.email, 'server@example.com')
   assert.equal(authOf((c) => c.url.endsWith('/v1/auth/user')), `Bearer ${hs}`)
 
-  const off = await eb.auth.verifyAccessToken(hs, { serverFallback: false })
+  const off = await eb.auth.verifyAccessToken(hs, { ...opt, serverFallback: false })
   assert.equal(off.data, null)
   assert.match(off.error, /HS256/)
 
   // An expired HS256 token is refused without a request.
   calls.length = 0
-  assert.equal((await eb.auth.verifyAccessToken(hs256(goodClaims({ exp: now() - 1 })))).error, 'token expired')
+  assert.equal((await eb.auth.verifyAccessToken(hs256(goodClaims({ exp: now() - 1 })), opt)).error, 'token expired')
   assert.equal(calls.length, 0)
 
-  // Server says 401 → invalid.
+  // Server says 401 → invalid, and the refusal is remembered: a repeat costs no request.
+  const hs401 = hs256(goodClaims({ aud: undefined, sub: 'user-401' }))
   userResponse = () => ({ status: 401, body: { error: 'invalid or expired token' } })
-  assert.equal((await eb.auth.verifyAccessToken(hs)).error, 'invalid token')
+  calls.length = 0
+  assert.equal((await eb.auth.verifyAccessToken(hs401, opt)).error, 'invalid token')
+  assert.equal((await eb.auth.verifyAccessToken(hs401, opt)).error, 'invalid token')
+  assert.equal(calls.filter((c) => c.url.endsWith('/v1/auth/user')).length, 1, 'refused token cached')
+  // Suspended (403 account_suspended) → that error, also cached.
+  const hsBanned = hs256(goodClaims({ aud: undefined, sub: 'user-banned' }))
+  userResponse = () => ({ status: 403, body: { error: 'account_suspended', code: 'account_suspended' } })
+  assert.equal((await eb.auth.verifyAccessToken(hsBanned, opt)).error, 'account_suspended')
+  // A temporary gateway error is not cached.
+  const hs500 = hs256(goodClaims({ aud: undefined, sub: 'user-500' }))
+  userResponse = () => ({ status: 503, body: { error: 'unavailable' } })
+  calls.length = 0
+  await eb.auth.verifyAccessToken(hs500, opt)
+  await eb.auth.verifyAccessToken(hs500, opt)
+  assert.equal(calls.filter((c) => c.url.endsWith('/v1/auth/user')).length, 2, '5xx not cached')
   // Server returns another user than the token names → invalid.
   userResponse = () => ({ status: 200, body: { id: 'someone-else', email: '' } })
-  assert.equal((await eb.auth.verifyAccessToken(hs)).error, 'invalid token')
+  assert.equal((await eb.auth.verifyAccessToken(hs256(goodClaims({ aud: undefined, sub: 'user-x' })), opt)).error, 'invalid token')
   userResponse = () => ({ status: 200, body: { id: 'user-1', email: 'server@example.com' } })
+}
+{
+  // getUser(token) passes on the gateway's suspension error.
+  const eb = createClient({ url: URL_BASE, apiKey: PUBLIC_KEY, auth: { persistSession: false } })
+  userResponse = () => ({ status: 403, body: { error: 'account_suspended', code: 'account_suspended' } })
+  const r = await eb.auth.getUser('tok-banned')
+  assert.equal(r.data, null)
+  assert.equal(r.error, 'account_suspended')
+  userResponse = () => ({ status: 200, body: { id: 'user-1', email: 'server@example.com' } })
+}
+{
+  // QueryResult carries the HTTP status: 409 = unique violation.
+  const eb = createClient({ url: URL_BASE, apiKey: SECRET_KEY, auth: { persistSession: false } })
+  const r = await eb.db.from('dupes').insert({ day: '2026-11-20' })
+  assert.equal(r.status, 409)
+  assert.match(r.error, /already exists/)
+}
+{
+  // Realtime on a withAccessToken client stops once its token has expired.
+  const created = []
+  const RealWS = globalThis.WebSocket
+  globalThis.WebSocket = class { static OPEN = 1; static CONNECTING = 0; constructor(url) { created.push(url) } close() {} }
+  try {
+    const eb = createClient({ url: URL_BASE, apiKey: PUBLIC_KEY, auth: { persistSession: false } })
+    const expired = eb.withAccessToken(await es256(goodClaims({ exp: now() - 10 })))
+    const errors = []
+    expired.realtime.onError((e) => errors.push(e))
+    expired.realtime.on('todos', '*', () => {})
+    assert.equal(created.length, 0, 'no connection with an expired token')
+    assert.equal(errors.length, 1)
+    assert.match(errors[0], /expired/)
+    const live = eb.withAccessToken(await es256(goodClaims()))
+    live.realtime.on('todos', '*', () => {})
+    assert.equal(created.length, 1, 'a live token connects')
+  } finally {
+    globalThis.WebSocket = RealWS
+  }
 }
 {
   // JWKS not available (e.g. url isn't the project's own subdomain) → gateway.
@@ -298,6 +362,21 @@ console.warn = (...args) => warnings.push(args.join(' '))
 }
 
 // ── 6. Default (kept session) in a server runtime warns once ────────
+{
+  // Not in a browser Web Worker / extension service worker (one user).
+  warnings.length = 0
+  globalThis.WorkerGlobalScope = class {}
+  globalThis.importScripts = () => {}
+  try {
+    const w = createClient({ url: URL_BASE, apiKey: PUBLIC_KEY })
+    await w.auth.signIn({ email: 'u@example.com', password: 'pw' })
+    assert.equal(warnings.length, 0, 'no warning in a Web Worker')
+    await w.auth.signOut()
+  } finally {
+    delete globalThis.WorkerGlobalScope
+    delete globalThis.importScripts
+  }
+}
 {
   warnings.length = 0
   const eb = createClient({ url: URL_BASE, apiKey: PUBLIC_KEY })

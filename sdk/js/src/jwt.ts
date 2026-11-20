@@ -5,10 +5,12 @@
  * pair that belongs to the project, and publishes the public key at
  * `GET /v1/auth/.well-known/jwks.json` on the project's own URL. This
  * module verifies a token locally against that key with WebCrypto (no
- * dependencies). Tokens it can't check locally — HS256 tokens, no
- * WebCrypto in the runtime, JWKS unreachable — are checked by the gateway
- * instead (`GET /v1/auth/user` with the token), unless the caller turns
- * that off.
+ * dependencies). When the environment prevents a local check — no
+ * WebCrypto in the runtime, JWKS unreachable — the gateway checks the token
+ * instead (`GET /v1/auth/user` with the token), unless the caller turns that
+ * off. HS256 tokens are refused unless the caller opts in (`allowHS256`):
+ * anyone can mint a token that claims HS256, and sending each one to the
+ * gateway would let them spend the server's rate limit.
  */
 
 import type { EurobaseConfig, HttpClient } from './http'
@@ -35,11 +37,19 @@ export interface VerifiedAccessToken {
 /** Options for `auth.verifyAccessToken()`. */
 export interface VerifyAccessTokenOptions {
   /**
-   * Ask the gateway (`GET /v1/auth/user`) when the token can't be
-   * checked locally: an HS256 token, no WebCrypto, or the JWKS can't be
-   * fetched. Default `true`. With `false` those cases return an error.
+   * Ask the gateway (`GET /v1/auth/user`) when the environment prevents a
+   * local check: no WebCrypto, or the JWKS can't be fetched. Default
+   * `true`. With `false` those cases return an error.
    */
   serverFallback?: boolean
+  /**
+   * Accept HS256 tokens by asking the gateway about each one. Default
+   * `false`: production tokens are ES256, and an HS256 header is refused
+   * locally (`'HS256 tokens are not accepted'`), so forged tokens cost no
+   * request. Turn it on only while a project still has HS256 tokens in
+   * use (issued before ES256 signing). Ignored with `serverFallback: false`.
+   */
+  allowHS256?: boolean
 }
 
 export type VerifyAccessTokenResult =
@@ -55,6 +65,23 @@ const JWKS_REFETCH_COOLDOWN_MS = 60 * 1000
 /** After a failed JWKS fetch, wait this long before trying again. */
 const JWKS_FAILURE_BACKOFF_MS = 30 * 1000
 const JWKS_FETCH_TIMEOUT_MS = 10 * 1000
+/** A token the gateway refused is refused again without a request this long. */
+const REFUSED_TTL_MS = 60 * 1000
+const REFUSED_CACHE_MAX = 1000
+
+/** Cache key for a token: its SHA-256 (the token itself only without WebCrypto). */
+async function tokenKey(token: string): Promise<string> {
+  const subtle = subtleCrypto()
+  if (!subtle || typeof subtle.digest !== 'function') return token
+  try {
+    const digest = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(token) as BufferSource))
+    let hex = ''
+    for (const b of digest) hex += b.toString(16).padStart(2, '0')
+    return hex
+  } catch {
+    return token
+  }
+}
 
 const INVALID = 'invalid token'
 const EXPIRED = 'token expired'
@@ -110,6 +137,8 @@ export class AccessTokenVerifier {
   private loading: Promise<JwksCache | null> | null = null
   private lastFetchAttempt = 0
   private lastFailure = 0
+  /** Tokens the gateway refused recently (by hash), so repeats cost no request. */
+  private refused = new Map<string, { until: number; error: string }>()
 
   constructor(config: EurobaseConfig, http: HttpClient) {
     this.config = config
@@ -131,8 +160,9 @@ export class AccessTokenVerifier {
     const fallback = options?.serverFallback !== false
 
     if (header.alg === 'HS256') {
-      // Signed with the project's secret: only the gateway can check it.
-      return fallback ? this.verifyWithServer(token, claims) : { data: null, error: 'HS256 token: can only be verified by the server' }
+      // Signed with the project's secret: only the gateway can check it,
+      // and only on request (see allowHS256).
+      return fallback && options?.allowHS256 ? this.verifyWithServer(token, claims) : { data: null, error: 'HS256 tokens are not accepted' }
     }
     if (header.alg !== 'ES256') return { data: null, error: INVALID }
 
@@ -198,14 +228,43 @@ export class AccessTokenVerifier {
     // Cheap checks first: no request for an expired or foreign-looking token.
     const claimError = this.checkClaims(claims, false)
     if (claimError) return { data: null, error: claimError }
+    const key = await tokenKey(token)
+    const refused = this.refused.get(key)
+    if (refused && refused.until > Date.now()) return { data: null, error: refused.error }
     const result = await this.http.get('/v1/auth/user', undefined, { accessToken: token })
-    if (result?.error) return { data: null, error: result.status === 401 ? INVALID : String(result.error) }
-    if (!result || typeof result.id !== 'string' || result.id !== claims.sub) {
-      return { data: null, error: INVALID }
+    let error: string | null = null
+    if (result?.error) {
+      // 401 = bad token; 403 = account_suspended; 404 = user deleted.
+      if (result.status === 401 || result.status === 403 || result.status === 404) {
+        error = result.status === 401 ? INVALID : String(result.error)
+      } else {
+        return { data: null, error: String(result.error) } // temporary: not cached
+      }
+    } else if (!result || typeof result.id !== 'string' || result.id !== claims.sub) {
+      error = INVALID
+    }
+    if (error) {
+      this.rememberRefusal(key, error)
+      return { data: null, error }
     }
     const verified = toVerified(claims, 'server')
     if (typeof result.email === 'string') verified.email = result.email
     return { data: verified, error: null }
+  }
+
+  private rememberRefusal(key: string, error: string) {
+    const now = Date.now()
+    if (this.refused.size >= REFUSED_CACHE_MAX) {
+      for (const [k, v] of this.refused) {
+        if (v.until <= now) this.refused.delete(k)
+      }
+      // Still full: drop the oldest entries (Map keeps insertion order).
+      for (const k of this.refused.keys()) {
+        if (this.refused.size < REFUSED_CACHE_MAX) break
+        this.refused.delete(k)
+      }
+    }
+    this.refused.set(key, { until: now + REFUSED_TTL_MS, error })
   }
 
   /**

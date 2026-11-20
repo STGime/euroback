@@ -66,6 +66,11 @@ function issuedAt(session: AuthSession): number | null {
  */
 function isUserDevice(): boolean {
   if (typeof document !== 'undefined') return true
+  const g = globalThis as { WorkerGlobalScope?: unknown; importScripts?: unknown }
+  // A browser's Web Worker or an extension's service worker: one user.
+  // (Server runtimes with worker globals, such as Deno or edge workers,
+  // have no importScripts.)
+  if (typeof g.WorkerGlobalScope !== 'undefined' && typeof g.importScripts === 'function') return true
   return typeof navigator !== 'undefined' && (navigator as { product?: string }).product === 'ReactNative'
 }
 
@@ -179,6 +184,13 @@ export interface AuthUser {
  * Offer `resendVerification(email)`.
  */
 export const EMAIL_NOT_CONFIRMED = 'email_not_confirmed'
+
+/**
+ * Error string returned by `getUser()` and `refreshSession()` (and by
+ * `verifyAccessToken()` when the gateway checked the token) for a suspended
+ * user.
+ */
+export const ACCOUNT_SUSPENDED = 'account_suspended'
 
 /** Result of `signUp`. */
 export interface SignUpResult {
@@ -343,14 +355,16 @@ export class AuthClient {
    * ES256 tokens are checked locally against the project's public key
    * (`GET /v1/auth/.well-known/jwks.json` on the client's `url`, fetched
    * once and cached): signature, `exp`, issuer `eurobase`, audience (your
-   * `projectId` when the client has one) and `type: enduser`. Tokens that
-   * can't be checked locally (HS256, no WebCrypto, JWKS unreachable) are
-   * checked by the gateway with `GET /v1/auth/user`, unless
-   * `serverFallback: false`.
+   * `projectId` when the client has one) and `type: enduser`. When the
+   * runtime can't check locally (no WebCrypto, JWKS unreachable) the
+   * gateway checks it with `GET /v1/auth/user`, unless
+   * `serverFallback: false`. HS256 tokens are refused unless
+   * `allowHS256: true`.
    *
-   * A token stays valid until it expires, also after sign-out, a password
-   * change or suspension. Use `getUser(token)` where you need the user's
-   * current state.
+   * This checks the **token** only: it stays valid until it expires, also
+   * after sign-out, a password change, suspension or deletion. Use
+   * `getUser(token)` where you need to know the user still exists and
+   * isn't suspended.
    *
    * @example
    * const { data, error } = await eb.auth.verifyAccessToken(req.headers.authorization ?? '')
@@ -910,7 +924,13 @@ export class AuthClient {
    *
    * With an access token argument, asks for that token's user instead
    * (supabase-js compatible `getUser(jwt)`): the server-side check that the
-   * token is valid and the user still exists. Nothing is stored.
+   * token is valid, the user still exists and isn't suspended. Nothing is
+   * stored.
+   *
+   * A suspended user gets `error: 'account_suspended'` (`ACCOUNT_SUSPENDED`,
+   * HTTP 403; older gateways still return the user); a deleted one
+   * `'user not found'`. Like a 401 here, that doesn't clear this client's
+   * session by itself: its next refresh is refused and ends the session.
    */
   async getUser(accessToken?: string): Promise<{ data: AuthUser | null; error: string | null }> {
     const token = typeof accessToken === 'string' ? stripBearer(accessToken) : undefined

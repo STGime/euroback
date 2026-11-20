@@ -221,7 +221,7 @@ export function createClient(configOrConnectionString: EurobaseConfig | string):
         db: new DatabaseClient(userConfig, userHttp),
         functions: new FunctionsClient(userConfig, userHttp),
         storage: new StorageClient(userConfig, userHttp),
-        realtime: new RealtimeClient(userConfig, userHttp),
+        realtime: new RealtimeClient(userConfig, userHttp, { fixedToken: true }),
         accessToken: token,
       }
     },
