@@ -261,7 +261,7 @@ console.log({ created, existing, failed })`;
 			<button onclick={() => copyCode(setupCode, 'setup')} class="absolute top-2 right-2 rounded bg-gray-700 px-2 py-1 text-[10px] text-gray-300 hover:bg-gray-600 cursor-pointer">{copiedId === 'setup' ? 'Copied!' : 'Copy'}</button>
 			<pre>{setupCode}</pre>
 		</div>
-		<p class="text-sm text-gray-700 leading-relaxed">Requires an <code class={c}>@eurobase/sdk</code> release that includes <code class={c}>auth.admin</code> (see the SDK changelog). Admin requests send only the API key, even if the same client has a signed-in user.</p>
+		<p class="text-sm text-gray-700 leading-relaxed">Requires <code class={c}>@eurobase/sdk</code> 0.13.0 or later. Admin requests send only the API key, even if the same client has a signed-in user.</p>
 
 		<h3 id="methods" class="text-lg font-semibold text-gray-900 mt-6 scroll-mt-20">Methods</h3>
 		<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto">
