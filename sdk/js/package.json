@@ -18,7 +18,19 @@
       }
     },
     "./functions": {
-      "types": "./dist/edge.d.ts"
+      "import": {
+        "types": "./dist/edge.d.ts"
+      },
+      "require": {
+        "types": "./dist/cjs/edge.d.ts"
+      }
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "functions": [
+        "./dist/edge.d.ts"
+      ]
     }
   },
   "scripts": {
