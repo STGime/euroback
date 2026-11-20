@@ -338,11 +338,6 @@
 	<div class="hidden lg:flex lg:w-1/2 bg-eurobase-900 text-white flex-col justify-between p-12">
 		<div>
 			<div class="flex items-center gap-3">
-				<div class="flex h-10 w-10 items-center justify-center rounded-lg bg-eurobase-700">
-					<svg class="h-6 w-6 text-eurobase-200" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
-					</svg>
-				</div>
 				<span class="text-2xl font-bold tracking-tight">Eurobase</span>
 			</div>
 			<p class="mt-4 text-lg text-eurobase-200">EU-Sovereign Backend-as-a-Service</p>
@@ -410,11 +405,6 @@
 			<!-- Mobile logo -->
 			<div class="mb-8 lg:hidden text-center">
 				<div class="inline-flex items-center gap-2">
-					<div class="flex h-8 w-8 items-center justify-center rounded-md bg-eurobase-600">
-						<svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
-						</svg>
-					</div>
 					<span class="text-xl font-bold text-gray-900">Eurobase</span>
 				</div>
 				<p class="mt-1 text-sm text-gray-500">EU-Sovereign Backend-as-a-Service</p>
