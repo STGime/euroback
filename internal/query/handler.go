@@ -233,41 +233,54 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			RLSEnabled bool         `json:"rls_enabled"`
 		}
 
+		// One query per kind for the whole schema (columns, constraints,
+		// indexes, triggers, RLS flags) — not five per table, which made a
+		// project with a few dozen tables take seconds.
+		ctx := r.Context()
+		colsBy, err := schemaColumns(ctx, tp, schemaName, nil)
+		if err != nil {
+			slog.Error("failed to get table columns", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		consBy, err := schemaConstraints(ctx, tp, schemaName, nil)
+		if err != nil {
+			slog.Error("failed to get table constraints", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		idxBy, err := schemaIndexes(ctx, tp, schemaName, nil)
+		if err != nil {
+			slog.Error("failed to get table indexes", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		trgBy, err := schemaTriggers(ctx, tp, schemaName, nil)
+		if err != nil {
+			slog.Error("failed to get table triggers", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		rlsBy, err := schemaRLS(ctx, tp, schemaName)
+		if err != nil {
+			slog.Error("failed to get rls flags", "error", err, "schema", schemaName)
+			jsonError(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
 		result := make([]TableSchema, 0, len(tables))
 		for _, t := range tables {
-			cols, err := GetTableColumns(r.Context(), tp, schemaName, t)
-			if err != nil {
-				slog.Error("failed to get table columns", "error", err, "schema", schemaName, "table", t)
-				jsonError(w, "internal server error", http.StatusInternalServerError)
-				return
+			triggers := trgBy[t]
+			if triggers == nil {
+				triggers = make([]DBTrigger, 0)
 			}
-			cols, err = GetTableConstraints(r.Context(), tp, schemaName, t, cols)
-			if err != nil {
-				slog.Error("failed to get table constraints", "error", err, "schema", schemaName, "table", t)
-				jsonError(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			indexes, err := GetTableIndexes(r.Context(), tp, schemaName, t)
-			if err != nil {
-				slog.Error("failed to get table indexes", "error", err, "schema", schemaName, "table", t)
-				jsonError(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			triggers, err := GetTableTriggers(r.Context(), tp, schemaName, t)
-			if err != nil {
-				slog.Error("failed to get table triggers", "error", err, "schema", schemaName, "table", t)
-				jsonError(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			// Check RLS status.
-			var rlsEnabled bool
-			_ = tp.QueryRow(r.Context(),
-				`SELECT relrowsecurity FROM pg_class
-				 WHERE relname = $1 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)`,
-				t, schemaName,
-			).Scan(&rlsEnabled)
-
-			result = append(result, TableSchema{Name: t, Columns: cols, Indexes: indexes, Triggers: triggers, RLSEnabled: rlsEnabled})
+			result = append(result, TableSchema{
+				Name:       t,
+				Columns:    applyConstraints(colsBy[t], consBy[t]),
+				Indexes:    idxBy[t],
+				Triggers:   triggers,
+				RLSEnabled: rlsBy[t],
+			})
 		}
 
 		slog.Debug("schema introspection complete", "project_id", projectID, "schema", schemaName, "table_count", len(result))
