@@ -14,7 +14,7 @@ The developer's Supabase project keeps running throughout. Nothing here writes t
 1. **Never write to the Supabase project.** Every command reads it. Don't run SQL against it other than `SELECT`.
 2. **Migrate into a fresh Eurobase project first** — a test project. Only after it checks out, do the same into the project that goes live (or keep the test project).
 3. **Secrets never enter chat, code or commits.** The Supabase database URL contains a password, and the service role key is an admin key. Ask the developer to put them in environment variables in *their* terminal (or a `.env` that git ignores), and refer to them by name. If one is pasted into the conversation, tell the developer to rotate it after the migration. Never print them, never write them into files you create.
-4. **Stop and ask at every decision point below** (marked **Decision**). Don't pick for the developer, and don't pass `--accept-access-changes`, `--deploy`, `--apply` or `--enable` on your own.
+4. **Stop and ask at every decision point below** (marked **Decision**). Don't pick for the developer, and don't pass `--accept-access-changes`, `--deploy`, `--apply` or `--enable` on your own, and never run `eurobase keys rotate-secret` or `regenerate` yourself.
 5. **Copying real users or real data is a decision** too: a test project then holds personal data. Say so, and offer `--exclude-table` to leave large or sensitive tables out of a first test.
 6. **Report what each command printed** — especially its "Read before applying" / "needs changes" lists. They are the migration's to-do list.
 
@@ -29,7 +29,7 @@ Ask the developer for, or check:
   - `SUPABASE_URL` (`https://<ref>.supabase.co`) and `SUPABASE_SERVICE_ROLE_KEY` — only needed to copy files.
 - The Supabase project folder (with `supabase/functions/` and `supabase/config.toml`), if it has edge functions. `supabase functions download <name>` fetches one that isn't in git.
 - A target project: `eurobase projects create <name>`, then `eurobase switch <name>`. Check `eurobase projects list` — the `*` marks the active project, and **every command below acts on it**. Re-check before each step that writes.
-- For the checks, the project's keys in the developer's shell, by name: `EB_URL` (`https://<slug>.eurobase.app`), `EB_PUBLIC_KEY` (`eurobase keys show`) and `EB_SECRET_KEY`. The secret key is shown once — in the console when the project is created, or by `eurobase keys rotate-secret --confirm` (fine on a fresh test project; on a project in use it breaks whatever uses the old key). The developer exports them; you use them by name.
+- For the checks, the project's keys in the developer's shell, by name: `EB_URL` (`https://<slug>.eurobase.app`), `EB_PUBLIC_KEY` (`eurobase keys show`) and `EB_SECRET_KEY`. The secret key is shown once — in the console when the project is created, or when the **developer** runs `eurobase keys rotate-secret --confirm` in their own terminal (it prints the new key; fine on a fresh test project, on a project in use it breaks whatever uses the old key). The developer exports them before starting Claude Code (or puts them in a git-ignored `.env` you `source`); you use them by name.
 
 **Run everything from a migration folder, not from the repository root:**
 
@@ -58,7 +58,7 @@ It writes a Markdown report: tables, policies, functions, triggers, extensions, 
 
 Also look at the app itself — the report covers the database, not the code:
 
-- **Direct database connections.** `grep -rnE "pg-boss|from 'pg'|require\('pg'\)|postgres\(|DATABASE_URL|prisma|drizzle|knex|kysely|typeorm|sequelize"` — Free and Pro projects never get a database URL (data goes through the SDK and REST); a Team project's dedicated database comes with an owner URL. A queue like pg-boss that needs its own Postgres keeps it (a small EU Postgres used only for the queue), or its jobs move to Eurobase cron jobs + edge functions. Tell the developer early: it can decide the plan.
+- **Direct database connections.** `grep -rnE "pg-boss|from 'pg'|require\('pg'\)|from 'postgres'|DATABASE_URL|prisma|drizzle|knex|kysely|typeorm|sequelize"` — Free and Pro projects never get a database URL (data goes through the SDK and REST); a Team project's dedicated database comes with an owner URL. A queue like pg-boss that needs its own Postgres keeps it (a small EU Postgres used only for the queue), or its jobs move to Eurobase cron jobs + edge functions. Tell the developer early: it can decide the plan.
 - **App-level schedulers** (pg-boss, node-cron, BullMQ, Cloud Scheduler) — Step 6 only carries pg_cron over.
 - **A backend that uses supabase-js on the server** (`auth.admin.*`, `createClient` with a user's token, `auth.getUser(jwt)`) — see Step 7, "Backends".
 
@@ -82,14 +82,14 @@ Before asking, work out for each item what it means in practice (read-only queri
 CREATE OR REPLACE FUNCTION claim_trial(p_user_id uuid) RETURNS boolean
 LANGUAGE plpgsql AS $$
 BEGIN
-  IF NOT is_service_role() THEN
+  IF NOT public.is_service_role() THEN
     RAISE EXCEPTION 'claim_trial may only be called with the secret key' USING ERRCODE = '42501';
   END IF;
   -- … the original body …
 END $$;
 ```
 
-A `LANGUAGE sql` function can't raise: rewrite it as `plpgsql` with `BEGIN <check> RETURN (<the original SELECT>); END` — same signature and result. App callers get HTTP 403 with code `42501` ("permission denied"; the function's own message isn't passed on). Show the migration to the developer before applying it.
+Write `public.is_service_role()` qualified — edge functions and cron jobs run with only the project's schema on the search path. A `LANGUAGE sql` function can't raise: rewrite it as `plpgsql` — `RETURN (<the SELECT>)` for a single value, `RETURN QUERY <the SELECT>` for a set, plain statements (`PERFORM` for a SELECT whose result isn't used) for `void`; same signature and result. Create the file with `eurobase migrations new service_only_functions` so it sorts after the schema migration. App callers get HTTP 403 with code `42501` ("permission denied"; the function's own message isn't passed on). Show the migration to the developer before applying it.
 
 **Check the guard** with curl, keys by name: the public key must get 403 for every guarded function, the secret key must get past the check (call only functions that write nothing with test arguments), and one unguarded function must still answer the public key — that shows the 403 comes from the guard.
 
@@ -128,7 +128,7 @@ Read the "Read before applying" list out loud — its lines appear only when the
 eurobase migrations up
 ```
 
-**Check:** compare row counts per table between Supabase (`psql "$SUPABASE_DB_URL" -c "…"` — read-only; add `-v ON_ERROR_STOP=1` and `SET default_transaction_read_only = on`) and Eurobase (`eurobase db query "<sql>" --json`, the console SQL editor, or the MCP server's `runSQL`). For the important tables compare a checksum of **each column**, not of whole rows — the two databases sort text differently. A sum of hashes doesn't depend on row order:
+**Check:** compare row counts per table between Supabase (`psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -c 'SET default_transaction_read_only = on' -c '<SELECT …>'` — separate `-c` flags, so the read-only setting is in force before the query) and Eurobase (`eurobase db query "<sql>" --json`, the console SQL editor, or the MCP server's `runSQL`). For the important tables compare a checksum of **each column**, not of whole rows — the two databases sort text differently. A sum of hashes doesn't depend on row order:
 
 ```sql
 SELECT count(*) AS n, count(col) AS non_null,
@@ -138,7 +138,7 @@ FROM t;
 
 (`::text` because JSON output rounds big numbers.)
 
-Use `extract(epoch FROM col)` instead of `col::text` for timestamps (the text form depends on the session's time zone). For users, compare `auth.users` on Supabase with `users` on Eurobase: `id`, `email`, `encrypted_password` ↔ `password_hash`, `email_confirmed_at`, `created_at`, `last_sign_in_at`.
+Use `extract(epoch FROM col)` instead of `col::text` for timestamps (the text form depends on the session's time zone). For users, compare `auth.users` on Supabase with `users` on Eurobase: `id`, `email`, `encrypted_password` ↔ `password_hash`, `email_confirmed_at`, `created_at`, `last_sign_in_at`. The import changes some of it, so on the Supabase side use `WHERE deleted_at IS NULL AND NOT is_sso_user`, `lower(trim(email))` and `nullif(encrypted_password, '')`, and expect the users whose hashes "Read before applying" listed as unusable to differ.
 
 ## Step 4 — Files (storage)
 
@@ -153,7 +153,7 @@ eurobase import supabase storage --apply         # copy
 - a **public** bucket becomes a folder shared with everyone, and its files become developer files — their uploaders can no longer replace or delete them from the app;
 - the copy isn't checked against the plan's storage limit — compare the total first.
 
-The copy streams each file straight from Supabase to the project; it can be stopped and run again (files already there are skipped; nothing in the project is ever replaced). Supabase's `.emptyFolderPlaceholder` objects are skipped, so the report can count one more object per folder than the copy. **Check:** run `--apply` a second time — it should report every file as already there. Spot-check a few files: `eurobase storage download <bucket>/<path> /tmp/a`, the same file from Supabase (`curl -s -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" "$SUPABASE_URL/storage/v1/object/<bucket>/<path>" -o /tmp/b`, a read), compare `md5`, then delete both copies.
+The copy streams each file straight from Supabase to the project; it can be stopped and run again (files already there are skipped; nothing in the project is ever replaced). Supabase's `.emptyFolderPlaceholder` objects are skipped by the copy, so the report counts one more object for each folder that has one. **Check:** run `--apply` a second time — it should report every file as already there. Spot-check a few files: `eurobase storage download <bucket>/<path> /tmp/a`, the same file from Supabase (`curl -s -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" "$SUPABASE_URL/storage/v1/object/<bucket>/<path>" -o /tmp/b`, a read), compare `md5`, then delete both copies.
 
 ## Step 5 — Edge functions
 
@@ -248,16 +248,19 @@ Password reset: Supabase signs the user in from the reset link and then calls `u
 
 ### Backends (supabase-js on a server)
 
-A browser client holds one signed-in user. On a server, never share a signed-in client between requests — one user's session would serve the next request. Read console → Docs → *Using the SDK on a server* (chapter 32) and *Managing users from your server* (chapter 33) before changing a backend.
+A browser client holds one signed-in user. On a server, never share a signed-in client between requests — one user's session would serve the next request. Read console → Docs → *Using the SDK on a server* (chapter 32) and *User admin API (server-side)* (chapter 33) before changing a backend. A backend usually needs **two clients**: one with the secret key (service role, `eb.auth.admin`), one with the public key for acting as users.
 
 | supabase-js on a server | @eurobase/sdk |
 |---|---|
-| `createClient(url, serviceRoleKey, { auth: { persistSession: false } })` | `createClient({ url, apiKey: process.env.EB_SECRET_KEY, projectId, auth: { persistSession: false, autoRefreshToken: false } })` — one per process, never signed in |
-| `createClient(url, anonKey, { global: { headers: { Authorization: 'Bearer ' + jwt } } })` (act as the user, RLS applies) | `eb.withAccessToken(jwt)` — per request |
-| `auth.getUser(jwt)` (check a caller's token) | `eb.auth.verifyAccessToken(jwt)` (local, against the project's JWKS) or `eb.auth.getUser(jwt)` (asks the server) |
-| `auth.signInWithPassword` / `signUp` / `refreshSession({ refresh_token })` proxied for a client | the same calls on a client with `persistSession: false`; return the session to the client |
-| `auth.admin.createUser` / `deleteUser` / `getUserById` / `listUsers` / `updateUserById` | `eb.auth.admin.createUser` / `deleteUser` / `getUserById` / `listUsers` / `updateUserById` — secret key only |
-| `auth.admin.signOut(jwt)` / banning a user | `eb.auth.admin.signOutUser(id)` / `suspendUser(id)` (access tokens already issued stay valid until they expire) |
+| `createClient(url, serviceRoleKey, { auth: { persistSession: false } })` | `admin = createClient({ url, apiKey: process.env.EB_SECRET_KEY, projectId, auth: { persistSession: false } })` — one per process, never signed in; runs as the service role |
+| `createClient(url, anonKey, { global: { headers: { Authorization: 'Bearer ' + jwt } } })` (act as the user, RLS applies) | `eb = createClient({ url, apiKey: process.env.EB_PUBLIC_KEY, projectId, auth: { persistSession: false } })` once, then `eb.withAccessToken(jwt)` per request (it refuses a secret-key client) |
+| `auth.getUser(jwt)` (check a caller's token) | `eb.auth.getUser(jwt)` — like-for-like: asks the server, so it notices deleted and suspended users; `eb.auth.verifyAccessToken(jwt)` is the fast local check (signature and expiry only) |
+| `auth.signInWithPassword` / `signUp` / `refreshSession({ refresh_token })` proxied for a client | `signIn` / `signUp` / `refreshSession(refreshToken)` on the public-key client with `persistSession: false`; return the session to the client |
+| `auth.admin.createUser({ email, password, email_confirm, user_metadata })` | `admin.auth.admin.createUser({ email, password, emailConfirmed, metadata, displayName })` — **`emailConfirmed` defaults to true** (Supabase: false) |
+| `auth.admin.listUsers()` / `getUserById(id)` / `deleteUser(id)` | `admin.auth.admin.listUsers({ page, perPage, search })` → `{ users, total }` / `getUserById(id)` / `deleteUser(id)` |
+| `auth.admin.updateUserById(id, { email, user_metadata })` | `admin.auth.admin.updateUserById(id, { email, metadata, displayName, emailConfirmed })` — `metadata` replaces the whole object |
+| `auth.admin.updateUserById(id, { password })` | `admin.auth.admin.setPassword(id, password)` |
+| `auth.admin.signOut(jwt)` / `updateUserById(id, { ban_duration })` | `admin.auth.admin.signOutUser(id)` / `suspendUser(id)` (access tokens already issued stay valid until they expire) |
 | `auth.exchangeCodeForSession(code)` (server-side OAuth) | not available — OAuth sign-in finishes in the browser (`handleOAuthCallback`); send the session to the backend from there |
 | `auth.admin.generateLink`, `inviteUserByEmail` | not available — `createUser` + `eb.auth.forgotPassword(email)` sends a set-password link |
 
