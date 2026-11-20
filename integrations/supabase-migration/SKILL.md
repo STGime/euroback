@@ -15,7 +15,7 @@ The developer's Supabase project keeps running throughout. Nothing here writes t
 2. **Migrate into a fresh Eurobase project first** — a test project. Only after it checks out, do the same into the project that goes live (or keep the test project).
 3. **Secrets never enter chat, code or commits.** The Supabase database URL contains a password, and the service role key is an admin key. Ask the developer to put them in environment variables in *their* terminal (or a `.env` that git ignores), and refer to them by name. If one is pasted into the conversation, tell the developer to rotate it after the migration. Never print them, never write them into files you create.
 4. **Stop and ask at every decision point below** (marked **Decision**). Don't pick for the developer, and don't pass `--accept-access-changes`, `--deploy`, `--apply` or `--enable` on your own, and never run `eurobase keys rotate-secret` or `regenerate` yourself.
-5. **Copying real users or real data is a decision** too: a test project then holds personal data. Say so, and offer `--exclude-table` to leave large or sensitive tables out of a first test. Copied rows can also hold the app's own credentials — social-login tokens the app encrypted, API token hashes, OAuth `code_verifier`s — mention them. Look at generated data files by their column lists only (`grep -o 'INSERT INTO [^(]*([^)]*)'`), never print rows.
+5. **Copying real users or real data is a decision** too: a test project then holds personal data. Say so, and offer `--exclude-table` to leave large or sensitive tables out of a first test. Copied rows can also hold the app's own credentials — social-login tokens the app encrypted, API token hashes, OAuth `code_verifier`s — mention them. Look at generated data files by their column lists only (`grep -oh 'INSERT INTO [^(]*([^)]*)' *.sql | sort -u`), never print rows.
 6. **Report what each command printed** — especially its "Read before applying" / "needs changes" lists. They are the migration's to-do list.
 
 ## Before you start
@@ -39,7 +39,7 @@ mkdir migration && cd migration
 
 `eurobase migrations up` applies `./migrations` of the current folder, and many apps already have a `migrations/` folder of their own — run from the root, the import would land next to the app's migrations and apply them too. From `migration/`, point at the app's files with `../`: `--functions-dir ../supabase/functions`, `--input ../supabase/functions`. Generated files contain user data from Step 3 on; make sure `migration/` isn't committed (add it to `.gitignore`).
 
-**Plan:** Free projects allow 50 edge functions, Pro 500, Team unlimited; database, file storage and user limits: `eurobase status` (or console → Usage). Compare with what Step 1 reports before going further.
+**Plan:** Free projects allow 50 edge functions, Pro 500, Team unlimited; database, file storage and monthly-active-user limits: `eurobase status` (or console → Usage). Compare with what Step 1 reports before going further.
 
 ## Step 1 — Assess (read-only)
 
@@ -49,12 +49,12 @@ eurobase import supabase assess --functions-dir ../supabase/functions --output a
 
 It writes a Markdown report: tables, policies, functions, triggers, extensions, users, buckets, edge functions — each graded ✅ / ⚠️ / ❌. The same object can appear in several sections; summarise by object, not by line. Summarise it for the developer: the blockers first, then the warnings, then the size (rows, users, files) against the plan. Typical findings and what they mean:
 
-- **SECURITY DEFINER functions** (❌ in the report) — the schema step converts them for you; ❌ means "review", not "refused". They become normal functions running with the caller's rights. Anything the app calls that relied on the owner's rights must move to server code (an edge function with `ctx.db.asService()`, or the secret key from a backend), or be closed to app users with the guard in Step 2.
+- **SECURITY DEFINER functions** (❌ in the report) — the schema step converts them for you (a translator warning; an access change to accept where a policy, trigger, default or view calls one); ❌ means "review", not "refused". They become normal functions running with the caller's rights. Anything the app calls that relied on the owner's rights must move to server code (an edge function with `ctx.db.asService()`, or the secret key from a backend), or be closed to app users with the guard in Step 2.
 - **Triggers on `auth.users`** (e.g. `handle_new_user` creating a profile) — Eurobase has no such trigger point. That work moves into the sign-up code or an edge function.
 - **GRANT / REVOKE restrictions** (a column hidden from `anon`) — not carried over; a view doesn't hide columns on Eurobase. Restricted columns move to their own table with stricter policies, or behind an edge function.
 - **Owner-run views** — become `security_invoker` views (they apply RLS for the caller).
 - **Extensions** not available — listed with what to use instead.
-- **Database webhooks** (`pg_net` / `supabase_functions.http_request` triggers, e.g. on `auth.users`) — their definitions can contain secret URLs (a Slack incoming webhook, a token in a query string). Don't print the URL; say where it points by host — read only the host: `SELECT tgrelid::regclass, tgname, substring(encode(tgargs, 'escape') from 'https?://([^/]+)') FROM pg_trigger WHERE NOT tgisinternal AND encode(tgargs, 'escape') LIKE '%http%'`. They become Eurobase webhooks (console → Webhooks) or code; a Slack incoming webhook expects Slack's own payload, so that one becomes code.
+- **Database webhooks** (`pg_net` / `supabase_functions.http_request` triggers, e.g. on `auth.users`) — their definitions can contain secret URLs (a Slack incoming webhook, a token in a query string). Don't print the URL; say where it points by host — read only the host: `SELECT tgrelid::regclass, tgname, substring(encode(tgargs, 'escape') from 'https?://(?:[^/?#@\\]*@)?([^/?#:\\]+)') FROM pg_trigger WHERE NOT tgisinternal AND encode(tgargs, 'escape') LIKE '%http%'`. They become Eurobase webhooks (console → Webhooks) or code; a Slack incoming webhook expects Slack's own payload, so that one becomes code.
 
 Also look at the app itself — the report covers the database, not the code:
 
@@ -73,7 +73,7 @@ If access rules can't be carried over, it refuses to write and lists them. **Dec
 Before asking, work out for each item what it means in practice (read-only queries on Supabase are fine; `pg_policies` shows each table's policies readably):
 
 - **A revoked EXECUTE** (`anon` / `authenticated` couldn't call a function): on Eurobase any app caller could call it with `eb.db.rpc`. Who calls it in the code — the browser, or a backend with the service role key? What does it write, and do that table's policies stop an app user anyway (RLS on, no policy = nobody but the service role)?
-- **SECURITY DEFINER → invoker**: what did it need the owner's rights for? A trigger fired by service-role writes keeps working; one fired by app users' writes now writes with their rights.
+- **SECURITY DEFINER → invoker** (listed where a policy, trigger, default or view calls a former definer; check the translator warnings for the rest, e.g. functions only called with `rpc`): what did it need the owner's rights for? A trigger fired by service-role writes keeps working; one fired by app users' writes now writes with their rights.
 - Offer the guard below for every function only the server should call.
 
 **Guard: functions only the secret key may call.** Write a migration after the schema with `CREATE OR REPLACE` of each such function, body unchanged, plus a check at the start:
@@ -267,7 +267,7 @@ A browser client holds one signed-in user. On a server, never share a signed-in 
 | `auth.admin.listUsers()` / `getUserById(id)` / `deleteUser(id)` | `admin.auth.admin.listUsers({ page, perPage, search })` → `{ users, total }` / `getUserById(id)` / `deleteUser(id)` |
 | `auth.admin.updateUserById(id, { email, user_metadata })` | `admin.auth.admin.updateUserById(id, { email, metadata, displayName, emailConfirmed })` — `metadata` replaces the whole object |
 | `auth.admin.updateUserById(id, { password })` | `admin.auth.admin.setPassword(id, password)` |
-| `auth.admin.signOut(jwt)` / `updateUserById(id, { ban_duration })` | `admin.auth.admin.signOutUser(id)` — signs out every session, not only one / `suspendUser(id)` (access tokens already issued stay valid until they expire) |
+| `auth.admin.signOut(jwt)` / `updateUserById(id, { ban_duration })` | `admin.auth.admin.signOutUser(id)` — ends every session, not only one / `suspendUser(id)`. Both revoke refresh tokens; access tokens already issued stay valid until they expire |
 | `auth.exchangeCodeForSession(code)` (server-side OAuth) | not available — OAuth sign-in finishes in the browser (`handleOAuthCallback`); send the session to the backend from there |
 | `auth.admin.generateLink`, `inviteUserByEmail` | not available — `createUser` + `eb.auth.forgotPassword(email)` sends a set-password link |
 

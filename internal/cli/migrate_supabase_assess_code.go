@@ -329,9 +329,11 @@ func gradeFunctions(fns []sbFunction) []item {
 		qualified := f.Schema + "." + f.Name
 		switch {
 		case f.SecDef:
-			note := "SECURITY DEFINER: it runs with its owner's rights and skips RLS. The `schema` step converts it into a normal (SECURITY INVOKER) function that runs with the caller's rights, as one of the access changes you accept. Review what it needs the owner's rights for: grant that with RLS policies, move the work into server code that uses your secret key or into an edge function, or close the function to app users with an is_service_role() check"
+			note := "SECURITY DEFINER: it runs with its owner's rights and skips RLS"
 			if f.Schema != "public" {
-				note += fmt.Sprintf(". It is also in schema %s, which the `schema` step doesn't copy; policies or triggers that call it fail on import", ident(f.Schema))
+				note += fmt.Sprintf(". It is in schema %s, which the `schema` step doesn't copy; policies or triggers that call it fail on import — recreate it in public as a normal (SECURITY INVOKER) function", ident(f.Schema))
+			} else {
+				note += ". The `schema` step converts it into a normal (SECURITY INVOKER) function that runs with the caller's rights and says so in its warnings; where a policy, trigger, default or view calls it, that's an access change you accept. Review what it needs the owner's rights for: grant that with RLS policies, move the work into server code that uses your secret key or into an edge function, or close the function to app users with an is_service_role() check"
 			}
 			out = append(out, item{name: "function: " + qualified, grade: gradeBlocker, note: note})
 		case f.Schema != "public":
