@@ -188,7 +188,7 @@ func (h *SupportHandler) HandleSubmitSupportRequest() http.HandlerFunc {
 		// Team user could probe UUIDs (200 vs 500) or spam ops with
 		// unrelated org/project ids attached to their ticket. Null out
 		// on any negative — the ticket still submits, just without
-		// the context line in the Discord embed.
+		// the org / project shown in Admin → Inbox.
 		if body.OrgID != nil && *body.OrgID != "" {
 			isMember, err := userIsOrgMember(r.Context(), h.Pool, userID, *body.OrgID)
 			if err != nil {

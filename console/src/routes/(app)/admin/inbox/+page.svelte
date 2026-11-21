@@ -2,7 +2,7 @@
 	import { api, type InboxItem } from '$lib/api.js';
 
 	// Superadmin inbox: Team-tier support tickets and contact / Team-beta
-	// requests, in full (Discord only shows a preview). Mark a message
+	// requests, in full (Discord only says that one arrived). Mark a message
 	// resolved with a short note once it's handled; reopen if needed.
 	type Status = 'open' | 'resolved' | 'all';
 

@@ -14,9 +14,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -71,13 +73,13 @@ func notifySignupAsync(totalSignups int64) {
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordSignupWebhookURL, bytes.NewReader(body))
 		if err != nil {
-			slog.Warn("Discord signup notify: build request failed", "error", err)
+			slog.Warn("Discord signup notify: build request failed") // the error would contain the URL
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			slog.Warn("Discord signup notify: request failed", "error", err)
+			slog.Warn("Discord signup notify: request failed", "error", webhookErr(err))
 			return
 		}
 		_ = resp.Body.Close()
@@ -85,4 +87,15 @@ func notifySignupAsync(totalSignups int64) {
 			slog.Warn("Discord signup notify: non-2xx response", "status", resp.StatusCode)
 		}
 	}()
+}
+
+// webhookErr drops the request URL from an HTTP client error: Go formats
+// it as `Post "<url>": <cause>`, and a Discord webhook URL contains its
+// secret token. Only the cause is logged.
+func webhookErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
