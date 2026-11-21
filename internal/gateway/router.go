@@ -949,6 +949,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Delete("/projects/{id}/suspend", tenant.AdminUnsuspendProject(pool))
 			if developerPool != nil {
 				r.Get("/sql-log", sqllog.HandleAdminLog(developerPool))
+				// Support tickets and contact / Team-beta requests, in full
+				// (both tables are developer-pool only).
+				r.Get("/inbox", tenant.AdminListInbox(developerPool))
+				r.Post("/inbox/{kind}/{id}/resolve", tenant.AdminResolveInboxItem(developerPool))
+				r.Delete("/inbox/{kind}/{id}/resolve", tenant.AdminReopenInboxItem(developerPool))
 			}
 			r.Get("/allowlist", tenant.AdminListAllowlist(pool))
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))

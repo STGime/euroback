@@ -159,6 +159,27 @@ export interface EmailLogEntry {
 	detail?: string;
 }
 
+/** A message in the admin inbox (support ticket or contact request). */
+export interface InboxItem {
+	kind: 'support' | 'contact';
+	id: string;
+	created_at: string;
+	email: string;
+	name?: string;
+	subject?: string;
+	message: string;
+	category?: string;
+	priority?: string;
+	/** contact requests: where it came from (marketing_site, team_beta_request, …) */
+	source?: string;
+	project_id?: string;
+	project_slug?: string;
+	org_id?: string;
+	resolved_at?: string;
+	resolved_by_email?: string;
+	resolution_note?: string;
+}
+
 /** One SQL statement sent through the platform
  * (GET /platform/projects/{id}/sql-log, admin): the console SQL editor,
  * MCP / CLI with a token, function bodies, custom policies, migrations. */
@@ -2588,6 +2609,22 @@ export class EurobaseAPI {
 		if (opts.before) q.set('before', String(opts.before));
 		q.set('limit', String(opts.limit ?? 100));
 		return this.fetch<SqlLogResponse>(`/platform/admin/sql-log?${q}`);
+	}
+
+	/** Support tickets and contact / Team-beta requests, in full. Superadmin only. */
+	async adminInbox(status: 'open' | 'resolved' | 'all' = 'open'): Promise<{ items: InboxItem[]; open: number; limit: number }> {
+		return this.fetch<{ items: InboxItem[]; open: number; limit: number }>(`/platform/admin/inbox?status=${status}`);
+	}
+
+	async adminResolveInboxItem(kind: InboxItem['kind'], id: string, note: string): Promise<{ resolved_at: string }> {
+		return this.fetch<{ resolved_at: string }>(
+			`/platform/admin/inbox/${kind}/${encodeURIComponent(id)}/resolve`,
+			{ method: 'POST', body: JSON.stringify({ note }) }
+		);
+	}
+
+	async adminReopenInboxItem(kind: InboxItem['kind'], id: string): Promise<void> {
+		await this.fetch(`/platform/admin/inbox/${kind}/${encodeURIComponent(id)}/resolve`, { method: 'DELETE' });
 	}
 
 	async adminListAllProjects(): Promise<{ projects: AdminProject[]; total: number }> {
