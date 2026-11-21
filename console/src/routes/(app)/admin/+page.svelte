@@ -709,6 +709,9 @@
 			</p>
 		</div>
 		<nav class="text-sm space-x-3">
+			<a href="/admin/inbox" class="text-blue-600 hover:underline">
+				Inbox →
+			</a>
 			<a href="/admin/upgrades" class="text-blue-600 hover:underline">
 				Team-tier upgrades →
 			</a>

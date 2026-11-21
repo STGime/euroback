@@ -73,10 +73,10 @@ func notifySupportAsync(email, subject, message, category, priority string, orgI
 			"embeds": []map[string]any{{
 				"title": fmt.Sprintf("%s Team-tier support: %s", badge, subject),
 				"description": fmt.Sprintf(
-					"**From:** `%s`\n**Category:** %s · **Priority:** %s%s\n\n%s",
+					"**From:** `%s`\n**Category:** %s · **Priority:** %s%s\n\n%s\n\n[Read and handle it in the console → Admin → Inbox](https://console.eurobase.app/admin/inbox)",
 					email, category, priority, contextLine, preview,
 				),
-				"url":       "https://console.eurobase.app/admin",
+				"url":       "https://console.eurobase.app/admin/inbox",
 				"color":     colour,
 				"timestamp": time.Now().UTC().Format(time.RFC3339),
 			}},

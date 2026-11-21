@@ -69,7 +69,7 @@ func notifyContactAsync(name, email, message string) {
 			"embeds": []map[string]any{{
 				"title":       "✉️ New contact-form message",
 				"description": fmt.Sprintf("**From:** %s <`%s`>\n\n%s", displayName, email, preview),
-				"url":         "https://console.eurobase.app/admin",
+				"url":         "https://console.eurobase.app/admin/inbox",
 				"color":       0x3b82f6, // blue-500
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
 			}},
@@ -125,7 +125,7 @@ func notifyTeamBetaRequestAsync(name, email, message string) {
 			"embeds": []map[string]any{{
 				"title":       "🎯 Team-tier beta access request",
 				"description": fmt.Sprintf("**From:** %s <`%s`>\n\n%s", displayName, email, preview),
-				"url":         "https://console.eurobase.app/admin",
+				"url":         "https://console.eurobase.app/admin/inbox",
 				"color":       0x10b981, // emerald-500 — distinct from contact-form blue
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
 			}},
