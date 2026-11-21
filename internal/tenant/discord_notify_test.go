@@ -9,9 +9,29 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// lockedBuffer is a bytes.Buffer safe to write from the notifier's
+// goroutine while the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // captureWebhook starts a server that hands each request body to a channel.
 func captureWebhook(t *testing.T) (*httptest.Server, chan string) {
@@ -69,7 +89,7 @@ func TestDiscordNoticesCarryNoContent(t *testing.T) {
 
 // A failed request must not log the webhook URL (it holds the token).
 func TestDiscordNoticeErrorLogsNoURL(t *testing.T) {
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
