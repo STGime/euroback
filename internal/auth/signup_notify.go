@@ -14,9 +14,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -41,7 +43,10 @@ func SetDiscordSignupsWebhook(url string) {
 // totalSignups is a cheap COUNT(*) the caller passes in — computed
 // once inside the caller's tx so we avoid a second DB roundtrip on
 // the hot signup path.
-func notifySignupAsync(email string, totalSignups int64) {
+//
+// The ping carries no e-mail address or other personal data (Discord is a
+// US service) — only the running total; who signed up is in /admin.
+func notifySignupAsync(totalSignups int64) {
 	if discordSignupWebhookURL == "" {
 		return
 	}
@@ -55,7 +60,7 @@ func notifySignupAsync(email string, totalSignups int64) {
 		payload := map[string]any{
 			"embeds": []map[string]any{{
 				"title":       "🎉 New signup",
-				"description": fmt.Sprintf("`%s` just signed up.\n\n**Total signups:** %d", email, totalSignups),
+				"description": fmt.Sprintf("Someone just signed up.\n\n**Total signups:** %d — see Admin → Signup users", totalSignups),
 				"url":         "https://console.eurobase.app/admin",
 				"color":       0x10b981, // emerald-500
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
@@ -68,13 +73,13 @@ func notifySignupAsync(email string, totalSignups int64) {
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordSignupWebhookURL, bytes.NewReader(body))
 		if err != nil {
-			slog.Warn("Discord signup notify: build request failed", "error", err)
+			slog.Warn("Discord signup notify: build request failed") // the error would contain the URL
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			slog.Warn("Discord signup notify: request failed", "error", err)
+			slog.Warn("Discord signup notify: request failed", "error", webhookErr(err))
 			return
 		}
 		_ = resp.Body.Close()
@@ -82,4 +87,15 @@ func notifySignupAsync(email string, totalSignups int64) {
 			slog.Warn("Discord signup notify: non-2xx response", "status", resp.StatusCode)
 		}
 	}()
+}
+
+// webhookErr drops the request URL from an HTTP client error: Go formats
+// it as `Post "<url>": <cause>`, and a Discord webhook URL contains its
+// secret token. Only the cause is logged.
+func webhookErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }

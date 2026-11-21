@@ -397,7 +397,7 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 
 	// Fire-and-forget Discord ping (goroutine inside notifySignupAsync).
 	// No-op when DISCORD_SIGNUPS_WEBHOOK is unset.
-	notifySignupAsync(user.Email, totalSignups)
+	notifySignupAsync(totalSignups)
 
 	// Verification required: send the confirmation email and return WITHOUT
 	// a session. SignIn is hard-blocked until the link is clicked, so

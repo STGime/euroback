@@ -10,8 +10,10 @@ import (
 	"strconv"
 	"time"
 
+	"errors"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"net/url"
 )
 
 func listOptions(r *http.Request) (ListOptions, bool) {
@@ -113,7 +115,7 @@ func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, c
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			slog.Warn("sql log: Discord alert failed", "error", err)
+			slog.Warn("sql log: Discord alert failed", "error", webhookErr(err))
 			return
 		}
 		_ = resp.Body.Close()
@@ -121,4 +123,15 @@ func DiscordRefusalAlert(webhookURL, consoleURL string) func(projectID string, c
 			slog.Warn("sql log: Discord alert rejected", "status", resp.StatusCode)
 		}
 	}
+}
+
+// webhookErr drops the request URL from an HTTP client error: Go formats
+// it as `Post "<url>": <cause>`, and a Discord webhook URL contains its
+// secret token. Only the cause is logged.
+func webhookErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }

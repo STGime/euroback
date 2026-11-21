@@ -3,8 +3,9 @@ package tenant
 // Admin inbox: the messages people send us through the console — Team-tier
 // support tickets (public.support_requests) and contact / Team-beta requests
 // (public.contact_requests) — listed in full for superadmins, who mark them
-// resolved (with a note) or reopen them. The Discord notices only carry a
-// preview; this is where a message is read and handled.
+// resolved (with a note) or reopen them. The Discord notices only say that
+// a message arrived (no sender, no content); this is where it's read and
+// handled.
 //
 // Both tables are revoked from eurobase_gateway (000112, 000115), so these
 // handlers run on the developer pool.

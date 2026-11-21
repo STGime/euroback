@@ -166,7 +166,7 @@ func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimit
 			return
 		}
 
-		notifyContactAsync(req.Name, req.Email, req.Message)
+		notifyContactAsync()
 
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"id":%q,"status":"received"}`, id)

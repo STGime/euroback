@@ -116,20 +116,14 @@ func HandleTeamBetaRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) h
 			slog.Warn("team-beta request: rate limiter unavailable, request allowed unrated", "path", r.URL.Path)
 		}
 
-		// Best-effort display name: pull it from platform_users so
-		// the Discord embed reads well ("Alice <a@…>"). Not fatal if
-		// it's missing.
+		// Best-effort display name, stored with the request (shown in
+		// Admin → Inbox). Not fatal if it's missing.
 		var displayName *string
 		_ = pool.QueryRow(r.Context(), `
 			SELECT NULLIF(TRIM(display_name), '')
 			  FROM public.platform_users
 			 WHERE id = $1::uuid
 		`, claims.Subject).Scan(&displayName)
-		nameStr := ""
-		if displayName != nil {
-			nameStr = *displayName
-		}
-
 		userAgent := truncateRunes(r.Header.Get("User-Agent"), 500)
 		var userAgentPtr *string
 		if userAgent != "" {
@@ -158,7 +152,7 @@ func HandleTeamBetaRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimiter) h
 			return
 		}
 
-		notifyTeamBetaRequestAsync(nameStr, email, req.Message)
+		notifyTeamBetaRequestAsync()
 
 		slog.Info("team-beta access request received",
 			"user_id", claims.Subject,
