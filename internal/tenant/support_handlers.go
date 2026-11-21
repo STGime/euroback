@@ -226,7 +226,7 @@ func (h *SupportHandler) HandleSubmitSupportRequest() http.HandlerFunc {
 			return
 		}
 
-		notifySupportAsync(email, body.Subject, body.Message, body.Category, body.Priority, body.OrgID, body.ProjectID)
+		notifySupportAsync(body.Category, body.Priority)
 
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"id":%q,"status":"received"}`, id)

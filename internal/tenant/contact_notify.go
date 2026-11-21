@@ -1,8 +1,9 @@
 package tenant
 
 // Discord contact-form notifications — real-time ping when someone
-// submits the marketing-site contact widget, so a superadmin can
-// respond without refreshing /admin/contact-requests.
+// submits the marketing-site contact widget or asks for Team-beta access.
+// The ping carries no name, e-mail or message (Discord is a US service);
+// the message is read in Admin → Inbox.
 //
 // Same fire-and-forget shape as internal/auth/signup_notify.go —
 // missing webhook URL = silent no-op, failed delivery logs a warning
@@ -10,14 +11,7 @@ package tenant
 // contact-form response is not.
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
-	"net/http"
-	"time"
-	"unicode/utf8"
 )
 
 // discordContactWebhookURL is set by cmd/gateway/main.go from the
@@ -33,122 +27,29 @@ func SetDiscordContactWebhook(url string) {
 	}
 }
 
-// notifyContactAsync fires a Discord webhook in a goroutine so the
-// contact-form response is never blocked on Discord's availability.
-// message is truncated to 500 characters in the embed so a
-// well-formed request can't flood the channel.
-func notifyContactAsync(name, email, message string) {
+// notifyContactAsync pings Discord that a contact-form message arrived.
+func notifyContactAsync() {
 	if discordContactWebhookURL == "" {
 		return
 	}
-	go func() {
-		// Independent short-timeout ctx — parent request ctx is
-		// gone once the response ships, and we shouldn't tie the
-		// webhook lifetime to the request's cancellation anyway.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		// Truncate message for the embed preview — full body lives
-		// in the DB. Keeping the Discord channel readable when
-		// someone pastes 5,000 characters is worth the trade. Cut
-		// on rune boundary (not byte) so a multibyte codepoint at
-		// the boundary doesn't produce invalid UTF-8, which Discord
-		// rejects with 400.
-		const previewMax = 500
-		preview := message
-		if utf8.RuneCountInString(preview) > previewMax {
-			preview = string([]rune(preview)[:previewMax]) + "…"
-		}
-
-		displayName := name
-		if displayName == "" {
-			displayName = "(no name)"
-		}
-
-		payload := map[string]any{
-			"embeds": []map[string]any{{
-				"title":       "✉️ New contact-form message",
-				"description": fmt.Sprintf("**From:** %s <`%s`>\n\n%s", displayName, email, preview),
-				"url":         "https://console.eurobase.app/admin/inbox",
-				"color":       0x3b82f6, // blue-500
-				"timestamp":   time.Now().UTC().Format(time.RFC3339),
-			}},
-		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			slog.Warn("Discord contact notify: marshal failed", "error", err)
-			return
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordContactWebhookURL, bytes.NewReader(body))
-		if err != nil {
-			slog.Warn("Discord contact notify: build request failed", "error", err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			slog.Warn("Discord contact notify: request failed", "error", err)
-			return
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			slog.Warn("Discord contact notify: non-2xx response", "status", resp.StatusCode)
-		}
-	}()
+	postDiscordAsync(discordContactWebhookURL, "contact", map[string]any{
+		"title":       "✉️ New contact-form message",
+		"description": "[Read it in Admin → Inbox](" + inboxURL + ")",
+		"url":         inboxURL,
+		"color":       0x3b82f6, // blue-500
+	})
 }
 
-// notifyTeamBetaRequestAsync fires the same Discord webhook as
-// notifyContactAsync but with a distinct title + colour so ops can
-// spot a beta-access request in the channel without opening
-// /admin/contact-requests. Same fire-and-forget contract: missing URL
-// = no-op, failure logs and is swallowed.
-func notifyTeamBetaRequestAsync(name, email, message string) {
+// notifyTeamBetaRequestAsync pings Discord that someone asked for Team
+// beta access (same webhook, its own title and colour).
+func notifyTeamBetaRequestAsync() {
 	if discordContactWebhookURL == "" {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		const previewMax = 500
-		preview := message
-		if utf8.RuneCountInString(preview) > previewMax {
-			preview = string([]rune(preview)[:previewMax]) + "…"
-		}
-
-		displayName := name
-		if displayName == "" {
-			displayName = "(no name)"
-		}
-
-		payload := map[string]any{
-			"embeds": []map[string]any{{
-				"title":       "🎯 Team-tier beta access request",
-				"description": fmt.Sprintf("**From:** %s <`%s`>\n\n%s", displayName, email, preview),
-				"url":         "https://console.eurobase.app/admin/inbox",
-				"color":       0x10b981, // emerald-500 — distinct from contact-form blue
-				"timestamp":   time.Now().UTC().Format(time.RFC3339),
-			}},
-		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			slog.Warn("Discord team-beta notify: marshal failed", "error", err)
-			return
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordContactWebhookURL, bytes.NewReader(body))
-		if err != nil {
-			slog.Warn("Discord team-beta notify: build request failed", "error", err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			slog.Warn("Discord team-beta notify: request failed", "error", err)
-			return
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			slog.Warn("Discord team-beta notify: non-2xx response", "status", resp.StatusCode)
-		}
-	}()
+	postDiscordAsync(discordContactWebhookURL, "team beta request", map[string]any{
+		"title":       "🎯 Team-tier beta access request",
+		"description": "[Read it in Admin → Inbox](" + inboxURL + ")",
+		"url":         inboxURL,
+		"color":       0x10b981, // emerald-500, distinct from the contact-form blue
+	})
 }
