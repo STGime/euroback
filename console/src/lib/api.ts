@@ -159,9 +159,6 @@ export interface EmailLogEntry {
 	detail?: string;
 }
 
-/** One SQL statement sent through the platform
- * (GET /platform/projects/{id}/sql-log, admin): the console SQL editor,
- * MCP / CLI with a token, function bodies, custom policies, migrations. */
 /** A message in the admin inbox (support ticket or contact request). */
 export interface InboxItem {
 	kind: 'support' | 'contact';
@@ -183,6 +180,9 @@ export interface InboxItem {
 	resolution_note?: string;
 }
 
+/** One SQL statement sent through the platform
+ * (GET /platform/projects/{id}/sql-log, admin): the console SQL editor,
+ * MCP / CLI with a token, function bodies, custom policies, migrations. */
 export interface SqlLogEntry {
 	id: number;
 	project_id?: string;
@@ -2612,8 +2612,8 @@ export class EurobaseAPI {
 	}
 
 	/** Support tickets and contact / Team-beta requests, in full. Superadmin only. */
-	async adminInbox(status: 'open' | 'resolved' | 'all' = 'open'): Promise<{ items: InboxItem[]; open: number }> {
-		return this.fetch<{ items: InboxItem[]; open: number }>(`/platform/admin/inbox?status=${status}`);
+	async adminInbox(status: 'open' | 'resolved' | 'all' = 'open'): Promise<{ items: InboxItem[]; open: number; limit: number }> {
+		return this.fetch<{ items: InboxItem[]; open: number; limit: number }>(`/platform/admin/inbox?status=${status}`);
 	}
 
 	async adminResolveInboxItem(kind: InboxItem['kind'], id: string, note: string): Promise<{ resolved_at: string }> {

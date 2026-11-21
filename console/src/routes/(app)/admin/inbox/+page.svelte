@@ -9,6 +9,7 @@
 	let status = $state<Status>('open');
 	let items: InboxItem[] = $state([]);
 	let openCount = $state(0);
+	let limit = $state(200);
 	let loading = $state(true);
 	let error: string | null = $state(null);
 	let notes = $state<Record<string, string>>({});
@@ -17,15 +18,18 @@
 
 	const key = (it: InboxItem) => `${it.kind}:${it.id}`;
 
-	async function load() {
+	// The spinner only on a fresh load (filter change); after resolve /
+	// reopen the list refreshes in place, keeping scroll position and notes.
+	async function load(quiet = false) {
 		const seq = ++requestSeq;
-		loading = true;
+		if (!quiet) loading = true;
 		error = null;
 		try {
 			const resp = await api.adminInbox(status);
 			if (seq !== requestSeq) return;
 			items = resp.items;
 			openCount = resp.open;
+			limit = resp.limit;
 		} catch (e) {
 			if (seq !== requestSeq) return;
 			error = e instanceof Error ? e.message : 'Failed to load the inbox';
@@ -44,7 +48,7 @@
 		error = null;
 		try {
 			await api.adminResolveInboxItem(it.kind, it.id, (notes[key(it)] ?? '').trim());
-			await load();
+			await load(true);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to update the message';
 		} finally {
@@ -57,7 +61,7 @@
 		error = null;
 		try {
 			await api.adminReopenInboxItem(it.kind, it.id);
-			await load();
+			await load(true);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to update the message';
 		} finally {
@@ -87,7 +91,8 @@
 			<a href="/admin" class="text-sm text-blue-600 hover:underline">← Platform Admin</a>
 			<h1 class="mt-1 text-2xl font-semibold text-gray-900">Inbox</h1>
 			<p class="text-sm text-gray-500 mt-1">
-				Team-tier support tickets and contact / Team-beta requests, in full. {openCount} open.
+				Team-tier support tickets and contact / Team-beta requests, in full. {openCount} open{#if items.length >= limit}
+					· showing the newest {items.length}{/if}.
 			</p>
 		</div>
 		<div class="flex rounded-lg border border-gray-200 bg-white text-sm" role="tablist" aria-label="Filter">
@@ -170,7 +175,7 @@
 								<input
 									type="text"
 									maxlength="2000"
-									placeholder="Note (optional), e.g. answered by email"
+									placeholder={it.resolution_note ? 'Keep the note above, or write a new one' : 'Note (optional), e.g. answered by email'}
 									bind:value={notes[key(it)]}
 									class="w-full rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-800 focus:border-eurobase-500 focus:outline-none"
 								/>

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/go-chi/chi/v5"
@@ -126,7 +127,8 @@ func AdminListInbox(pool *pgxpool.Pool) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "failed to load the inbox")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "open": open})
+		w.Header().Set("Cache-Control", "no-store") // personal data
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "open": open, "limit": limit})
 	}
 }
 
@@ -151,7 +153,9 @@ func inboxTable(kind string) (string, bool) {
 const inboxNoteMax = 2000
 
 // AdminResolveInboxItem serves POST /platform/admin/inbox/{kind}/{id}/resolve
-// with an optional {"note": "..."}: marks the message handled. Audited.
+// with an optional {"note": "..."}: marks the message handled. Without a
+// note an earlier one is kept (a message reopened and resolved again).
+// Audited.
 func AdminResolveInboxItem(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		table, id, ok := inboxTarget(w, r)
@@ -168,7 +172,7 @@ func AdminResolveInboxItem(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		if len(body.Note) > inboxNoteMax {
+		if utf8.RuneCountInString(body.Note) > inboxNoteMax {
 			writeJSONError(w, http.StatusBadRequest, "note is too long (2000 characters at most)")
 			return
 		}
@@ -183,7 +187,8 @@ func AdminResolveInboxItem(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var resolvedAt time.Time
 		err := pool.QueryRow(r.Context(),
-			`UPDATE `+table+` SET resolved_at = now(), resolved_by = $2, resolution_note = $3
+			`UPDATE `+table+` SET resolved_at = now(), resolved_by = $2,
+			        resolution_note = COALESCE($3, resolution_note)
 			  WHERE id = $1 RETURNING resolved_at`, id, resolvedBy, note).Scan(&resolvedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSONError(w, http.StatusNotFound, "message not found")
