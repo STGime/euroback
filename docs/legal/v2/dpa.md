@@ -96,8 +96,11 @@ If we ever propose a non-EU transfer outside this scope, we will use a transfer 
 On Customer's reasonable written request, and not more than once per year, Eurobase will:
 
 - Provide our latest TOMs documentation, security certifications, and pen-test summaries;
-- Answer reasonable written questions about our compliance with this DPA;
-- For Enterprise customers (where applicable), allow an on-site audit by Customer or an independent auditor under confidentiality and at Customer's expense, with at least 30 days' notice and at a time that minimises disruption.
+- Answer reasonable written questions about our compliance with this DPA.
+
+Where that information is not sufficient to demonstrate compliance, or where a supervisory authority requires it, Eurobase will allow an audit of its own systems, processes and records by Customer or an independent auditor bound by confidentiality, at Customer's expense and with at least 30 days' notice. Such audits are carried out remotely or by document review wherever possible. The once-per-year limit does not apply to audits required by a supervisory authority or following a personal-data breach affecting Customer Data.
+
+Eurobase operates no data centres or server rooms of its own: the physical infrastructure is operated by our hosting sub-processor and covered by its certifications and audit reports (Annex 3).
 
 We pre-empt some of this by making sub-processor information, the live compliance report, and the breach runbook available on demand.
 
