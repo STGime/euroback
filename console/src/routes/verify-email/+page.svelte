@@ -95,6 +95,9 @@
 					>
 						{resent ? 'Sent — check your inbox' : resending ? 'Sending…' : 'Resend link'}
 					</button>
+					{#if resent}
+						<p class="text-xs text-gray-500">Not there? Also check your spam folder.</p>
+					{/if}
 				</form>
 				<div class="mt-4">
 					<a href="/login" class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium">Back to sign in</a>
