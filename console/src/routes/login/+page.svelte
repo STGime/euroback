@@ -513,6 +513,7 @@
 					<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-700">
 						<p class="font-medium">Check your inbox</p>
 						<p class="mt-1">If an account exists for <strong>{email}</strong>, we've sent a password reset link. If you haven't confirmed your email yet, we've sent the confirmation link instead.</p>
+						<p class="mt-2 text-xs">Not there? Also check your spam folder.</p>
 					</div>
 					<div class="mt-4 text-center">
 						<button onclick={() => { isForgotPassword = false; forgotPasswordSent = false; error = ''; }} class="text-sm text-eurobase-600 hover:text-eurobase-700 font-medium cursor-pointer">Back to sign in</button>
@@ -521,6 +522,7 @@
 					<div class="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-700">
 						<p class="font-medium">Confirm your email</p>
 						<p class="mt-1">We've sent a verification link to <strong>{email}</strong>. Click it to activate your account, then sign in.</p>
+						<p class="mt-2 text-xs">Not there? Also check your spam folder.</p>
 					</div>
 					<div class="mt-4 text-center text-sm text-gray-500">
 						Didn't get it?
@@ -535,6 +537,7 @@
 					<div class="mt-4 rounded-lg bg-amber-50 border border-amber-200 p-4 text-sm text-amber-800">
 						<p class="font-medium">Email not verified</p>
 						<p class="mt-1">Your email <strong>{email}</strong> hasn't been confirmed yet. Please click the verification link we sent you before signing in.</p>
+						<p class="mt-2 text-xs">Not there? Also check your spam folder.</p>
 					</div>
 					<div class="mt-4 text-center text-sm text-gray-500">
 						Need a new link?
