@@ -79,7 +79,7 @@ const signUp = await eb.auth.signUp({
   emailRedirectTo: 'https://myapp.com/verify',
 })
 if (signUp.confirmationRequired) {
-  // No session yet — show "check your inbox".
+  // No session yet — show "check your inbox" (and "also check your spam folder").
 }
 // On your /verify page — after reading the token from ?token=...:
 await eb.auth.verifyEmail(token)
