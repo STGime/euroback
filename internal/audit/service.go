@@ -54,12 +54,13 @@ const (
 	// Team-tier closed-beta grants (Team-tier M2, milestone #2).
 	// Superadmin flips team_beta_access on a specific platform_user
 	// so they can create Team-tier projects during the closed beta.
-	ActionTeamBetaGranted    = "team_beta.granted"
-	ActionTeamBetaRevoked    = "team_beta.revoked"
-	ActionUserSuspended      = "user.suspended"
-	ActionUserUnsuspended    = "user.unsuspended"
-	ActionProjectSuspended   = "project.suspended"
-	ActionProjectUnsuspended = "project.unsuspended"
+	ActionTeamBetaGranted     = "team_beta.granted"
+	ActionTeamBetaRevoked     = "team_beta.revoked"
+	ActionUserSuspended       = "user.suspended"
+	ActionUserUnsuspended     = "user.unsuspended"
+	ActionProjectSuspended    = "project.suspended"
+	ActionProjectUnsuspended  = "project.unsuspended"
+	ActionProjectBetaExtended = "project.beta_extended"
 
 	// ActionUserDeleted is emitted when a superadmin deletes a
 	// platform user + all of their projects via

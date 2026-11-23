@@ -37,6 +37,16 @@ func AdminSuspendProject(pool *pgxpool.Pool) http.HandlerFunc {
 // AdminUnsuspendProject reactivates a suspended project (superadmin only).
 func AdminUnsuspendProject(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A project the Team beta window suspended is reactivated by
+		// extending the window (AdminExtendTeamBeta); a plain unsuspend
+		// would leave it running with no end.
+		var byWindow bool
+		if err := pool.QueryRow(r.Context(),
+			`SELECT beta_expired_at IS NOT NULL FROM public.projects WHERE id = $1::uuid`,
+			strings.TrimSpace(chi.URLParam(r, "id"))).Scan(&byWindow); err == nil && byWindow {
+			http.Error(w, `{"error":"the Team beta of this project ended; use Extend to reactivate it","code":"team_beta_ended"}`, http.StatusConflict)
+			return
+		}
 		setProjectStatus(w, r, pool, "suspended", "active", audit.ActionProjectUnsuspended, "")
 	}
 }

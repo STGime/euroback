@@ -316,6 +316,10 @@ func HandleCreateProject(pool *pgxpool.Pool, svc *TenantService, limitsSvc ...*p
 				http.Error(w, `{"error":"team plan requires closed-beta access","code":"team_beta_required"}`, http.StatusForbidden)
 				return
 			}
+			if errors.Is(err, ErrTeamBetaEnded) {
+				http.Error(w, `{"error":"your Team evaluation has ended; contact contact@eurobase.app to continue","code":"team_beta_ended"}`, http.StatusForbidden)
+				return
+			}
 			if errors.Is(err, ErrLegalTeamBetaRequired) {
 				http.Error(w, `{"error":"legal team plan requires closed-beta access","code":"legal_team_beta_required"}`, http.StatusForbidden)
 				return

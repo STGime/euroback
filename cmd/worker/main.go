@@ -17,6 +17,7 @@ import (
 	// image, which ships no /usr/share/zoneinfo (cron schedule timezones).
 	_ "time/tzdata"
 
+	"github.com/eurobase/euroback/internal/audit"
 	"github.com/eurobase/euroback/internal/audit/export"
 	"github.com/eurobase/euroback/internal/compliance"
 	"github.com/eurobase/euroback/internal/cron"
@@ -29,6 +30,7 @@ import (
 	"github.com/eurobase/euroback/internal/pgbouncerconf"
 	"github.com/eurobase/euroback/internal/plans"
 	"github.com/eurobase/euroback/internal/storage"
+	"github.com/eurobase/euroback/internal/tenant"
 	"github.com/eurobase/euroback/internal/tenantlogin"
 	"github.com/eurobase/euroback/internal/upgrade"
 	"github.com/eurobase/euroback/internal/vault"
@@ -733,6 +735,19 @@ func main() {
 	// (from the email provider), so bulk announcements and the onboarding
 	// series skip them.
 	workers.StartEmailBounceSync(ctx, pool, emailClient)
+
+	// ── Team beta window (000159) ──
+	// Hourly: reminds owners 4 days before their Team beta ends and
+	// suspends the project when it has ended (data kept; an admin
+	// extension in Admin → Projects reactivates it).
+	(&tenant.TeamBetaExpiry{
+		Pool:       pool,
+		Mailer:     emailService,
+		Audit:      audit.NewService(pool),
+		OpsWebhook: os.Getenv("DISCORD_ALERTS_WEBHOOK"),
+		AdminURL:   consoleURL + "/admin",
+		ConsoleURL: consoleURL,
+	}).Start(ctx, time.Hour)
 
 	// ── Backup sweeper (M3) ──
 	// 6-hour ticker: refreshes backup_snapshots cache from

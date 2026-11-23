@@ -429,6 +429,11 @@ func (s *TenantService) SetBetaGrantRecorder(r BetaGrantRecorder) {
 // with a code the console can map to a "join the waitlist" prompt.
 var ErrTeamBetaRequired = errors.New("team plan requires closed-beta access")
 
+// ErrTeamBetaEnded: the caller's Team evaluation ended (a Team project of
+// theirs was suspended by the beta window), so no new Team project until
+// it is extended (team_beta_window.go).
+var ErrTeamBetaEnded = errors.New("your Team evaluation has ended")
+
 // ErrAccountSuspended is returned when a suspended platform user tries to
 // create a project (defence-in-depth: sign-in is already refused, but an
 // existing JWT stays valid until it expires).
@@ -496,6 +501,13 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 		}
 		if !granted {
 			return nil, ErrLegalTeamBetaRequired
+		}
+	}
+	if req.Plan == "team" || req.Plan == "legal_team" {
+		if ended, err := teamBetaEndedFor(ctx, s.pool, platformUserID); err != nil {
+			return nil, fmt.Errorf("check team beta window: %w", err)
+		} else if ended {
+			return nil, ErrTeamBetaEnded
 		}
 	}
 
@@ -624,10 +636,19 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 	var projectID string
 	var createdAt time.Time
 	err = tx.QueryRow(ctx,
-		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, org_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid)
+		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, org_id, beta_ends_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid,
+		         -- Team tiers are a free beta for TeamBetaDays (TeamBetaExpiry),
+		         -- one window per owner: a further Team project ends with
+		         -- the owner's earliest running window.
+		         CASE WHEN $7 IN ('team', 'legal_team') THEN LEAST(
+		             now() + make_interval(days => $9),
+		             (SELECT min(o.beta_ends_at) FROM projects o
+		               WHERE o.owner_id = $1 AND o.beta_ends_at IS NOT NULL
+		                 AND o.status IN ('active', 'provisioning')))
+		         END)
 		 RETURNING id, created_at`,
-		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan, orgID,
+		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan, orgID, TeamBetaDays,
 	).Scan(&projectID, &createdAt)
 	if err != nil {
 		// Auto-attach race: the org we looked up above was deleted

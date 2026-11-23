@@ -81,6 +81,43 @@
 		return `mailto:${encodeURIComponent(it.email)}?subject=${encodeURIComponent(subject)}`;
 	}
 
+	// Reply template for Team beta requests: questions that tell an
+	// evaluation we can support from one we can't, before a dedicated
+	// database is provisioned for it. Plain text (mailto body).
+	const BETA_QUESTIONS = `Hello,
+
+thanks for your interest in the Eurobase Team beta. Every beta project gets its own dedicated PostgreSQL instance, so we admit a limited number of teams and ask a few questions first:
+
+1. Company: name, website, and your role.
+2. Current setup: which Supabase plan, database size (GB), and which features you use (Auth, Storage, Edge Functions, Realtime, RLS-heavy schemas, extensions).
+3. Scale: number of end users or monthly active users, and rough requests per day.
+4. Team: how many people need console access, and roles (developers, admins, read-only).
+5. SSO: which identity provider (Microsoft Entra ID, Google Workspace, Okta, Keycloak, ...)? Eurobase supports SSO via OIDC; SAML is not available.
+6. Data residency: which requirements apply (GDPR, sector rules, customer contracts), and who does the review?
+7. Timeline: when do you plan to start the migration, and when would production go live?
+8. After the beta: Team costs EUR 149 per month per organisation, including one dedicated database. Is that within your budget?
+9. Feedback: would you have 20 minutes for a call during the evaluation?
+
+Please send your answers to contact@eurobase.app from your work email address. The beta covers 14 days from the creation of your Team project. Once we have your answers we'll get back to you within two working days.
+
+Best regards,
+Eurobase`;
+
+	function betaQuestionsLink(it: InboxItem): string {
+		return `mailto:${encodeURIComponent(it.email)}?subject=${encodeURIComponent('Re: Eurobase Team beta — a few questions')}&body=${encodeURIComponent(BETA_QUESTIONS)}`;
+	}
+
+	let copied = $state<string | null>(null);
+	async function copyBetaQuestions(it: InboxItem) {
+		try {
+			await navigator.clipboard.writeText(BETA_QUESTIONS);
+			copied = key(it);
+			setTimeout(() => (copied = null), 2000);
+		} catch {
+			/* clipboard unavailable: the mailto link still works */
+		}
+	}
+
 	function when(ts: string): string {
 		return new Date(ts).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 	}
@@ -161,6 +198,18 @@
 						<a href={replyLink(it)} class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
 							Reply by email
 						</a>
+						{#if it.source === 'team_beta_request'}
+							<a href={betaQuestionsLink(it)} class="rounded-md border border-eurobase-200 bg-eurobase-50 px-3 py-1.5 text-xs font-medium text-eurobase-700 hover:bg-eurobase-100">
+								Reply with beta questions
+							</a>
+							<button
+								type="button"
+								onclick={() => copyBetaQuestions(it)}
+								class="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 cursor-pointer"
+							>
+								{copied === key(it) ? 'Copied' : 'Copy questions'}
+							</button>
+						{/if}
 						{#if it.resolved_at}
 							<button
 								type="button"

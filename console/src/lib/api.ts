@@ -372,6 +372,10 @@ export interface AdminProject {
 	owner_id: string;
 	owner_email: string;
 	created_at: string;
+	/** End of the Team beta (14 days from creation); absent = no limit. */
+	beta_ends_at?: string;
+	/** Set when the beta ending suspended the project. */
+	beta_expired_at?: string;
 }
 
 export interface AllowlistEntry {
@@ -2637,6 +2641,11 @@ export class EurobaseAPI {
 			method: 'POST',
 			body: JSON.stringify({ reason: reason ?? '' }),
 		});
+	}
+
+	/** Extend a project's Team beta by 14 days (superadmin); reactivates it if the beta end had suspended it. */
+	async adminExtendTeamBeta(projectId: string): Promise<{ id: string; status: string; beta_ends_at: string; reactivated: boolean }> {
+		return this.fetch(`/platform/admin/projects/${encodeURIComponent(projectId)}/beta-extend`, { method: 'POST' });
 	}
 
 	async adminUnsuspendProject(projectId: string): Promise<{ id: string; status: string }> {
