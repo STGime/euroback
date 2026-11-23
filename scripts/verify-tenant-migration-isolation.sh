@@ -257,6 +257,9 @@ must_deny "statistics function"     as_role tenant_a_ddl pw_a -tAc "SELECT pg_st
 must_deny "relation size"           as_role tenant_a_ddl pw_a -tAc "SELECT pg_relation_size('tenant_b.secrets'::regclass);"
 must_deny "gateway statistics"      as_role eurobase_gateway pw -tAc "SELECT pg_stat_get_backend_userid(1);"
 must_deny "gateway information_schema" as_role eurobase_gateway pw -tAc "SELECT count(*) FROM information_schema.tables;"
+must_deny "gateway cancels a session"   as_role eurobase_gateway pw -tAc "SELECT pg_cancel_backend(2147483647);"
+must_deny "gateway terminates a session" as_role eurobase_gateway pw -tAc "SELECT pg_terminate_backend(2147483647);"
+must_deny "tenant terminates a session" as_role tenant_a_ddl pw_a -tAc "SELECT pg_terminate_backend(2147483647);"
 own=$(as_role tenant_a_ddl pw_a -tAc "SELECT string_agg(table_schema || '.' || table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema LIKE 'tenant_%'" 2>&1)
 echo ",$own," | grep -q ",tenant_a.items," || fail "information_schema should list the tenant's own table (got: $own)"
 echo "$own" | grep -q "tenant_b" && fail "information_schema lists another tenant's table (got: $own)"

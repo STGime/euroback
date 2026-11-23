@@ -108,3 +108,23 @@ BEGIN
     END LOOP;
 END
 $tenants$;
+
+-- 5. Signalling other sessions: by default any role may cancel or
+--    terminate backends of roles whose privileges it has, so code running
+--    as a shared runtime role could stop other sessions of that role. The
+--    platform doesn't call these (drivers cancel through the protocol, which
+--    needs no privilege). Not granted to anyone, so the revert script
+--    leaves them closed.
+DO $signals$
+DECLARE
+    o record;
+BEGIN
+    FOR o IN SELECT p.oid::regprocedure AS fn
+               FROM pg_catalog.pg_proc p
+              WHERE p.pronamespace = 'pg_catalog'::regnamespace
+                AND p.proname IN ('pg_cancel_backend', 'pg_terminate_backend')
+    LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', o.fn);
+    END LOOP;
+END
+$signals$;
