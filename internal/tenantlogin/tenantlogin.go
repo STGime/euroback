@@ -198,7 +198,10 @@ func ensureOn(ctx context.Context, pool *pgxpool.Pool, database string, secret [
 	var extra func(context.Context, pgx.Tx) error
 	if asMigrator {
 		extra = func(ctx context.Context, tx pgx.Tx) error {
-			return revokeCredentialAccessInPass(ctx, tx, schema, FuncRole(schema))
+			if err := revokeCredentialAccessInPass(ctx, tx, schema, FuncRole(schema)); err != nil {
+				return err
+			}
+			return ensureFuncPublicUsage(ctx, tx, FuncRole(schema))
 		}
 	}
 	return ensureLogin(ctx, pool, database, FuncRole(schema), verifier, connLimit, asMigrator, extra)
@@ -437,4 +440,32 @@ func (e *Ensurer) EnsureAll(ctx context.Context) (int, error) {
 		done++
 	}
 	return done, firstErr
+}
+
+// ensureFuncPublicUsage keeps USAGE on schema public for a shared-cluster
+// func role (as provision_tenant grants it, 000160): the project's auth
+// helpers resolve public.* names when an RLS policy calls them. A GRANT by
+// a migrator without the grant option is a silent no-op, so it is
+// verified; a miss is logged, not fatal, so the role's login is still
+// maintained.
+func ensureFuncPublicUsage(ctx context.Context, tx pgx.Tx, role string) error {
+	var has bool
+	if err := tx.QueryRow(ctx, "SELECT has_schema_privilege($1, 'public', 'USAGE')", role).Scan(&has); err != nil {
+		return fmt.Errorf("check %s public usage: %w", role, err)
+	}
+	if has {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, "GRANT USAGE ON SCHEMA public TO "+pgx.Identifier{role}.Sanitize()); err != nil {
+		return fmt.Errorf("grant %s public usage: %w", role, err)
+	}
+	if err := tx.QueryRow(ctx, "SELECT has_schema_privilege($1, 'public', 'USAGE')", role).Scan(&has); err != nil {
+		return fmt.Errorf("verify %s public usage: %w", role, err)
+	}
+	if !has {
+		slog.Error("function login: role has no USAGE on schema public and eurobase_migrator could not grant it (needs USAGE … WITH GRANT OPTION)", "role", role)
+	} else {
+		slog.Warn("function login: restored USAGE on schema public", "role", role)
+	}
+	return nil
 }
