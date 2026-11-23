@@ -207,20 +207,10 @@ var ErrUndeliverableEmail = errors.New("this address can't receive email (reserv
 // admin-managed signup blocklist (public.platform_blocked_signup_domains;
 // candidates built by mailaddr.SignupDomainCandidates) — deliverable
 // domains that only ever produce abuse or throwaway accounts. The message
-// is kept generic so it doesn't advertise the blocklist.
+// is kept generic so it doesn't advertise the blocklist. Also used for a
+// signup to the mailbox of a suspended account (suspendedMailbox).
 var ErrBlockedSignupDomain = errors.New("this email address can't be used to sign up")
 
-// SignUp creates a new platform user with email + bcrypt-hashed password.
-// When AllowPublicSignup is false (default), only emails present in the
-// platform_allowlist table can register. Others receive a waitlist error.
-//
-// `accepted` is the click-through list from the signup form. Must
-// include entries for all `requiredAcceptances` document types with
-// matching `document_type + document_version` rows in `legal_documents`;
-// otherwise SignUp fails without touching `platform_users`. On success,
-// one row per accepted document lands in `legal_acceptances` inside the
-// same transaction as the user insert, so there's never a user without
-// its consent trail.
 // suspendedMailbox reports whether email delivers to the same mailbox
 // (mailaddr.Base: "+tag" and Gmail dots ignored) as a suspended account,
 // so a suspended user can't come back under "name+1@…". Suspended
@@ -252,6 +242,17 @@ func (s *PlatformAuthService) suspendedMailbox(ctx context.Context, email string
 	return false
 }
 
+// SignUp creates a new platform user with email + bcrypt-hashed password.
+// When AllowPublicSignup is false (default), only emails present in the
+// platform_allowlist table can register. Others receive a waitlist error.
+//
+// `accepted` is the click-through list from the signup form. Must
+// include entries for all `requiredAcceptances` document types with
+// matching `document_type + document_version` rows in `legal_documents`;
+// otherwise SignUp fails without touching `platform_users`. On success,
+// one row per accepted document lands in `legal_acceptances` inside the
+// same transaction as the user insert, so there's never a user without
+// its consent trail.
 func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string, accepted []AcceptedDocument, clientIP, userAgent string) (*PlatformAuthResponse, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {

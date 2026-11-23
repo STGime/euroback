@@ -147,3 +147,30 @@ func TestAuthRate_IPCeilingBoundsEmailSpread(t *testing.T) {
 		t.Fatalf("want 429, got %d", w.Code)
 	}
 }
+
+// PeekAuthRate never records: any number of peeks leaves the counter
+// alone; only RecordAuthRate moves it, and the peek refuses once the
+// recorded count reaches the limit.
+func TestPeekAuthRate_CountsOnlyRecorded(t *testing.T) {
+	rl := setupAuthTestLimiter(t)
+	defer rl.Close()
+
+	id := "peek_test_" + time.Now().Format("150405.000000")
+	for i := 0; i < 10; i++ {
+		if PeekAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_peek", id, 2) {
+			t.Fatalf("peek %d refused before anything was recorded", i+1)
+		}
+	}
+	RecordAuthRate(rl, t.Context(), "test_peek", id, 2, time.Minute)
+	if PeekAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_peek", id, 2) {
+		t.Fatal("refused after 1 of 2 recorded")
+	}
+	RecordAuthRate(rl, t.Context(), "test_peek", id, 2, time.Minute)
+	w := httptest.NewRecorder()
+	if !PeekAuthRate(rl, w, t.Context(), "test_peek", id, 2) {
+		t.Fatal("allowed after 2 of 2 recorded")
+	}
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("refusal: status %d, Retry-After %q", w.Code, w.Header().Get("Retry-After"))
+	}
+}

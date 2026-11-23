@@ -661,6 +661,17 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				if strings.HasSuffix(action, "_ip") {
 					identifier = ratelimit.ClientIP(r)
 				}
+				// Limits that count only completed actions: "<action>"
+				// checks without recording, "<action>_record" records
+				// (same counter), called by the handler after success.
+				if base, ok := strings.CutSuffix(action, "_record"); ok && base == "platform_signup_mailbox" {
+					cfg := limits[base]
+					ratelimit.RecordAuthRate(limiter, r.Context(), base, identifier, cfg.limit, cfg.window)
+					return false
+				}
+				if action == "platform_signup_mailbox" {
+					return ratelimit.PeekAuthRate(limiter, w, r.Context(), action, identifier, limits[action].limit)
+				}
 				cfg, ok := limits[action]
 				if !ok {
 					cfg = struct {

@@ -46,8 +46,11 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 
 		// And per mailbox ("+tag" and Gmail dots ignored): the IP limit
 		// above can't tell clients apart behind a shared address, this
-		// one stops many accounts on one inbox.
-		if check != nil && check(w, r, "platform_signup_mailbox", mailaddr.Base(req.Email)) {
+		// one stops many accounts on one inbox. It counts only signups
+		// that created an account (recorded below), so a weak password
+		// or a retry doesn't use it up.
+		mailbox := mailaddr.Base(req.Email)
+		if check != nil && check(w, r, "platform_signup_mailbox", mailbox) {
 			return
 		}
 
@@ -87,6 +90,9 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 			return
 		}
 
+		if check != nil {
+			check(w, r, "platform_signup_mailbox_record", mailbox)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(resp)

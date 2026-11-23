@@ -132,6 +132,25 @@ func (rl *RateLimiter) Allow(ctx context.Context, key string, limit int, window 
 	return allowed, info, nil
 }
 
+// Count returns how many requests key has recorded in its current window
+// and the seconds until that window ends, without recording one. A key
+// with no window open counts 0.
+func (rl *RateLimiter) Count(ctx context.Context, key string) (int64, int64, error) {
+	redisKey := "ratelimit:" + key
+	n, err := rl.client.Get(ctx, redisKey).Int64()
+	if err == redis.Nil {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("read rate limit counter: %w", err)
+	}
+	ttl, err := rl.client.TTL(ctx, redisKey).Result()
+	if err != nil {
+		return 0, 0, fmt.Errorf("read rate limit ttl: %w", err)
+	}
+	return n, int64(ttl.Seconds()), nil
+}
+
 // Close closes the underlying Redis client.
 func (rl *RateLimiter) Close() error {
 	return rl.client.Close()

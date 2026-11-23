@@ -30,10 +30,10 @@ import (
 // when that lands, drop this back to a real per-user number
 // (5–10/hour).
 //
-// SignupMailboxLimit counts signups per mailbox (mailaddr.Base: "+tag"
-// and Gmail dots ignored), which doesn't depend on the client IP: 5 a day
-// leaves room for typos and retries, not for a batch of accounts on one
-// inbox.
+// SignupMailboxLimit counts accounts created per mailbox (mailaddr.Base:
+// "+tag" and Gmail dots ignored), which doesn't depend on the client IP.
+// Only successful signups count (PeekAuthRate / RecordAuthRate), so typos
+// and retries cost nothing; 5 a day is far above what one person needs.
 const (
 	SignupLimit          = 60
 	SignupWindow         = 1 * time.Hour
@@ -101,21 +101,50 @@ func CheckAuthRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Cont
 	key := fmt.Sprintf("auth:%s:%s", action, identifier)
 	allowed, info, _ := limiter.Allow(ctx, key, limit, window)
 	if !allowed {
-		resetTime := time.Unix(info.ResetAt, 0)
-		retryAfter := time.Until(resetTime).Seconds()
-		if retryAfter < 1 {
-			retryAfter = 1
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
-		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
-		w.Header().Set("X-RateLimit-Remaining", "0")
-		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetAt))
-		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprintf(w, `{"error":"too many requests, try again in %.0f seconds"}`, retryAfter)
+		writeTooManyRequests(w, info)
 		return true
 	}
 	return false
+}
+
+// PeekAuthRate is CheckAuthRate without recording the request: it refuses
+// (429) once the identifier has `limit` recorded requests in the window,
+// and RecordAuthRate records one. For limits that count only completed
+// actions (a signup that created an account), not every attempt. A Redis
+// error lets the request through, like CheckAuthRate.
+func PeekAuthRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Context, action, identifier string, limit int) bool {
+	if limiter == nil {
+		return false
+	}
+	n, ttl, err := limiter.Count(ctx, fmt.Sprintf("auth:%s:%s", action, identifier))
+	if err != nil || n < int64(limit) {
+		return false
+	}
+	writeTooManyRequests(w, RateLimitInfo{Limit: int64(limit), ResetAt: time.Now().Add(time.Duration(ttl) * time.Second).Unix()})
+	return true
+}
+
+// RecordAuthRate records one request for (action, identifier) without
+// checking the limit; the counterpart of PeekAuthRate.
+func RecordAuthRate(limiter *RateLimiter, ctx context.Context, action, identifier string, limit int, window time.Duration) {
+	if limiter == nil {
+		return
+	}
+	_, _, _ = limiter.Allow(ctx, fmt.Sprintf("auth:%s:%s", action, identifier), limit, window)
+}
+
+func writeTooManyRequests(w http.ResponseWriter, info RateLimitInfo) {
+	retryAfter := time.Until(time.Unix(info.ResetAt, 0)).Seconds()
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
+	w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
+	w.Header().Set("X-RateLimit-Remaining", "0")
+	w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetAt))
+	w.WriteHeader(http.StatusTooManyRequests)
+	fmt.Fprintf(w, `{"error":"too many requests, try again in %.0f seconds"}`, retryAfter)
 }
 
 // RecordSigninFailure increments the signin failure counter for an email
