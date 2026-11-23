@@ -18,6 +18,7 @@ on:
       - deploy/docker/Dockerfile.pgbouncer
       - scripts/test-pgbouncer.sh
       - scripts/pgbouncer-probe.ts
+      - scripts/db/**
       - functions-runner/tenant_db.ts
       - .github/workflows/pgbouncer-e2e.yml
   push:
@@ -30,6 +31,7 @@ on:
       - deploy/docker/Dockerfile.pgbouncer
       - scripts/test-pgbouncer.sh
       - scripts/pgbouncer-probe.ts
+      - scripts/db/**
       - functions-runner/tenant_db.ts
       - .github/workflows/pgbouncer-e2e.yml
   workflow_dispatch:

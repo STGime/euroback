@@ -40,7 +40,8 @@ func TestPoolerSplit(t *testing.T) {
 	}
 
 	// A tenant with a login (the e2e test provisioned one) — discovered via
-	// a direct connection, since neither pooler now serves the platform role.
+	// a direct connection (a platform role that can read the catalog), since
+	// neither pooler now serves the platform role.
 	direct, err := pgx.Connect(ctx, os.Getenv("PGB_TEST_DIRECT_URL"))
 	if err != nil {
 		t.Fatalf("direct connect: %v", err)
