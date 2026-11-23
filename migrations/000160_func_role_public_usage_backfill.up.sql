@@ -19,17 +19,17 @@ DECLARE
     v_role    TEXT;
     v_missing TEXT[] := '{}';
 BEGIN
+    -- Only func roles that exist and lack the grant (checked by oid, so a
+    -- project whose func role is gone can't make the check itself fail).
     FOR v_role IN
-        SELECT p.schema_name || '_func'
+        SELECT r.rolname
           FROM public.projects p
-         WHERE p.schema_name IS NOT NULL
-           AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = p.schema_name || '_func')
+          JOIN pg_roles r ON r.rolname = p.schema_name || '_func'
+         WHERE NOT has_schema_privilege(r.oid, 'public', 'USAGE')
     LOOP
+        EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role);
         IF NOT has_schema_privilege(v_role, 'public', 'USAGE') THEN
-            EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role);
-            IF NOT has_schema_privilege(v_role, 'public', 'USAGE') THEN
-                v_missing := v_missing || v_role;
-            END IF;
+            v_missing := v_missing || v_role;
         END IF;
     END LOOP;
     IF cardinality(v_missing) > 0 THEN
