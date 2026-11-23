@@ -127,6 +127,35 @@ eurobase migrations up</pre>
 					Plain <code class="bg-gray-100 rounded px-1">LANGUAGE plpgsql</code> functions and triggers are fine. Bulk data loads belong in the SDK/REST data path, not migrations.
 				</p>
 
+				<h4 id="catalog-checks" class="text-sm font-semibold text-gray-800 mt-4 scroll-mt-20">Checking whether something exists (DO blocks, functions, edge functions)</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					On Free and Pro all projects share one database, so the PostgreSQL system catalogs (<code class="bg-gray-100 rounded px-1">pg_class</code>, <code class="bg-gray-100 rounded px-1">pg_constraint</code>, <code class="bg-gray-100 rounded px-1">pg_proc</code>, <code class="bg-gray-100 rounded px-1">pg_tables</code>, <code class="bg-gray-100 rounded px-1">pg_policies</code>, <code class="bg-gray-100 rounded px-1">pg_settings</code>, <code class="bg-gray-100 rounded px-1">pg_timezone_names</code>, &hellip;) and the functions that print definitions or sizes (<code class="bg-gray-100 rounded px-1">pg_get_constraintdef</code>, <code class="bg-gray-100 rounded px-1">pg_get_functiondef</code>, <code class="bg-gray-100 rounded px-1">obj_description</code>, <code class="bg-gray-100 rounded px-1">pg_total_relation_size</code>, &hellip;) aren&rsquo;t available to project SQL &mdash; also not inside <code class="bg-gray-100 rounded px-1">DO</code> blocks, function bodies, edge functions (<code class="bg-gray-100 rounded px-1">ctx.db.sql</code>) or cron jobs. Use these instead; they see only your own project:
+				</p>
+				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1">
+					<li><strong>Does a table / function exist?</strong> <code class="bg-gray-100 rounded px-1">to_regclass('orders') IS NOT NULL</code>, <code class="bg-gray-100 rounded px-1">to_regprocedure('add_points(uuid, int)') IS NOT NULL</code>.</li>
+					<li><strong>Tables, columns, constraints:</strong> <code class="bg-gray-100 rounded px-1">information_schema.tables</code>, <code class="bg-gray-100 rounded px-1">columns</code>, <code class="bg-gray-100 rounded px-1">table_constraints</code>, <code class="bg-gray-100 rounded px-1">key_column_usage</code>, <code class="bg-gray-100 rounded px-1">referential_constraints</code> (inside a <code class="bg-gray-100 rounded px-1">DO</code> block or function; a top-level statement can&rsquo;t name them, see above). The views that print definitions (<code class="bg-gray-100 rounded px-1">views</code>, <code class="bg-gray-100 rounded px-1">triggers</code>, <code class="bg-gray-100 rounded px-1">check_constraints</code>, <code class="bg-gray-100 rounded px-1">routines</code>, <code class="bg-gray-100 rounded px-1">parameters</code>) aren&rsquo;t available.</li>
+					<li><strong>Indexes:</strong> <code class="bg-gray-100 rounded px-1">CREATE INDEX IF NOT EXISTS</code>; columns: <code class="bg-gray-100 rounded px-1">ADD COLUMN IF NOT EXISTS</code>.</li>
+					<li><strong>Is a time zone name valid?</strong> Try it: <code class="bg-gray-100 rounded px-1">PERFORM now() AT TIME ZONE tz;</code> in a block that catches <code class="bg-gray-100 rounded px-1">invalid_parameter_value</code>.</li>
+					<li><strong>Definitions and sizes:</strong> the schema API (<a href="/docs/rls" class="text-eurobase-600 hover:underline">chapter 12</a>), <code class="bg-gray-100 rounded px-1">getDbFunction</code> in MCP, and the Database page.</li>
+				</ul>
+				<div class="relative rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
+					<pre>-- Add a constraint only if it isn't there yet
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+     WHERE table_schema = current_schema()
+       AND table_name = 'orders'
+       AND constraint_name = 'orders_total_positive'
+  ) THEN
+    ALTER TABLE orders ADD CONSTRAINT orders_total_positive CHECK (total &gt;= 0);
+  END IF;
+END $$;</pre>
+				</div>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Team and Legal Team projects have their own database, which you own: the catalogs are available there.
+				</p>
+
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">Who can use the tables a migration creates</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					You don&rsquo;t grant anything. A table created by a migration (or in the SQL editor) can be read and written by your app right away: the roles behind the SDK, REST API, RPC, edge functions and cron get <code class="bg-gray-100 rounded px-1">SELECT</code>, <code class="bg-gray-100 rounded px-1">INSERT</code>, <code class="bg-gray-100 rounded px-1">UPDATE</code> and <code class="bg-gray-100 rounded px-1">DELETE</code> on new tables and can use new sequences and call new functions. Which rows a caller may read or change is decided by your RLS policies (a table without RLS is open to all of them), so enable RLS and add policies in the same migration. Migrations can&rsquo;t run <code class="bg-gray-100 rounded px-1">GRANT</code> or <code class="bg-gray-100 rounded px-1">REVOKE</code> at all.
