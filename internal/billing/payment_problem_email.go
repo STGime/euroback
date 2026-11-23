@@ -20,6 +20,9 @@ const (
 	// Mollie stopped the subscription without a charge we heard about
 	// (e.g. the mandate was revoked). Nothing will be retried.
 	paymentProblemStoppedAtMollie
+	// The cardholder's bank reversed the payment for the current period
+	// (a chargeback); we stopped the subscription.
+	paymentProblemChargedBack
 )
 
 // rawMailer is the SendRaw surface shared by the invoice and
@@ -79,6 +82,11 @@ func renderPaymentProblemMail(projectID, projectName string, downgradeAt time.Ti
 		subject = fmt.Sprintf("Eurobase — the subscription for %s has stopped", projectName)
 		what = "The Pro subscription for your project <strong>" + name + "</strong> was stopped by our payment provider, Mollie, " +
 			"usually because the card or the payment authorisation behind it is no longer valid. No further charges will be attempted."
+	}
+	if kind == paymentProblemChargedBack {
+		subject = fmt.Sprintf("Eurobase — the payment for %s was reversed", projectName)
+		what = "The bank or card issuer reversed this period's payment for your Pro project <strong>" + name + "</strong> (a chargeback), so the period is unpaid. " +
+			"We have stopped the subscription: no further charges will be made to that card."
 	}
 
 	body = fmt.Sprintf(`<!DOCTYPE html>

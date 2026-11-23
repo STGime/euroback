@@ -603,10 +603,10 @@
 									{formatEUR(inv.amount_cents, inv.currency)}
 								</td>
 								<td class="whitespace-nowrap px-6 py-3 text-sm">
-									{inv.status}
+									{inv.status === 'charged_back' ? 'charged back' : inv.status}
 								</td>
 								<td class="whitespace-nowrap px-6 py-3 text-right text-sm">
-									{#if inv.status === 'paid'}
+									{#if inv.status === 'paid' || inv.status === 'charged_back'}
 										<button
 											type="button"
 											onclick={() => openInvoicePDF(inv.id)}

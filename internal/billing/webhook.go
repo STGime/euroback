@@ -154,6 +154,12 @@ func (s *Service) processPaymentWebhook(ctx context.Context, paymentID string) e
 		"has_pending_project_id", payment.Metadata["pending_project_id"] != "",
 	)
 
+	// A chargeback (or its reversal) on any of our payments: Mollie calls
+	// the webhook again with the payment still "paid" (chargeback.go).
+	if handled, err := s.processChargeback(ctx, payment); handled || err != nil {
+		return err
+	}
+
 	// A zero-amount payment that only adds a new card / PayPal account
 	// for an existing subscription (payment_method.go). Never a checkout:
 	// a failed or abandoned one changes nothing.

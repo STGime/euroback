@@ -71,6 +71,8 @@
 				return 'bg-red-100 text-red-800';
 			case 'refunded':
 				return 'bg-gray-100 text-gray-800';
+			case 'charged_back':
+				return 'bg-red-100 text-red-800';
 			default:
 				return 'bg-yellow-100 text-yellow-800';
 		}
@@ -216,11 +218,11 @@
 							</td>
 							<td class="whitespace-nowrap px-4 py-3 text-sm">
 								<span class="rounded-full px-2 py-0.5 text-xs font-medium {statusBadgeClass(inv.status)}">
-									{inv.status}
+									{inv.status === 'charged_back' ? 'charged back' : inv.status}
 								</span>
 							</td>
 							<td class="whitespace-nowrap px-4 py-3 text-right text-sm">
-								{#if inv.status === 'paid'}
+								{#if inv.status === 'paid' || inv.status === 'charged_back'}
 									<button
 										type="button"
 										onclick={() => openInvoicePDF(inv.id)}

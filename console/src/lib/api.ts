@@ -3716,7 +3716,7 @@ export interface Invoice {
 	paid_at?: string | null;
 	amount_cents: number;
 	currency: string;
-	/** 'pending' | 'paid' | 'failed' | 'refunded'. */
+	/** 'pending' | 'paid' | 'failed' | 'refunded' | 'charged_back'. */
 	status: string;
 	/** True once the async render has completed. If false, the
 	 * download endpoint renders on demand — no separate handling

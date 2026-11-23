@@ -210,28 +210,32 @@ type SubscriptionCreateRequest struct {
 // (Mollie's webhook body only contains {id}; the actual state is
 // fetched by GET-ing the payment).
 type Payment struct {
-	ID              string            `json:"id"`
-	Mode            string            `json:"mode"`
-	Status          string            `json:"status"`
-	Amount          Amount            `json:"amount"`
-	AmountRefunded  *Amount           `json:"amountRefunded,omitempty"`
-	Description     string            `json:"description"`
-	Method          string            `json:"method,omitempty"`
-	CustomerID      string            `json:"customerId,omitempty"`
-	SubscriptionID  string            `json:"subscriptionId,omitempty"`
-	MandateID       string            `json:"mandateId,omitempty"`
-	SequenceType    SequenceType      `json:"sequenceType"`
-	CreatedAt       time.Time         `json:"createdAt"`
-	PaidAt          *time.Time        `json:"paidAt,omitempty"`
-	FailedAt        *time.Time        `json:"failedAt,omitempty"`
-	CanceledAt      *time.Time        `json:"canceledAt,omitempty"`
-	ExpiredAt       *time.Time        `json:"expiredAt,omitempty"`
-	Locale          string            `json:"locale,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
-	WebhookURL      string            `json:"webhookUrl,omitempty"`
-	SettlementAmount *Amount          `json:"settlementAmount,omitempty"`
-	Details          map[string]any   `json:"details,omitempty"`
-	Links            PaymentLinks     `json:"_links"`
+	ID             string  `json:"id"`
+	Mode           string  `json:"mode"`
+	Status         string  `json:"status"`
+	Amount         Amount  `json:"amount"`
+	AmountRefunded *Amount `json:"amountRefunded,omitempty"`
+	// AmountChargedBack is the total charged back by the cardholder's
+	// bank; Mollie omits it while that is zero. A chargeback leaves the
+	// payment's status at "paid".
+	AmountChargedBack *Amount           `json:"amountChargedBack,omitempty"`
+	Description       string            `json:"description"`
+	Method            string            `json:"method,omitempty"`
+	CustomerID        string            `json:"customerId,omitempty"`
+	SubscriptionID    string            `json:"subscriptionId,omitempty"`
+	MandateID         string            `json:"mandateId,omitempty"`
+	SequenceType      SequenceType      `json:"sequenceType"`
+	CreatedAt         time.Time         `json:"createdAt"`
+	PaidAt            *time.Time        `json:"paidAt,omitempty"`
+	FailedAt          *time.Time        `json:"failedAt,omitempty"`
+	CanceledAt        *time.Time        `json:"canceledAt,omitempty"`
+	ExpiredAt         *time.Time        `json:"expiredAt,omitempty"`
+	Locale            string            `json:"locale,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	WebhookURL        string            `json:"webhookUrl,omitempty"`
+	SettlementAmount  *Amount           `json:"settlementAmount,omitempty"`
+	Details           map[string]any    `json:"details,omitempty"`
+	Links             PaymentLinks      `json:"_links"`
 }
 
 // PaymentLinks carries Mollie's HATEOAS follow-up URLs. Eurobase only

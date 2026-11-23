@@ -183,6 +183,8 @@ type Service struct {
 	invoiceMailer  invoiceMailer
 	projectCreator ProjectCreator
 	limits         LimitsChecker
+	// opsAlert posts billing alerts (chargebacks) to ops; nil = log only.
+	opsAlert func(title, description string)
 }
 
 // Config holds the settings CreateCheckout reads on every call.
