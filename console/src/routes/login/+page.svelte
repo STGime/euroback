@@ -6,6 +6,7 @@
 	import { api, APIError } from '$lib/api.js';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
+	import ContactWidget from '$lib/ContactWidget.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
 	import { passkeysSupported, getPasskeyAssertion, passkeyErrorMessage } from '$lib/webauthn';
 
@@ -761,3 +762,5 @@
 		</div>
 	</div>
 </div>
+
+<ContactWidget />
