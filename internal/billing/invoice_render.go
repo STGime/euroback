@@ -184,7 +184,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		invoiceNumber    int64
 		periodStart      *time.Time
 		periodEnd        *time.Time
-		planCode         string
+		planCode         *string
 		projectName      string
 		ownerEmail       string
 		ownerDisplayName *string
@@ -217,7 +217,7 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 	err := s.pii().QueryRow(ctx,
 		`SELECT i.created_at, i.paid_at, i.amount_cents, i.currency,
 		        i.invoice_number,
-		        s.started_at, s.next_charge_at, s.plan,
+		        i.period_start, i.period_end, s.plan,
 		        p.name, u.email, u.display_name,
 		        bp.entity_type, bp.legal_name, bp.street_address,
 		        bp.postal_code, bp.city, bp.country,
@@ -250,21 +250,11 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		return InvoiceData{}, "", fmt.Errorf("load invoice %s: %w", invoiceID, err)
 	}
 
-	// Fall back to sensible defaults for missing sub linkage
-	// (edge case: invoice for a canceled sub whose row was
-	// pruned — shouldn't happen with our current schema but the
-	// LEFT JOIN keeps rendering possible if it does).
-	if periodStart == nil {
-		p := invoiceCreatedAt
-		periodStart = &p
+	plan := "pro"
+	if planCode != nil && *planCode != "" {
+		plan = *planCode
 	}
-	if periodEnd == nil {
-		p := invoiceCreatedAt.AddDate(0, 1, 0)
-		periodEnd = &p
-	}
-	if planCode == "" {
-		planCode = "pro"
-	}
+	periodFrom, periodTo := invoicePeriodFor(periodStart, periodEnd, paidAt, invoiceCreatedAt)
 
 	displayName := ""
 	if ownerDisplayName != nil {
@@ -286,9 +276,9 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 		SellerEmail:        "contact@eurobase.app",
 		BuyerEmail:         ownerEmail,
 		BuyerDisplayName:   displayName,
-		Description:        fmt.Sprintf("Eurobase %s subscription — %s", planCode, projectName),
-		PeriodFrom:         *periodStart,
-		PeriodTo:           *periodEnd,
+		Description:        fmt.Sprintf("Eurobase %s subscription — %s", plan, projectName),
+		PeriodFrom:         periodFrom,
+		PeriodTo:           periodTo,
 		AmountCents:        amountCents,
 		Currency:           currency,
 		ProjectName:        projectName,
@@ -325,6 +315,26 @@ func (s *Service) loadInvoiceData(ctx context.Context, invoiceID string) (Invoic
 	// prefixes, which matters when N crosses ~100k.
 	key := "invoices/" + invoiceID[:2] + "/" + invoiceID + ".pdf"
 	return data, key, nil
+}
+
+// invoicePeriodFor is the period printed on an invoice: the one recorded
+// with the payment (invoices.period_start / period_end), else, for
+// invoices from before those columns, the payment date plus one month.
+// Never the subscription's own dates: they describe the subscription,
+// not the charge (a renewal used to print "start of the subscription –
+// next charge").
+func invoicePeriodFor(start, end, paidAt *time.Time, createdAt time.Time) (time.Time, time.Time) {
+	from := createdAt
+	switch {
+	case start != nil:
+		from = *start
+	case paidAt != nil:
+		from = *paidAt
+	}
+	if end != nil && end.After(from) {
+		return from, *end
+	}
+	return from, addMonthClamped(from)
 }
 
 // ErrInvoiceNotFound is returned when an invoice UUID doesn't

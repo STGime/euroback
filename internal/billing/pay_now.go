@@ -365,9 +365,11 @@ func (s *Service) replaceOverdueSubscription(ctx context.Context, payment *molli
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE public.invoices
-		    SET status = 'paid', paid_at = COALESCE(paid_at, now()), subscription_id = $2
+		    SET status = 'paid', paid_at = COALESCE(paid_at, now()), subscription_id = $2,
+		        period_start = COALESCE(period_start, paid_at, now()),
+		        period_end = COALESCE(period_end, $3)
 		  WHERE mollie_payment_id = $1`,
-		payment.ID, newID,
+		payment.ID, newID, firstChargeDate(mollieSub),
 	); err != nil {
 		return false, fmt.Errorf("mark pay-now invoice paid: %w", err)
 	}
