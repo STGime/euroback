@@ -20,3 +20,14 @@ func TestSignUp_RefusesReservedAddress(t *testing.T) {
 		}
 	}
 }
+
+// Quoted / escaped address forms are refused (400) before any lookup.
+func TestSignUp_RefusesNonPlainAddress(t *testing.T) {
+	svc := &PlatformAuthService{}
+	for _, addr := range []string{`"name"@gmail.com`, `a\b@example.org`, "a..b@example.org", "a@b@example.org"} {
+		_, err := svc.SignUp(context.Background(), addr, "a-long-enough-passphrase-42", nil, "", "")
+		if !errors.Is(err, ErrNotPlainEmail) || !isUserError(err) {
+			t.Fatalf("%s: err = %v, want ErrNotPlainEmail (400)", addr, err)
+		}
+	}
+}

@@ -14,6 +14,9 @@ func TestBase(t *testing.T) {
 		"someone@gmail.com.":           "someone@gmail.com",
 		"not-an-address":               "not-an-address",
 		"a@b@gmail.com":                "a@b@gmail.com",
+		`"name"@gmail.com`:             "name@gmail.com",
+		`"a.b+x"@googlemail.com`:       "ab@gmail.com",
+		`"a\"b"@example.org`:           `a"b@example.org`, // an escaped quote is a character of its own
 	}
 	for in, want := range cases {
 		if got := Base(in); got != want {
