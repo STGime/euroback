@@ -145,7 +145,7 @@ jobs:
           DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           APIKEY_TEST_GATEWAY_URL: postgres://eurobase_gateway:localdev@localhost:5432/eurobase?sslmode=require
           PAT_TEST_DEVELOPER_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
-        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestAPIKeys_RotateSecret|TestAdminSuspendProject_DB|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs|TestSuperadminBypassVerify|TestUpdateAuthConfig_UnchangedRateLimitsAboveCeiling|TestAdminListBroadcastAudience_Excludes|TestAdminSendAllowlistEmail|TestTeamBetaWindow_DB'
+        run: go test -count=1 -v ./internal/tenant/ -run 'TestAPIKeys_PublicKeyRetrievable|TestAPIKeys_RotateSecret|TestAdminSuspendProject_DB|TestOrgInvitation|TestHandleInviteMember|TestSSOSession|TestSetProjectOrg|TestEnforceOrgSSOForProject|TestCreateProject_|TestStashCallerRole|TestCanDeleteProject|TestScopedPATs|TestSuperadminBypassVerify|TestUpdateAuthConfig_UnchangedRateLimitsAboveCeiling|TestAdminListBroadcastAudience_Excludes|TestAdminSendAllowlistEmail|TestTeamBetaWindow'
 
       - name: Account suspension (sign-in + project-create gates)
         env:

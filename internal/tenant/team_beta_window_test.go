@@ -25,6 +25,8 @@ func (f *fakeBetaMailer) SendRaw(_ context.Context, _ string, subject, _ string)
 	return nil
 }
 
+func (f *fakeBetaMailer) SkipPlatformRecipient(context.Context, string) bool { return false }
+
 func (f *fakeBetaMailer) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -160,5 +162,75 @@ func TestRenderTeamBetaMail(t *testing.T) {
 	subj, body = renderTeamBetaMail(p, true, "https://console.eurobase.app")
 	if !strings.Contains(subj, "has ended") || !strings.Contains(body, "Nothing is deleted") {
 		t.Fatalf("ended mail: %q", subj)
+	}
+}
+
+// TestTeamBetaWindow_CreateTeam_DB: a Team project gets the 14-day end at
+// creation; a second one shares the owner's window; after the window
+// suspended a project, new Team projects are refused and a plain
+// unsuspend is refused (Extend reactivates).
+func TestTeamBetaWindow_CreateTeam_DB(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	svc := &TenantService{pool: pool}
+
+	email := "team-beta-create@test.eurobase.local"
+	uid := insertTestPlatformUser(t, pool, email)
+	if _, err := pool.Exec(ctx, `UPDATE platform_users SET team_beta_access = true WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	first, err := svc.CreateProject(ctx, uid, email, CreateProjectRequest{
+		Name: "Beta One", Slug: "test-team-beta-one", Region: "fr-par", Plan: "team",
+	})
+	if err != nil {
+		t.Fatalf("CreateProject team: %v", err)
+	}
+	t.Cleanup(func() { cleanupProject(t, pool, first.ID) })
+	var end1 time.Time
+	if err := pool.QueryRow(ctx, `SELECT beta_ends_at FROM projects WHERE id = $1`, first.ID).Scan(&end1); err != nil {
+		t.Fatalf("beta_ends_at of a new Team project: %v", err)
+	}
+	if d := time.Until(end1); d < 13*24*time.Hour || d > 15*24*time.Hour {
+		t.Fatalf("Team project ends in %v, want ~14 days", d)
+	}
+
+	// Pull the first window in; the second project shares it.
+	if _, err := pool.Exec(ctx, `UPDATE projects SET status = 'active', beta_ends_at = now() + interval '5 days' WHERE id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.CreateProject(ctx, uid, email, CreateProjectRequest{
+		Name: "Beta Two", Slug: "test-team-beta-two", Region: "fr-par", Plan: "team",
+	})
+	if err != nil {
+		t.Fatalf("second Team project: %v", err)
+	}
+	t.Cleanup(func() { cleanupProject(t, pool, second.ID) })
+	var end2 time.Time
+	if err := pool.QueryRow(ctx, `SELECT beta_ends_at FROM projects WHERE id = $1`, second.ID).Scan(&end2); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Until(end2); d > 6*24*time.Hour {
+		t.Fatalf("second Team project ends in %v, want the owner's window (~5 days)", d)
+	}
+
+	// The window ends for the first project.
+	if _, err := pool.Exec(ctx, `UPDATE projects SET beta_ends_at = now() - interval '1 minute' WHERE id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	(&TeamBetaExpiry{Pool: pool}).RunOnce(ctx)
+	if _, err := svc.CreateProject(ctx, uid, email, CreateProjectRequest{
+		Name: "Beta Three", Slug: "test-team-beta-three", Region: "fr-par", Plan: "team",
+	}); err != ErrTeamBetaEnded {
+		t.Fatalf("Team project after the window ended: err %v, want ErrTeamBetaEnded", err)
+	}
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", first.ID)
+	req := httptest.NewRequest(http.MethodDelete, "/platform/admin/projects/"+first.ID+"/suspend", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+	AdminUnsuspendProject(pool)(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "team_beta_ended") {
+		t.Fatalf("unsuspend of a window suspension: %d %s, want 409 team_beta_ended", rec.Code, rec.Body.String())
 	}
 }

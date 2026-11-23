@@ -404,6 +404,8 @@
 
 	async function extendTeamBeta(p: AdminProject) {
 		if (projectBusy) return;
+		const until = new Date(Math.max(new Date(p.beta_ends_at ?? 0).getTime(), Date.now()) + 14 * 86400000).toLocaleDateString();
+		if (!confirm(`Extend the Team beta of ${p.slug} to ${until}?${p.beta_expired_at ? ' This also reactivates the project.' : ''}`)) return;
 		projectBusy = p.id;
 		error = null;
 		try {
@@ -1231,7 +1233,7 @@
 										>
 											Suspend
 										</button>
-									{:else if p.status === 'suspended'}
+									{:else if p.status === 'suspended' && !p.beta_expired_at}
 										<button
 											type="button"
 											onclick={() => unsuspendProject(p)}

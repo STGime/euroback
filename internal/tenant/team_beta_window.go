@@ -44,6 +44,8 @@ const (
 // BetaMailer is the email surface the window needs (email.EmailService).
 type BetaMailer interface {
 	SendRaw(ctx context.Context, to, subject, htmlBody string) error
+	// SkipPlatformRecipient: reserved address or active bounce block.
+	SkipPlatformRecipient(ctx context.Context, to string) bool
 }
 
 // TeamBetaExpiry sends reminders and suspends projects whose beta ended.
@@ -173,7 +175,8 @@ func scanBetaProjects(rows interface {
 // mailOwner sends best-effort; reserved and suppressed addresses are
 // skipped like other platform mail.
 func (t *TeamBetaExpiry) mailOwner(ctx context.Context, p betaProject, subject, body string) {
-	if t.Mailer == nil || p.ownerEmail == "" || mailaddr.IsReserved(p.ownerEmail) {
+	if t.Mailer == nil || p.ownerEmail == "" || mailaddr.IsReserved(p.ownerEmail) ||
+		t.Mailer.SkipPlatformRecipient(ctx, p.ownerEmail) {
 		return
 	}
 	var suppressed bool
@@ -322,4 +325,15 @@ func AdminExtendTeamBeta(pool *pgxpool.Pool) http.HandlerFunc {
 			"id": projectID, "status": status, "beta_ends_at": endsAt, "reactivated": reactivated,
 		})
 	}
+}
+
+// teamBetaEndedFor reports whether one of the owner's Team projects was
+// suspended because its beta ended (and not extended since).
+func teamBetaEndedFor(ctx context.Context, pool *pgxpool.Pool, ownerID string) (bool, error) {
+	var ended bool
+	err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM public.projects
+		                 WHERE owner_id = $1::uuid AND beta_expired_at IS NOT NULL)`,
+		ownerID).Scan(&ended)
+	return ended, err
 }

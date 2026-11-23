@@ -170,3 +170,11 @@ func bounceKindText(kind string) string {
 		return "the receiving server rejected it"
 	}
 }
+
+// SkipPlatformRecipient reports whether platform mail to `to` should be
+// skipped (reserved address or an active bounce block), for senders
+// outside this package that use SendRaw.
+func (s *EmailService) SkipPlatformRecipient(ctx context.Context, to string) bool {
+	reason, _ := s.platformSendSkip(ctx, to)
+	return reason != ""
+}
