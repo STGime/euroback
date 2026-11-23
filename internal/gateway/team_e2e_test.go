@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1151,8 +1152,16 @@ func runTeamChecks(t *testing.T, env *teamEnv) {
 			if r := as(jwt, "/data/"+tbl+"?aggregate=count"); r.code != http.StatusForbidden {
 				return fmt.Errorf("viewer counted internal table %s: %w", tbl, r)
 			}
-			if r := as(env.platformJWT, "/data/"+tbl); r.code != 200 {
-				return fmt.Errorf("owner can no longer read %s: %w", tbl, r)
+			// On the shared cluster the data API runs on the project's `_ddl`
+			// login, which holds no privilege on the credential tables
+			// (tenantlogin.CredentialTables) → 403. A Team project's owner
+			// pool owns its database and reads them.
+			want := 200
+			if env.scenario == "free" && slices.Contains(tenantlogin.CredentialTables, tbl) {
+				want = http.StatusForbidden
+			}
+			if r := as(env.platformJWT, "/data/"+tbl); r.code != want {
+				return fmt.Errorf("owner read of %s: want %d: %w", tbl, want, r)
 			}
 		}
 		// Embedding an internal table as a relation is refused too.
