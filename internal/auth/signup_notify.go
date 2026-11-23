@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -44,9 +45,11 @@ func SetDiscordSignupsWebhook(url string) {
 // once inside the caller's tx so we avoid a second DB roundtrip on
 // the hot signup path.
 //
-// The ping carries no e-mail address or other personal data (Discord is a
-// US service) — only the running total; who signed up is in /admin.
-func notifySignupAsync(totalSignups int64) {
+// The ping carries the new account's e-mail address (so suspicious
+// sign-ups stand out at a glance) and the running total. Note that
+// Discord is a US service; the other Discord notices carry no personal
+// data.
+func notifySignupAsync(email string, totalSignups int64) {
 	if discordSignupWebhookURL == "" {
 		return
 	}
@@ -60,7 +63,7 @@ func notifySignupAsync(totalSignups int64) {
 		payload := map[string]any{
 			"embeds": []map[string]any{{
 				"title":       "🎉 New signup",
-				"description": fmt.Sprintf("Someone just signed up.\n\n**Total signups:** %d — see Admin → Signup users", totalSignups),
+				"description": fmt.Sprintf("`%s` just signed up.\n\n**Total signups:** %d — see Admin → Signup users", strings.ReplaceAll(email, "`", ""), totalSignups),
 				"url":         "https://console.eurobase.app/admin",
 				"color":       0x10b981, // emerald-500
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
