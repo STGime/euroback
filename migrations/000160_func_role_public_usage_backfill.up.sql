@@ -11,7 +11,8 @@
 -- with "permission denied for schema public" instead of filtering rows.
 --
 -- Grants it where missing and verifies; fails loudly if a grant had no
--- effect (missing grant option), naming the fix.
+-- effect (missing grant option), naming the fix. The func keeper
+-- (tenantlogin) keeps the grant from then on.
 
 DO $$
 DECLARE
@@ -31,7 +32,7 @@ BEGIN
             END IF;
         END IF;
     END LOOP;
-    IF array_length(v_missing, 1) > 0 THEN
+    IF cardinality(v_missing) > 0 THEN
         RAISE EXCEPTION 'USAGE on schema public could not be granted to % tenant func role(s), e.g. %; eurobase_migrator needs USAGE ON SCHEMA public WITH GRANT OPTION (granted by the cluster admin)',
             array_length(v_missing, 1), v_missing[1];
     END IF;
