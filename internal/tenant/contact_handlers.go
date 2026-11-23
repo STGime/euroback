@@ -74,6 +74,18 @@ type PublicContactRequest struct {
 	Name    string `json:"name,omitempty"` // optional
 	Email   string `json:"email"`
 	Message string `json:"message"`
+	// Source says which widget sent it: "console" for the console's
+	// sign-in page; anything else (or nothing) is the marketing site.
+	Source string `json:"source,omitempty"`
+}
+
+// contactSource maps the client's claim to an allowed contact_requests
+// source (CHECK in 000112); unknown values count as the marketing site.
+func contactSource(s string) string {
+	if s == "console" {
+		return "console"
+	}
+	return "marketing_site"
 }
 
 // HandlePublicContactRequest is the marketing-widget entry point.
@@ -153,9 +165,9 @@ func HandlePublicContactRequest(pool *pgxpool.Pool, limiter *ratelimit.RateLimit
 		err := pool.QueryRow(insertCtx, `
 			INSERT INTO public.contact_requests
 			    (name, email, message, source, user_agent, ip_address)
-			VALUES ($1, $2, $3, 'marketing_site', $4, $5::inet)
+			VALUES ($1, $2, $3, $4, $5, $6::inet)
 			RETURNING id
-		`, name, req.Email, req.Message, userAgentPtr, clientIP).Scan(&id)
+		`, name, req.Email, req.Message, contactSource(req.Source), userAgentPtr, clientIP).Scan(&id)
 		if err != nil {
 			// Do NOT log req.Email — it's PII, and this line runs on
 			// the log-noise path. We DO include the client IP because

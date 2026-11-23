@@ -72,6 +72,7 @@
 	function title(it: InboxItem): string {
 		if (it.kind === 'support') return it.subject || '(no subject)';
 		if (it.source === 'team_beta_request') return 'Team beta request';
+		if (it.source === 'console') return 'Contact form (console sign-in)';
 		return 'Contact form';
 	}
 

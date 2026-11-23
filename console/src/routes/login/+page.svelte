@@ -6,6 +6,7 @@
 	import { api, APIError } from '$lib/api.js';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
+	import ContactWidget from '$lib/ContactWidget.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
 	import { passkeysSupported, getPasskeyAssertion, passkeyErrorMessage } from '$lib/webauthn';
 
@@ -400,7 +401,7 @@
 	</div>
 
 	<!-- Right panel: auth -->
-	<div class="flex w-full lg:w-1/2 items-center justify-center p-8 bg-gray-50">
+	<div class="flex w-full lg:w-1/2 items-center justify-center p-8 pb-24 bg-gray-50">
 		<div class="w-full max-w-sm">
 			<!-- Mobile logo -->
 			<div class="mb-8 lg:hidden text-center">
@@ -761,3 +762,5 @@
 		</div>
 	</div>
 </div>
+
+<ContactWidget />

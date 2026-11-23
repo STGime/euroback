@@ -127,3 +127,18 @@ func TestTruncateRunes(t *testing.T) {
 		})
 	}
 }
+
+func TestContactSource(t *testing.T) {
+	for in, want := range map[string]string{
+		"":               "marketing_site",
+		"console":        "console",
+		"Console":        "marketing_site",
+		"sdk":            "marketing_site",
+		"marketing_site": "marketing_site",
+		"x' OR 1=1 --":   "marketing_site",
+	} {
+		if got := contactSource(in); got != want {
+			t.Errorf("contactSource(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
