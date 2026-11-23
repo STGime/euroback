@@ -24,6 +24,12 @@ BEGIN
     IF current_database() <> 'eurobase' THEN
         RAISE EXCEPTION 'catalog-lockdown.sql must run in database eurobase, not %', current_database();
     END IF;
+    -- The owner-rights guard reads the catalog through this helper on a
+    -- tenant's own login; without it (migration 000158 not applied yet)
+    -- the lockdown would break console SQL for every shared project.
+    IF pg_catalog.to_regprocedure('public.owner_rights_objects(text)') IS NULL THEN
+        RAISE EXCEPTION 'public.owner_rights_objects(text) is missing: deploy migration 000158 and its code first';
+    END IF;
 
     -- 1. Catalog tables and views (pg_class, pg_proc, pg_policy,
     --    pg_stat_* views, …): platform roles only.
