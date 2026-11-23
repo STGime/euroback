@@ -29,9 +29,16 @@ import (
 // <Scaleway-LB-CIDR>` — see docs/runbooks/rate-limits-ip-source.md);
 // when that lands, drop this back to a real per-user number
 // (5–10/hour).
+//
+// SignupMailboxLimit counts signups per mailbox (mailaddr.Base: "+tag"
+// and Gmail dots ignored), which doesn't depend on the client IP: 5 a day
+// leaves room for typos and retries, not for a batch of accounts on one
+// inbox.
 const (
 	SignupLimit          = 60
 	SignupWindow         = 1 * time.Hour
+	SignupMailboxLimit   = 5
+	SignupMailboxWindow  = 24 * time.Hour
 	SigninFailLimit      = 5
 	SigninFailWindow     = 15 * time.Minute
 	ForgotPasswordLimit  = 3

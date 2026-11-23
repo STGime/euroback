@@ -643,6 +643,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					window time.Duration
 				}{
 					"platform_signup":              {ratelimit.SignupLimit, ratelimit.SignupWindow},
+					"platform_signup_mailbox":      {ratelimit.SignupMailboxLimit, ratelimit.SignupMailboxWindow},
 					"platform_forgot":              {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
 					"platform_resend_verification": {ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow},
 					"signin_fail":                  {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},

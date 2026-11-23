@@ -221,6 +221,37 @@ var ErrBlockedSignupDomain = errors.New("this email address can't be used to sig
 // one row per accepted document lands in `legal_acceptances` inside the
 // same transaction as the user insert, so there's never a user without
 // its consent trail.
+// suspendedMailbox reports whether email delivers to the same mailbox
+// (mailaddr.Base: "+tag" and Gmail dots ignored) as a suspended account,
+// so a suspended user can't come back under "name+1@…". Suspended
+// accounts are few (partial index on suspended_at), so they are compared
+// in Go with the one normalisation. Fails open on a read error, like the
+// domain blocklist: abuse mitigation, not a security boundary.
+func (s *PlatformAuthService) suspendedMailbox(ctx context.Context, email string) bool {
+	base := mailaddr.Base(email)
+	rows, err := s.pool.Query(ctx, `SELECT email FROM public.platform_users WHERE suspended_at IS NOT NULL`)
+	if err != nil {
+		slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+			return false
+		}
+		if mailaddr.Base(e) == base {
+			slog.Info("signup refused: mailbox of a suspended account")
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+	}
+	return false
+}
+
 func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string, accepted []AcceptedDocument, clientIP, userAgent string) (*PlatformAuthResponse, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
@@ -245,6 +276,9 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 			slog.Info("signup blocked by domain blocklist", "email", email)
 			return nil, ErrBlockedSignupDomain
 		}
+	}
+	if s.suspendedMailbox(ctx, email) {
+		return nil, ErrBlockedSignupDomain
 	}
 	if err := ValidatePasswordStrength(password, email); err != nil {
 		return nil, err

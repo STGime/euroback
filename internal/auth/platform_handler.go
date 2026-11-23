@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/eurobase/euroback/internal/clientip"
+	"github.com/eurobase/euroback/internal/mailaddr"
 )
 
 // AuthRateLimiter is a function that checks rate limits and writes a 429 if exceeded.
@@ -40,6 +41,13 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 		var req signUpRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		// And per mailbox ("+tag" and Gmail dots ignored): the IP limit
+		// above can't tell clients apart behind a shared address, this
+		// one stops many accounts on one inbox.
+		if check != nil && check(w, r, "platform_signup_mailbox", mailaddr.Base(req.Email)) {
 			return
 		}
 

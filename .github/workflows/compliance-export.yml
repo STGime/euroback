@@ -52,6 +52,7 @@ on:
       - internal/auth/superadmin_bypass.go
       - internal/auth/apikey_middleware.go
       - internal/auth/platform_auth.go
+      - internal/auth/signup_mailbox_test.go
       - migrations/000142_platform_user_suspended.up.sql
       - internal/tenant/user_suspension_admin_handlers.go
       - migrations/000136_converge_tenant_ownership.up.sql
@@ -148,7 +149,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
         run: |
-          go test -count=1 -v ./internal/auth/ -run 'TestIssuePlatformJWT_SuspendedRefused|TestSignIn_SuspendedNoEnumeration'
+          go test -count=1 -v ./internal/auth/ -run 'TestIssuePlatformJWT_SuspendedRefused|TestSignIn_SuspendedNoEnumeration|TestSuspendedMailbox_DB'
           go test -count=1 -v ./internal/tenant/ -run 'TestCreateProject_SuspendedRefused'
 
 
