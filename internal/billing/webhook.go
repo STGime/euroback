@@ -444,10 +444,10 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 	if _, err := tx.Exec(ctx,
 		`UPDATE public.invoices
 		    SET status = 'paid', paid_at = COALESCE(paid_at, now()),
-		        period_start = COALESCE(period_start, paid_at, now()),
+		        period_start = COALESCE(period_start, $3, now()),
 		        period_end = COALESCE(period_end, $2)
 		  WHERE mollie_payment_id = $1`,
-		payment.ID, nextChargeAt,
+		payment.ID, nextChargeAt, payment.PaidAt,
 	); err != nil {
 		return fmt.Errorf("mark invoice paid: %w", err)
 	}
@@ -748,9 +748,9 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 		`INSERT INTO public.invoices
 		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at,
 		     period_start, period_end, billed_to_user_id)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(), now(), $5,
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(), COALESCE($6, now()), $5,
 		         (SELECT owner_id FROM public.projects WHERE id = $1))`,
-		projectID, subscriptionID, payment.ID, priceCents, nextChargeAt,
+		projectID, subscriptionID, payment.ID, priceCents, nextChargeAt, payment.PaidAt,
 	); err != nil {
 		return fmt.Errorf("insert invoice: %w", err)
 	}
