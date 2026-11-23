@@ -993,15 +993,20 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	dupe := tag.RowsAffected() == 0
 
 	// Clear past_due if a previous charge had failed and this
-	// one succeeded (Mollie's automatic retry recovered).
+	// one succeeded (Mollie's automatic retry recovered) — but not when
+	// Mollie has stopped the subscription (e.g. we cancelled it after a
+	// chargeback and a charge created before that settled late): it
+	// won't charge again, so it stays past_due for Pay now.
+	stopped := mollieSub != nil && mollieSubscriptionStopped(mollieSub.Status)
 	if _, err := tx.Exec(ctx,
 		`UPDATE public.subscriptions
-		    SET status = 'active',
-		        past_due_since = NULL,
+		    SET status = CASE WHEN $3 THEN status ELSE 'active' END,
+		        past_due_since = CASE WHEN $3 THEN past_due_since END,
 		        next_charge_at = COALESCE($1, next_charge_at)
 		  WHERE id = $2 AND status IN ('active', 'past_due')`,
 		nextCharge,
 		subscriptionID,
+		stopped,
 	); err != nil {
 		return fmt.Errorf("clear past_due: %w", err)
 	}

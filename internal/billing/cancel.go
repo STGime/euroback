@@ -201,7 +201,13 @@ func (s *Service) CancelSubscription(ctx context.Context, userID, subscriptionID
 	// subscription in 'incomplete' state (first payment never
 	// went through) has no paid invoice — that's fine, we still
 	// flip local state below.
+	// A past-due subscription's current period is unpaid (a failed or
+	// charged-back charge): the newest paid invoice is an earlier
+	// period's, which is used up. Nothing to refund.
 	refundCents := 0
+	if status == "past_due" {
+		err = pgx.ErrNoRows
+	}
 	if err == nil && lastMolliePayment != nil && *lastMolliePayment != "" {
 		periodEnd := lastPaidAt.AddDate(0, 1, 0) // one month past paid_at
 		if nextChargeAt != nil {

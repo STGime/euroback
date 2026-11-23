@@ -86,7 +86,7 @@ func renderPaymentProblemMail(projectID, projectName string, downgradeAt time.Ti
 	if kind == paymentProblemChargedBack {
 		subject = fmt.Sprintf("Eurobase — the payment for %s was reversed", projectName)
 		what = "The bank or card issuer reversed this period's payment for your Pro project <strong>" + name + "</strong> (a chargeback), so the period is unpaid. " +
-			"We have stopped the subscription: no further charges will be made to that card."
+			"We have stopped the subscription: no further charges will be made to that payment method."
 	}
 
 	body = fmt.Sprintf(`<!DOCTYPE html>

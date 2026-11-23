@@ -135,8 +135,10 @@ func TestChargeback_CurrentPeriod(t *testing.T) {
 	}
 }
 
-// A chargeback of an earlier period only marks that invoice.
-func TestChargeback_EarlierPeriod(t *testing.T) {
+// A chargeback of an earlier month (cards usually charge back after the
+// next renewal) stops the subscription too: the disputed card must not
+// be charged again.
+func TestChargeback_EarlierPeriodStopsToo(t *testing.T) {
 	fx, subID, payments := chargebackFixture(t, 2)
 	f, client := newPMMollie(t)
 	mailer := &fakeMailer{}
@@ -149,11 +151,69 @@ func TestChargeback_EarlierPeriod(t *testing.T) {
 	if got := fx.invoiceStatus(t, payments[0]); got != "charged_back" {
 		t.Errorf("invoice status = %q, want charged_back", got)
 	}
-	if status, _, _ := fx.subscriptionState(t); status != "active" {
-		t.Errorf("subscription = %q, want active", status)
+	if got := fx.invoiceStatus(t, payments[1]); got != "paid" {
+		t.Errorf("newer invoice status = %q, want paid", got)
 	}
-	if len(f.canceled) != 0 || mailer.calls != 0 {
-		t.Errorf("cancels %v, mails %d; want none", f.canceled, mailer.calls)
+	if status, _, canceled := fx.subscriptionState(t); status != "past_due" || canceled {
+		t.Errorf("subscription = %q canceled=%v, want past_due, not cancelled", status, canceled)
+	}
+	if len(f.canceled) != 1 || mailer.calls != 1 {
+		t.Errorf("cancels %v, mails %d; want 1, 1", f.canceled, mailer.calls)
+	}
+}
+
+// A subscription the owner already cancelled is left to ops: only the
+// invoice is marked, and the alert says so.
+func TestChargeback_CancelledSubscriptionLeftToOps(t *testing.T) {
+	fx, subID, payments := chargebackFixture(t, 1)
+	if _, err := fx.pool.Exec(context.Background(),
+		`UPDATE public.subscriptions SET canceled_at = now() WHERE id = $1`, fx.subscriptionID); err != nil {
+		t.Fatal(err)
+	}
+	f, client := newPMMollie(t)
+	mailer := &fakeMailer{}
+	var alerts []string
+	svc := NewService(fx.pool, client, Config{}, true)
+	svc.invoiceMailer = mailer
+	svc.opsAlert = func(title, desc string) { alerts = append(alerts, desc) }
+
+	if handled, err := svc.processChargeback(context.Background(), cbPayment(payments[0], subID, "25.00")); err != nil || !handled {
+		t.Fatalf("processChargeback: handled=%v err=%v", handled, err)
+	}
+	if got := fx.invoiceStatus(t, payments[0]); got != "charged_back" {
+		t.Errorf("invoice status = %q, want charged_back", got)
+	}
+	if status, _, _ := fx.subscriptionState(t); status != "active" || len(f.canceled) != 0 || mailer.calls != 0 {
+		t.Errorf("subscription %q, cancels %v, mails %d; want active, none, none", status, f.canceled, mailer.calls)
+	}
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "already cancelled") {
+		t.Errorf("alerts = %v", alerts)
+	}
+}
+
+// A charge Mollie created before we stopped the subscription that
+// settles afterwards is recorded, but doesn't reactivate a subscription
+// Mollie has stopped: it stays past due for Pay now.
+func TestRecordRecurringPayment_StoppedSubscriptionStaysPastDue(t *testing.T) {
+	fx, subID, payments := chargebackFixture(t, 1)
+	f, client := newPMMollie(t)
+	svc := NewService(fx.pool, client, Config{}, true)
+	ctx := context.Background()
+	if handled, err := svc.processChargeback(ctx, cbPayment(payments[0], subID, "25.00")); err != nil || !handled {
+		t.Fatalf("processChargeback: handled=%v err=%v", handled, err)
+	}
+	if f.subStatus[subID] != "canceled" {
+		t.Fatalf("Mollie subscription status = %q, want canceled", f.subStatus[subID])
+	}
+	late := cbPayment("tr_late_"+fx.molliePaymentID, subID, "")
+	if err := svc.recordRecurringPayment(ctx, late); err != nil {
+		t.Fatalf("recordRecurringPayment: %v", err)
+	}
+	if got := fx.invoiceStatus(t, late.ID); got != "paid" {
+		t.Errorf("late charge invoice = %q, want paid", got)
+	}
+	if status, pastDue, _ := fx.subscriptionState(t); status != "past_due" || !pastDue {
+		t.Errorf("subscription = %q past_due_since=%v, want past_due, set", status, pastDue)
 	}
 }
 
@@ -173,5 +233,26 @@ func TestChargeback_PartialLeftToOps(t *testing.T) {
 	}
 	if status, _, _ := fx.subscriptionState(t); status != "active" || len(f.canceled) != 0 || alerts != 1 {
 		t.Errorf("subscription %q, cancels %v, alerts %d; want active, none, 1", status, f.canceled, alerts)
+	}
+}
+
+// An immediate cancel of a past-due subscription refunds nothing: the
+// newest paid invoice is an earlier, used-up period (after a chargeback
+// next_charge_at is still in the future, which would otherwise prorate
+// part of it).
+func TestCancelImmediate_PastDueRefundsNothing(t *testing.T) {
+	fx, subID, payments := chargebackFixture(t, 2)
+	f, client := newPMMollie(t)
+	svc := NewService(fx.pool, client, Config{}, true)
+	ctx := context.Background()
+	if handled, err := svc.processChargeback(ctx, cbPayment(payments[1], subID, "25.00")); err != nil || !handled {
+		t.Fatalf("processChargeback: handled=%v err=%v", handled, err)
+	}
+	res, err := svc.CancelSubscription(ctx, fx.ownerID, fx.subscriptionID, CancelModeImmediate)
+	if err != nil {
+		t.Fatalf("CancelSubscription: %v", err)
+	}
+	if res.RefundedCents != 0 || len(f.refunded) != 0 {
+		t.Errorf("refunded %d cents (%v), want none", res.RefundedCents, f.refunded)
 	}
 }

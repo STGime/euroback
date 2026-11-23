@@ -23,19 +23,21 @@ import (
 //
 // On a full chargeback:
 //   - the invoice becomes 'charged_back';
-//   - if it paid the subscription's current period (the newest paid
-//     invoice of a live subscription the owner hasn't cancelled; a
-//     cancelled one is left to ops), the Mollie subscription is
-//     cancelled and ours goes past_due: the owner gets the
-//     payment-problem mail, can settle with Pay now, and the usual
-//     grace ends on Free. canceled_at stays NULL so Pay now accepts it;
-//   - ops get an alert.
+//   - if its subscription is live and the owner hasn't cancelled it,
+//     the Mollie subscription is cancelled (whichever month was
+//     disputed: card chargebacks usually arrive after the next renewal,
+//     and further charges on the disputed card would bring further
+//     chargebacks) and ours goes past_due: the owner gets the
+//     payment-problem mail, can settle with Pay now (a new payment
+//     method), and the usual grace ends on Free. canceled_at stays NULL
+//     so Pay now accepts it;
+//   - ops get an alert saying which of these happened. A subscription
+//     already cancelled or ended is left to ops.
 //
-// A chargeback of an older period only marks its invoice. A partial
-// chargeback is left to ops (alert). If Mollie later reports the payment
-// as no longer charged back (the merchant won the dispute), the invoice
-// goes back to 'paid' and ops are alerted; the subscription is not
-// restarted automatically.
+// A partial chargeback is left to ops (alert). If Mollie later reports
+// the payment without amountChargedBack (the merchant won the dispute;
+// Mollie doesn't document whether it does), the invoice goes back to
+// 'paid' and ops are alerted; the subscription is not restarted.
 
 // chargedBackCents is the amount Mollie reports as charged back.
 func chargedBackCents(p *mollie.Payment) int {
@@ -53,10 +55,10 @@ func (s *Service) processChargeback(ctx context.Context, payment *mollie.Payment
 	if payment.Status != "paid" || total <= 0 {
 		return false, nil
 	}
-	cb := chargedBackCents(payment)
-	if cb == 0 {
+	if payment.AmountChargedBack == nil {
 		return s.processChargebackReversal(ctx, payment)
 	}
+	cb := chargedBackCents(payment)
 	if cb < total {
 		slog.Error("billing.webhook.partial_chargeback", "mollie_payment_id", payment.ID,
 			"charged_back_cents", cb, "amount_cents", total)
@@ -96,21 +98,19 @@ func (s *Service) processChargeback(ctx context.Context, payment *mollie.Payment
 		return true, nil
 	}
 
-	// Did this payment pay for the period the project is in now?
+	// Is the subscription still live (and not cancelled by its owner)?
 	var (
-		current             bool
+		live                bool
+		subStatus           string
 		mollieSub, mollieCu *string
 	)
 	if subscriptionID != nil {
 		err = s.pool.QueryRow(ctx,
-			`SELECT s.status IN ('active', 'past_due') AND s.canceled_at IS NULL
-			        AND NOT EXISTS (SELECT 1 FROM public.invoices n
-			                         WHERE n.subscription_id = s.id AND n.status = 'paid'
-			                           AND n.id <> $2 AND n.paid_at > $3),
-			        s.mollie_subscription_id, s.mollie_customer_id
-			   FROM public.subscriptions s WHERE s.id = $1`,
-			*subscriptionID, invoiceID, paidAt,
-		).Scan(&current, &mollieSub, &mollieCu)
+			`SELECT status IN ('active', 'past_due') AND canceled_at IS NULL, status,
+			        mollie_subscription_id, mollie_customer_id
+			   FROM public.subscriptions WHERE id = $1`,
+			*subscriptionID,
+		).Scan(&live, &subStatus, &mollieSub, &mollieCu)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return true, fmt.Errorf("load subscription for chargeback %s: %w", payment.ID, err)
 		}
@@ -119,7 +119,7 @@ func (s *Service) processChargeback(ctx context.Context, payment *mollie.Payment
 	// Stop further charges on the disputed card first. Already stopped
 	// is fine; any other failure fails the webhook so Mollie calls again
 	// (nothing is written before this point).
-	if current && mollieSub != nil && *mollieSub != "" && mollieCu != nil && *mollieCu != "" {
+	if live && mollieSub != nil && *mollieSub != "" && mollieCu != nil && *mollieCu != "" {
 		if _, cerr := s.client.CancelSubscription(ctx, *mollieCu, *mollieSub); cerr != nil && !errors.Is(cerr, mollie.ErrNotFound) {
 			cur, gerr := s.client.GetSubscription(ctx, *mollieCu, *mollieSub)
 			if gerr != nil || !mollieSubscriptionStopped(cur.Status) {
@@ -142,7 +142,7 @@ func (s *Service) processChargeback(ctx context.Context, payment *mollie.Payment
 		return true, fmt.Errorf("mark invoice charged back: %w", err)
 	}
 	pastDue := false
-	if current {
+	if live {
 		tag, err := tx.Exec(ctx,
 			`UPDATE public.subscriptions
 			    SET status = 'past_due', past_due_since = COALESCE(past_due_since, now())
@@ -158,19 +158,35 @@ func (s *Service) processChargeback(ctx context.Context, payment *mollie.Payment
 		return true, fmt.Errorf("commit chargeback: %w", err)
 	}
 
+	mailed := false
+	if pastDue && mollieSub != nil && *mollieSub != "" {
+		sendPaymentProblemMail(ctx, s.pool, s.invoiceMailer, *mollieSub, paymentProblemChargedBack)
+		mailed = true
+	}
 	slog.Warn("billing.webhook.charged_back",
 		"mollie_payment_id", payment.ID, "project_id", projectID,
-		"current_period", current, "subscription_past_due", pastDue)
-	if pastDue && mollieSub != nil {
-		sendPaymentProblemMail(ctx, s.pool, s.invoiceMailer, *mollieSub, paymentProblemChargedBack)
-	}
-	what := "an earlier period's invoice is marked charged back; the subscription is unchanged."
-	if current {
-		what = "the Mollie subscription is cancelled and the subscription is past due (owner mailed; Pay now or Free after the grace period)."
-	}
+		"subscription_live", live, "subscription_past_due", pastDue, "owner_mailed", mailed)
 	s.alertOps("Chargeback",
-		fmt.Sprintf("Payment `%s` (%s) for project `%s` was charged back: %s", payment.ID, payment.Amount.Value, projectID, what))
+		fmt.Sprintf("Payment `%s` (%s) for project `%s` was charged back; its invoice is marked charged back. %s",
+			payment.ID, payment.Amount.Value, projectID, chargebackOutcome(subscriptionID != nil, live, pastDue, mailed, subStatus)))
 	return true, nil
+}
+
+// chargebackOutcome describes for ops what a chargeback did to the
+// subscription.
+func chargebackOutcome(hasSub, live, pastDue, mailed bool, subStatus string) string {
+	switch {
+	case !hasSub:
+		return "No subscription is linked to the invoice: check the project's plan by hand."
+	case !live:
+		return fmt.Sprintf("The subscription was already cancelled or has ended (status %s); nothing else changed: check whether the project should stay on its plan.", subStatus)
+	case !pastDue:
+		return "The Mollie subscription is cancelled; the subscription was already past due (no new mail to the owner)."
+	case !mailed:
+		return "The subscription is past due (no Mollie subscription to cancel); the owner was NOT mailed and can't use Pay now: handle it by hand."
+	default:
+		return "The Mollie subscription is cancelled and the subscription is past due: the owner was mailed and can use Pay now, else the project moves to Free after the grace period."
+	}
 }
 
 // processChargebackReversal turns a charged-back invoice back to paid
