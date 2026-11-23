@@ -443,9 +443,11 @@ func (s *Service) activateFromFirstPayment(ctx context.Context, payment *mollie.
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE public.invoices
-		    SET status = 'paid', paid_at = COALESCE(paid_at, now())
+		    SET status = 'paid', paid_at = COALESCE(paid_at, now()),
+		        period_start = COALESCE(period_start, $3, now()),
+		        period_end = COALESCE(period_end, $2)
 		  WHERE mollie_payment_id = $1`,
-		payment.ID,
+		payment.ID, nextChargeAt, payment.PaidAt,
 	); err != nil {
 		return fmt.Errorf("mark invoice paid: %w", err)
 	}
@@ -744,10 +746,11 @@ func (s *Service) activateNewProjectFromFirstPayment(ctx context.Context, paymen
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at, billed_to_user_id)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(),
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at,
+		     period_start, period_end, billed_to_user_id)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(), COALESCE($6, now()), $5,
 		         (SELECT owner_id FROM public.projects WHERE id = $1))`,
-		projectID, subscriptionID, payment.ID, priceCents,
+		projectID, subscriptionID, payment.ID, priceCents, nextChargeAt, payment.PaidAt,
 	); err != nil {
 		return fmt.Errorf("insert invoice: %w", err)
 	}
@@ -947,6 +950,11 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 			"subscription_id", subscriptionID, "error", err)
 	}
 
+	// The charge pays for the period from the date it was due to the
+	// next one.
+	nextCharge := renewalNextCharge(mollieSub, prevNextCharge, time.Now(), subscriptionID)
+	periodStart, periodEnd := chargePeriod(prevNextCharge, nextCharge)
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -958,8 +966,9 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 	// (PR 6 review).
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO public.invoices
-		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at, billed_to_user_id)
-		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(),
+		    (project_id, subscription_id, mollie_payment_id, amount_cents, currency, status, paid_at,
+		     period_start, period_end, billed_to_user_id)
+		 VALUES ($1, $2, $3, $4, 'EUR', 'paid', now(), $5, $6,
 		         -- The payer: whoever the subscription's Mollie customer
 		         -- belongs to, which after a transfer isn't necessarily
 		         -- the project's current owner.
@@ -970,7 +979,7 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 		             ORDER BY u.created_at LIMIT 1),
 		           (SELECT owner_id FROM public.projects WHERE id = $1)))
 		 ON CONFLICT (mollie_payment_id) DO NOTHING`,
-		projectID, subscriptionID, payment.ID, priceCents,
+		projectID, subscriptionID, payment.ID, priceCents, periodStart, periodEnd,
 	)
 	if err != nil {
 		return fmt.Errorf("insert recurring invoice: %w", err)
@@ -985,7 +994,7 @@ func (s *Service) recordRecurringPayment(ctx context.Context, payment *mollie.Pa
 		        past_due_since = NULL,
 		        next_charge_at = COALESCE($1, next_charge_at)
 		  WHERE id = $2 AND status IN ('active', 'past_due')`,
-		renewalNextCharge(mollieSub, prevNextCharge, time.Now(), subscriptionID),
+		nextCharge,
 		subscriptionID,
 	); err != nil {
 		return fmt.Errorf("clear past_due: %w", err)
@@ -1266,6 +1275,17 @@ func renewalNextCharge(sub *mollie.Subscription, prev *time.Time, now time.Time,
 		"subscription_id", subscriptionID, "fallback", "previous_plus_one_month",
 		"next_charge_at", next.Format("2006-01-02"))
 	return &next
+}
+
+// chargePeriod is the period a renewal pays for: from the date it was due
+// to the next charge. (nil, nil) when that isn't a period (no due date
+// on record, or no later next charge); the invoice then prints the
+// payment date plus one month (invoicePeriodFor).
+func chargePeriod(due, next *time.Time) (*time.Time, *time.Time) {
+	if due == nil || next == nil || !next.After(*due) {
+		return nil, nil
+	}
+	return due, next
 }
 
 // addMonthClamped adds one calendar month, clamped to the last day of

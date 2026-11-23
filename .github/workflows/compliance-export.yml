@@ -79,6 +79,7 @@ on:
       - internal/tenantconn/**
       - internal/sqllog/**
       - internal/enduser/**
+      - internal/billing/**
   workflow_dispatch:
 
 permissions:
@@ -190,6 +191,14 @@ jobs:
           DDL_LOGIN_TEST_ADMIN_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
           DDL_LOGIN_TEST_DEV_URL: postgres://eurobase_developer:localdev@localhost:5432/eurobase?sslmode=require
         run: go test -count=1 -v ./internal/tenantconn/ -run 'TestDDLRunner_ServiceRoleReachesSystemTables'
+
+      # Billing: webhook / renewal / cancel / downgrade paths against the
+      # real schema (the package's DB tests skip in test-go, which has no
+      # database).
+      - name: Billing
+        env:
+          DATABASE_URL: postgres://postgres:export-ci-ephemeral@localhost:5432/eurobase?sslmode=disable
+        run: go test -count=1 -v ./internal/billing/
 
       # Tenant-table ownership convergence (000136): reassigns to _ddl.
       - name: Converge tenant ownership (000136)

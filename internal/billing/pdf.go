@@ -226,7 +226,7 @@ func RenderInvoicePDF(d InvoiceData) ([]byte, error) {
 
 	pdf.SetFont("Helvetica", "", 10)
 	pdf.CellFormat(100, 8, tr(d.Description), "1", 0, "L", false, 0, "")
-	period := fmt.Sprintf("%s–%s", d.PeriodFrom.Format("2 Jan"), d.PeriodTo.Format("2 Jan 2006"))
+	period := fmt.Sprintf("%s–%s", d.PeriodFrom.UTC().Format("2 Jan"), d.PeriodTo.UTC().Format("2 Jan 2006"))
 	pdf.CellFormat(45, 8, tr(period), "1", 0, "L", false, 0, "")
 	pdf.CellFormat(25, 8, tr(formatEUR(d.AmountCents, d.Currency)), "1", 0, "R", false, 0, "")
 	pdf.Ln(-1)
