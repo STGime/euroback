@@ -3,8 +3,9 @@
 -- it granted to eurobase_migrator. pg_stat_activity and
 -- pg_stat_get_activity are handled by their own step (isolation check 12)
 -- and are never reopened here; neither are pg_cancel_backend and
--- pg_terminate_backend (step 5 of the lockdown grants them to no one). The explicit grants to platform
--- and tenant roles are left (harmless). Run as the cluster's superuser.
+-- pg_terminate_backend (step 5 of the lockdown grants them to no one).
+-- The explicit grants to platform and tenant roles are left (harmless).
+-- Run as the cluster's superuser.
 DO $revert$
 DECLARE
     o record;
