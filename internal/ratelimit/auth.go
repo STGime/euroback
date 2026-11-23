@@ -29,9 +29,17 @@ import (
 // <Scaleway-LB-CIDR>` — see docs/runbooks/rate-limits-ip-source.md);
 // when that lands, drop this back to a real per-user number
 // (5–10/hour).
+//
+// SignupMailboxLimit counts accounts created per mailbox (mailaddr.Base:
+// "+tag" and Gmail dots ignored), which doesn't depend on the client IP.
+// A slot is reserved before the signup and given back when it fails
+// (ReleaseAuthRate), so typos and retries cost nothing while concurrent
+// requests still count; 5 a day is far above what one person needs.
 const (
 	SignupLimit          = 60
 	SignupWindow         = 1 * time.Hour
+	SignupMailboxLimit   = 5
+	SignupMailboxWindow  = 24 * time.Hour
 	SigninFailLimit      = 5
 	SigninFailWindow     = 15 * time.Minute
 	ForgotPasswordLimit  = 3
@@ -94,21 +102,36 @@ func CheckAuthRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Cont
 	key := fmt.Sprintf("auth:%s:%s", action, identifier)
 	allowed, info, _ := limiter.Allow(ctx, key, limit, window)
 	if !allowed {
-		resetTime := time.Unix(info.ResetAt, 0)
-		retryAfter := time.Until(resetTime).Seconds()
-		if retryAfter < 1 {
-			retryAfter = 1
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
-		w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
-		w.Header().Set("X-RateLimit-Remaining", "0")
-		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetAt))
-		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprintf(w, `{"error":"too many requests, try again in %.0f seconds"}`, retryAfter)
+		writeTooManyRequests(w, info)
 		return true
 	}
 	return false
+}
+
+// ReleaseAuthRate gives back one request CheckAuthRate recorded for
+// (action, identifier), for limits that count only completed actions: the
+// caller reserves a slot with CheckAuthRate before the action (so requests
+// in flight at the same time count too) and releases it when the action
+// fails. A Redis error is ignored (the slot then expires with the window).
+func ReleaseAuthRate(limiter *RateLimiter, ctx context.Context, action, identifier string) {
+	if limiter == nil {
+		return
+	}
+	_ = limiter.Release(ctx, fmt.Sprintf("auth:%s:%s", action, identifier))
+}
+
+func writeTooManyRequests(w http.ResponseWriter, info RateLimitInfo) {
+	retryAfter := time.Until(time.Unix(info.ResetAt, 0)).Seconds()
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
+	w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", info.Limit))
+	w.Header().Set("X-RateLimit-Remaining", "0")
+	w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", info.ResetAt))
+	w.WriteHeader(http.StatusTooManyRequests)
+	fmt.Fprintf(w, `{"error":"too many requests, try again in %.0f seconds"}`, retryAfter)
 }
 
 // RecordSigninFailure increments the signin failure counter for an email

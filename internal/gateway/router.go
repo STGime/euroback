@@ -643,6 +643,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					window time.Duration
 				}{
 					"platform_signup":              {ratelimit.SignupLimit, ratelimit.SignupWindow},
+					"platform_signup_mailbox":      {ratelimit.SignupMailboxLimit, ratelimit.SignupMailboxWindow},
 					"platform_forgot":              {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
 					"platform_resend_verification": {ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow},
 					"signin_fail":                  {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
@@ -659,6 +660,13 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				// it imports auth — so the IP is resolved here).
 				if strings.HasSuffix(action, "_ip") {
 					identifier = ratelimit.ClientIP(r)
+				}
+				// Limits that count only completed actions: "<action>"
+				// reserves a slot (like any other limit), and the handler
+				// calls "<action>_release" when the action failed.
+				if base, ok := strings.CutSuffix(action, "_release"); ok && base == "platform_signup_mailbox" {
+					ratelimit.ReleaseAuthRate(limiter, r.Context(), base, identifier)
+					return false
 				}
 				cfg, ok := limits[action]
 				if !ok {

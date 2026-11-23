@@ -207,8 +207,43 @@ var ErrUndeliverableEmail = errors.New("this address can't receive email (reserv
 // admin-managed signup blocklist (public.platform_blocked_signup_domains;
 // candidates built by mailaddr.SignupDomainCandidates) — deliverable
 // domains that only ever produce abuse or throwaway accounts. The message
-// is kept generic so it doesn't advertise the blocklist.
+// is kept generic so it doesn't advertise the blocklist. Also used for a
+// signup to the mailbox of a suspended account (suspendedMailbox).
 var ErrBlockedSignupDomain = errors.New("this email address can't be used to sign up")
+
+// suspendedMailbox reports whether email delivers to the same mailbox
+// (mailaddr.Base: "+tag" and Gmail dots ignored) as a suspended account,
+// so a suspended user can't come back under "name+1@…". Suspended
+// accounts are few (partial index on suspended_at), so they are compared
+// in Go with the one normalisation. Fails open on a read error, like the
+// domain blocklist: abuse mitigation, not a security boundary.
+func (s *PlatformAuthService) suspendedMailbox(ctx context.Context, email string) bool {
+	base := mailaddr.Base(email)
+	rows, err := s.pool.Query(ctx, `SELECT email FROM public.platform_users WHERE suspended_at IS NOT NULL`)
+	if err != nil {
+		slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+			return false
+		}
+		// The exact address is left to the insert, which answers "email
+		// already registered" as for any existing account, so this check
+		// doesn't tell whether a known address is suspended.
+		if !strings.EqualFold(e, email) && mailaddr.Base(e) == base {
+			slog.Info("signup refused: mailbox of a suspended account")
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+	}
+	return false
+}
 
 // SignUp creates a new platform user with email + bcrypt-hashed password.
 // When AllowPublicSignup is false (default), only emails present in the
@@ -245,6 +280,9 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 			slog.Info("signup blocked by domain blocklist", "email", email)
 			return nil, ErrBlockedSignupDomain
 		}
+	}
+	if s.suspendedMailbox(ctx, email) {
+		return nil, ErrBlockedSignupDomain
 	}
 	if err := ValidatePasswordStrength(password, email); err != nil {
 		return nil, err

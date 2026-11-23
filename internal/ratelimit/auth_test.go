@@ -147,3 +147,34 @@ func TestAuthRate_IPCeilingBoundsEmailSpread(t *testing.T) {
 		t.Fatalf("want 429, got %d", w.Code)
 	}
 }
+
+// A slot reserved by CheckAuthRate and given back by ReleaseAuthRate no
+// longer counts; releasing never takes the counter below zero.
+func TestReleaseAuthRate_GivesSlotBack(t *testing.T) {
+	rl := setupAuthTestLimiter(t)
+	defer rl.Close()
+
+	id := "release_test_" + time.Now().Format("150405.000000")
+	ReleaseAuthRate(rl, t.Context(), "test_release", id) // nothing recorded yet: no-op
+	for i := 0; i < 2; i++ {
+		if CheckAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_release", id, 2, time.Minute) {
+			t.Fatalf("reservation %d refused within the limit", i+1)
+		}
+	}
+	if !CheckAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_release", id, 2, time.Minute) {
+		t.Fatal("third reservation allowed with a limit of 2")
+	}
+	// The refused third attempt was recorded too; give back that one and
+	// one reservation: one slot is free again.
+	ReleaseAuthRate(rl, t.Context(), "test_release", id)
+	ReleaseAuthRate(rl, t.Context(), "test_release", id)
+	if CheckAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_release", id, 2, time.Minute) {
+		t.Fatal("refused after a slot was given back")
+	}
+	for i := 0; i < 5; i++ {
+		ReleaseAuthRate(rl, t.Context(), "test_release", id)
+	}
+	if n, err := rl.client.Get(t.Context(), "ratelimit:auth:test_release:"+id).Int64(); err != nil || n != 0 {
+		t.Fatalf("counter after over-release = %d, %v; want 0", n, err)
+	}
+}

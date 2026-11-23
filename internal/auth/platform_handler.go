@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/eurobase/euroback/internal/clientip"
+	"github.com/eurobase/euroback/internal/mailaddr"
 )
 
 // AuthRateLimiter is a function that checks rate limits and writes a 429 if exceeded.
@@ -43,8 +44,22 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 			return
 		}
 
+		// And per mailbox ("+tag" and Gmail dots ignored): the IP limit
+		// above can't tell clients apart behind a shared address, this
+		// one stops many accounts on one inbox. The check reserves a
+		// slot, so requests running at the same time count too; it is
+		// given back unless the signup created an account, so a weak
+		// password or a retry doesn't use it up.
+		mailbox := mailaddr.Base(req.Email)
+		if check != nil && check(w, r, "platform_signup_mailbox", mailbox) {
+			return
+		}
+
 		resp, err := svc.SignUp(r.Context(), req.Email, req.Password, req.Accepted, clientIP(r), r.UserAgent())
 		if err != nil {
+			if check != nil {
+				check(w, r, "platform_signup_mailbox_release", mailbox) // writes nothing
+			}
 			if _, ok := err.(*WaitlistError); ok {
 				slog.Info("signup blocked by allowlist", "email", req.Email)
 				w.Header().Set("Content-Type", "application/json")
