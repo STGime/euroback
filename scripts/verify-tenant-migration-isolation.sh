@@ -231,6 +231,12 @@ DO $r$ BEGIN
     CREATE ROLE eurobase_developer NOLOGIN;
   END IF;
 END $r$;
+-- The lockdown requires the guard's helper (migration 000158), which this
+-- hand-built database doesn't have: a stand-in with the same signature.
+CREATE OR REPLACE FUNCTION public.owner_rights_objects(p_schema text)
+  RETURNS TABLE (kind text, key text, name text, options text[])
+  LANGUAGE sql AS $f$ SELECT NULL::text, NULL::text, NULL::text, NULL::text[] WHERE false $f$;
+REVOKE ALL ON FUNCTION public.owner_rights_objects(text) FROM PUBLIC;
 SET ROLE tenant_b_ddl;
 CREATE FUNCTION tenant_b.pricing() RETURNS text LANGUAGE sql AS $f$ SELECT 'B-PRIVATE-LOGIC' $f$;
 RESET ROLE;
