@@ -402,6 +402,20 @@
 		}
 	}
 
+	async function extendTeamBeta(p: AdminProject) {
+		if (projectBusy) return;
+		projectBusy = p.id;
+		error = null;
+		try {
+			await api.adminExtendTeamBeta(p.id);
+			await refresh();
+		} catch (e: any) {
+			error = e?.message ?? 'Extend failed';
+		} finally {
+			projectBusy = null;
+		}
+	}
+
 	onMount(refresh);
 	onMount(() => {
 		// Deep-link / reload support: open the tab named in the URL hash.
@@ -1163,14 +1177,15 @@
 						<th class="px-4 py-2">Plan</th>
 						<th class="px-4 py-2">Status</th>
 						<th class="px-4 py-2">Created</th>
+						<th class="px-4 py-2">Beta ends</th>
 						<th class="px-4 py-2 text-right">Actions</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
 					{#if loading}
-						<tr><td colspan="7" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
+						<tr><td colspan="8" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
 					{:else if projects.length === 0}
-						<tr><td colspan="7" class="px-4 py-6 text-center text-gray-400">No projects.</td></tr>
+						<tr><td colspan="8" class="px-4 py-6 text-center text-gray-400">No projects.</td></tr>
 					{:else}
 						{#each projects as p}
 							<tr>
@@ -1186,7 +1201,27 @@
 									{/if}
 								</td>
 								<td class="px-4 py-2 text-gray-500">{new Date(p.created_at).toLocaleDateString()}</td>
+								<td class="px-4 py-2 whitespace-nowrap">
+									{#if p.beta_ends_at}
+										<span class={p.beta_expired_at ? 'font-medium text-red-700' : new Date(p.beta_ends_at).getTime() - Date.now() < 4 * 86400000 ? 'font-medium text-amber-700' : 'text-gray-600'}>
+											{new Date(p.beta_ends_at).toLocaleDateString()}{p.beta_expired_at ? ' (ended)' : ''}
+										</span>
+									{:else}
+										<span class="text-gray-300">—</span>
+									{/if}
+								</td>
 								<td class="px-4 py-2 text-right whitespace-nowrap">
+									{#if p.beta_ends_at}
+										<button
+											type="button"
+											onclick={() => extendTeamBeta(p)}
+											disabled={projectBusy !== null}
+											title="Move the Team beta end 14 days later; reactivates the project if the beta end suspended it"
+											class="mr-1 rounded-md border border-eurobase-200 px-2.5 py-1 text-xs font-medium text-eurobase-700 hover:bg-eurobase-50 cursor-pointer disabled:opacity-50"
+										>
+											{projectBusy === p.id ? 'Extending…' : 'Extend 14 days'}
+										</button>
+									{/if}
 									{#if p.status === 'active'}
 										<button
 											type="button"

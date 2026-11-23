@@ -5,10 +5,11 @@
 			</p>
 
 			<div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 mb-4">
-				<strong>Closed beta — free during the beta window.</strong> Team is not yet self-serve on the pricing page.
+				<strong>Closed beta — a free 14-day evaluation.</strong> Team is not yet self-serve on the pricing page.
 				Email <a href="mailto:contact@eurobase.app" class="underline hover:no-underline">contact@eurobase.app</a>
-				with a one-line description of the workload; grants are manual and we'll notify you 30 days before
-				billing turns on.
+				with a short description of the workload; grants are manual, and we may ask a few questions first.
+				A Team project is free for 14 days from its creation. We email the owner 4 days before the end; after it the
+				project is paused (nothing is deleted) until the evaluation is extended or the project moves to a paid plan.
 			</div>
 
 			<div class="rounded-xl border border-emerald-200 bg-emerald-50/50 p-5 mb-4 space-y-2">
@@ -55,8 +56,9 @@
 				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-2">
 					<li>
 						Alex emails <a href="mailto:contact@eurobase.app" class="text-eurobase-700 hover:underline">contact@eurobase.app</a>
-						from the same address they signed up with — one line about the workload
-						(<em>"early-access pilot with a Berlin law firm, ~500 documents, GDPR-sensitive"</em>) is enough.
+						from the same address they signed up with, with a short description of the workload
+						(<em>"early-access pilot with a Berlin law firm, ~500 documents, GDPR-sensitive"</em>). We may reply with a few
+						questions (team size, identity provider, data-residency requirements, timeline) before granting access.
 					</li>
 					<li>
 						Ops flips <code class="rounded bg-gray-100 px-1 text-[11px]">team_beta_access</code> on Alex's account

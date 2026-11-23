@@ -33,6 +33,9 @@ type AdminProject struct {
 	OwnerID    string    `json:"owner_id"`
 	OwnerEmail string    `json:"owner_email"`
 	CreatedAt  time.Time `json:"created_at"`
+	// End of the Team beta window (000159); nil = no limit.
+	BetaEndsAt    *time.Time `json:"beta_ends_at,omitempty"`
+	BetaExpiredAt *time.Time `json:"beta_expired_at,omitempty"`
 }
 
 // AdminListAllProjects lists every project across every tenant. Gated by
@@ -42,7 +45,8 @@ func AdminListAllProjects(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rows, err := pool.Query(r.Context(),
 			`SELECT p.id, p.name, p.slug, p.schema_name, COALESCE(p.plan, 'free'),
-			        COALESCE(p.status, 'active'), p.owner_id, u.email, p.created_at
+			        COALESCE(p.status, 'active'), p.owner_id, u.email, p.created_at,
+			        p.beta_ends_at, p.beta_expired_at
 			 FROM public.projects p
 			 LEFT JOIN public.platform_users u ON u.id = p.owner_id
 			 ORDER BY p.created_at DESC
@@ -56,7 +60,7 @@ func AdminListAllProjects(pool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]AdminProject, 0)
 		for rows.Next() {
 			var p AdminProject
-			if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.SchemaName, &p.Plan, &p.Status, &p.OwnerID, &p.OwnerEmail, &p.CreatedAt); err != nil {
+			if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.SchemaName, &p.Plan, &p.Status, &p.OwnerID, &p.OwnerEmail, &p.CreatedAt, &p.BetaEndsAt, &p.BetaExpiredAt); err != nil {
 				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
 				return
 			}
@@ -70,9 +74,9 @@ func AdminListAllProjects(pool *pgxpool.Pool) http.HandlerFunc {
 
 // AllowlistEntry mirrors the platform_allowlist row.
 type AllowlistEntry struct {
-	Email     string     `json:"email"`
-	Note      *string    `json:"note,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	Email     string    `json:"email"`
+	Note      *string   `json:"note,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // AdminListAllowlist returns all platform_allowlist entries.
@@ -367,4 +371,3 @@ func AdminRemoveAllowlist(pool *pgxpool.Pool) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
-

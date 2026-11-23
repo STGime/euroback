@@ -88,7 +88,7 @@
 
 thanks for your interest in the Eurobase Team beta. Every beta project gets its own dedicated PostgreSQL instance, so we admit a limited number of teams and ask a few questions first:
 
-1. Company: name, website, and your role. Please reply from your work email address.
+1. Company: name, website, and your role.
 2. Current setup: which Supabase plan, database size (GB), and which features you use (Auth, Storage, Edge Functions, Realtime, RLS-heavy schemas, extensions).
 3. Scale: number of end users or monthly active users, and rough requests per day.
 4. Team: how many people need console access, and roles (developers, admins, read-only).
@@ -98,7 +98,7 @@ thanks for your interest in the Eurobase Team beta. Every beta project gets its 
 8. After the beta: Team costs EUR 149 per month per organisation, including one dedicated database. Is that within your budget?
 9. Feedback: would you have 20 minutes for a call during the evaluation?
 
-The beta covers 14 days from the creation of your Team project. Once we have your answers we'll get back to you within two working days.
+Please send your answers to contact@eurobase.app from your work email address. The beta covers 14 days from the creation of your Team project. Once we have your answers we'll get back to you within two working days.
 
 Best regards,
 Eurobase`;

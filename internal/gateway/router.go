@@ -955,6 +955,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Get("/projects", tenant.AdminListAllProjects(pool))
 			r.Post("/projects/{id}/suspend", tenant.AdminSuspendProject(pool))
 			r.Delete("/projects/{id}/suspend", tenant.AdminUnsuspendProject(pool))
+			r.Post("/projects/{id}/beta-extend", tenant.AdminExtendTeamBeta(pool))
 			if developerPool != nil {
 				r.Get("/sql-log", sqllog.HandleAdminLog(developerPool))
 				// Support tickets and contact / Team-beta requests, in full

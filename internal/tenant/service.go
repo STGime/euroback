@@ -624,10 +624,12 @@ func (s *TenantService) CreateProject(ctx context.Context, platformUserID, email
 	var projectID string
 	var createdAt time.Time
 	err = tx.QueryRow(ctx,
-		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, org_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid)
+		`INSERT INTO projects (owner_id, name, slug, schema_name, s3_bucket, region, plan, org_id, beta_ends_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid,
+		         -- Team tiers are a free beta for TeamBetaDays (TeamBetaExpiry)
+		         CASE WHEN $7 IN ('team', 'legal_team') THEN now() + make_interval(days => $9) END)
 		 RETURNING id, created_at`,
-		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan, orgID,
+		ownerID, req.Name, slug, tempSchemaName, s3Bucket, req.Region, req.Plan, orgID, TeamBetaDays,
 	).Scan(&projectID, &createdAt)
 	if err != nil {
 		// Auto-attach race: the org we looked up above was deleted
