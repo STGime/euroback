@@ -704,7 +704,8 @@ func main() {
 		ConsoleBaseURL: consoleBaseURL,
 		WebhookBaseURL: platformBaseURL,
 		Mode:           string(mollieEnv),
-	}, billingEnabled).WithMetrics(metricsReg).WithStorage(s3Client).WithInvoiceMailer(emailService).WithDeveloperPool(developerPool)
+	}, billingEnabled).WithMetrics(metricsReg).WithStorage(s3Client).WithInvoiceMailer(emailService).WithDeveloperPool(developerPool).
+		WithOpsAlerts(os.Getenv("DISCORD_ALERTS_WEBHOOK"))
 	if billingEnabled {
 		slog.Info("billing: enabled", "mollie_env", mollieEnv)
 	} else {

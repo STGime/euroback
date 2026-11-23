@@ -407,9 +407,9 @@
 						{/if}
 						{#if subscription?.status === 'past_due'}
 							<div class="mt-3 max-w-xl rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-								<p class="font-medium">The last payment for this project failed.</p>
+								<p class="font-medium">The last payment for this project failed or was reversed by the bank.</p>
 								<p class="mt-1">
-									Depending on the reason, Mollie retries the charge automatically for a few days.
+									After a failed charge, Mollie may retry it automatically for a few days.
 									{#if subscription.downgrade_at}
 										If it still hasn't come through by {formatDay(subscription.downgrade_at)}, the project moves to the Free plan.
 									{:else}
@@ -523,7 +523,7 @@
 						<div class="flex items-center gap-3">
 							{#if subscription?.status === 'past_due'}
 								<span class="inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-800"
-									>Payment failed</span
+									>Payment overdue</span
 								>
 							{:else}
 								<span class="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800"
@@ -603,10 +603,10 @@
 									{formatEUR(inv.amount_cents, inv.currency)}
 								</td>
 								<td class="whitespace-nowrap px-6 py-3 text-sm">
-									{inv.status}
+									{inv.status === 'charged_back' ? 'charged back' : inv.status}
 								</td>
 								<td class="whitespace-nowrap px-6 py-3 text-right text-sm">
-									{#if inv.status === 'paid'}
+									{#if inv.status === 'paid' || inv.status === 'charged_back'}
 										<button
 											type="button"
 											onclick={() => openInvoicePDF(inv.id)}

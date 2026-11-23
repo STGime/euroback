@@ -97,6 +97,7 @@ Shared login roles are created via the Scaleway console before their migrations 
 
 ## Mollie billing
 - Payment processor is Mollie (EU-headquartered). API keys in `eurobase-secrets` (`MOLLIE_API_KEY_TEST`/`_LIVE`, `MOLLIE_ENV`). Feature flag `BILLING_ENABLED` (handlers return 503 when off). Empty API key is legal (dev). Estonian VAT: below the threshold, invoices carry the §19 note, no VAT charged. Recurring flow: a first `sequenceType=first` payment establishes a mandate; the webhook then creates the subscription.
+- **Chargebacks** (`internal/billing/chargeback.go`): Mollie calls the payment webhook again with the payment still `paid` and `amountChargedBack` set. A full chargeback marks the invoice `charged_back`; if its subscription is live and not cancelled by the owner, the Mollie subscription is cancelled (whichever month was disputed) and ours goes `past_due` (owner mail, Pay now, Free after the grace); a late charge on a subscription Mollie has stopped doesn't clear `past_due`. Every case alerts `DISCORD_ALERTS_WEBHOOK`; a cancelled or ended subscription, partial chargebacks and reversals (invoice back to `paid`, subscription not restarted) are left to ops. Invoices record the period they pay for (`period_start` / `period_end`, 000161).
 
 ## Auth
 - Custom auth in Go (email/password, magic links, OAuth). Anon key for public client access; service key for server-side only — never in client code.
