@@ -1,6 +1,6 @@
 -- Catalog lockdown (superuser step). Run as the cluster's superuser
 -- (_rdb_superadmin on Scaleway; the superuser stand-in in
--- scripts/db/apply-migrations.sh) AFTER migration 000149. Idempotent.
+-- scripts/db/apply-migrations.sh) AFTER migration 000158. Idempotent.
 --
 -- All tenant schemas of the shared cluster live in one database. This
 -- limits the system catalogs (definitions, columns, statistics) to the
@@ -91,7 +91,7 @@ GRANT SELECT (oid, typarray, typelem, typcategory) ON pg_catalog.pg_type TO PUBL
 
 -- 4. information_schema: platform roles, and each tenant role directly
 --    (tenant roles stay members of nothing). eurobase_migrator gets the
---    grant option so provision_tenant_ddl_role (000149) can grant it to
+--    grant option so provision_tenant_ddl_role (000158) can grant it to
 --    new tenants.
 REVOKE USAGE ON SCHEMA information_schema FROM PUBLIC;
 GRANT USAGE ON SCHEMA information_schema TO eurobase_migrator WITH GRANT OPTION;

@@ -74,7 +74,7 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 	mustExec("DROP ROLE IF EXISTS " + owner)
 	mustExec("CREATE ROLE " + owner + " NOLOGIN")
 	mustExec("CREATE SCHEMA " + ident + " AUTHORIZATION " + owner)
-	// Where the shared-cluster helper exists (000149), the guard reads the
+	// Where the shared-cluster helper exists (000158), the guard reads the
 	// catalog through it; a tenant role holds EXECUTE on it.
 	var hasHelper bool
 	if err := pool.QueryRow(ctx, `SELECT to_regprocedure('public.owner_rights_objects(text)') IS NOT NULL`).Scan(&hasHelper); err != nil {
@@ -268,7 +268,7 @@ func TestOwnerRightsGuard_DB(t *testing.T) {
 }
 
 // TestOwnerRightsObjectsAuthorization_DB: public.owner_rights_objects
-// (000149) answers a tenant's <schema>_ddl login for its own schema only,
+// (000158) answers a tenant's <schema>_ddl login for its own schema only,
 // by session_user (tenant SQL can't change it), and lists the schema's
 // owner-run objects.
 //
@@ -290,7 +290,7 @@ func TestOwnerRightsObjectsAuthorization_DB(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasHelper {
-		t.Skip("public.owner_rights_objects not installed (migration 000149)")
+		t.Skip("public.owner_rights_objects not installed (migration 000158)")
 	}
 
 	a := fmt.Sprintf("tenant_orauth_a_%d", os.Getpid())

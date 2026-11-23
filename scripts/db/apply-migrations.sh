@@ -160,7 +160,7 @@ fi
 echo "OK: migrations applied through $LATEST."
 
 # The superuser catalog lockdown (scripts/db/catalog-lockdown.sql): prod
-# applies it as _rdb_superadmin after 000149; here the admin stand-in does,
+# applies it as _rdb_superadmin after 000158; here the admin stand-in does,
 # so every suite runs against it. Idempotent. CATALOG_LOCKDOWN=0 skips it.
 if [ "${CATALOG_LOCKDOWN:-1}" != "0" ]; then
     echo "── Catalog lockdown (superuser step) ──"

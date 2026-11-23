@@ -62,7 +62,7 @@ func ownerRightsObjects(ctx context.Context, tx pgx.Tx, schemaName string) (map[
 
 func queryOwnerRightsObjects(ctx context.Context, tx pgx.Tx, schemaName string) (map[string]guardedObject, error) {
 	// On the shared cluster the tenant's own login has no catalog access:
-	// public.owner_rights_objects (000149) reads it for the caller's own
+	// public.owner_rights_objects (000158) reads it for the caller's own
 	// schema. A dedicated (Team) database has no such helper; its owner
 	// reads the catalog directly. (A Team customer owns that database and
 	// could create a function of that name; the guard protects developers
