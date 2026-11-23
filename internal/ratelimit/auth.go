@@ -32,8 +32,9 @@ import (
 //
 // SignupMailboxLimit counts accounts created per mailbox (mailaddr.Base:
 // "+tag" and Gmail dots ignored), which doesn't depend on the client IP.
-// Only successful signups count (PeekAuthRate / RecordAuthRate), so typos
-// and retries cost nothing; 5 a day is far above what one person needs.
+// A slot is reserved before the signup and given back when it fails
+// (ReleaseAuthRate), so typos and retries cost nothing while concurrent
+// requests still count; 5 a day is far above what one person needs.
 const (
 	SignupLimit          = 60
 	SignupWindow         = 1 * time.Hour
@@ -107,30 +108,16 @@ func CheckAuthRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Cont
 	return false
 }
 
-// PeekAuthRate is CheckAuthRate without recording the request: it refuses
-// (429) once the identifier has `limit` recorded requests in the window,
-// and RecordAuthRate records one. For limits that count only completed
-// actions (a signup that created an account), not every attempt. A Redis
-// error lets the request through, like CheckAuthRate.
-func PeekAuthRate(limiter *RateLimiter, w http.ResponseWriter, ctx context.Context, action, identifier string, limit int) bool {
-	if limiter == nil {
-		return false
-	}
-	n, ttl, err := limiter.Count(ctx, fmt.Sprintf("auth:%s:%s", action, identifier))
-	if err != nil || n < int64(limit) {
-		return false
-	}
-	writeTooManyRequests(w, RateLimitInfo{Limit: int64(limit), ResetAt: time.Now().Add(time.Duration(ttl) * time.Second).Unix()})
-	return true
-}
-
-// RecordAuthRate records one request for (action, identifier) without
-// checking the limit; the counterpart of PeekAuthRate.
-func RecordAuthRate(limiter *RateLimiter, ctx context.Context, action, identifier string, limit int, window time.Duration) {
+// ReleaseAuthRate gives back one request CheckAuthRate recorded for
+// (action, identifier), for limits that count only completed actions: the
+// caller reserves a slot with CheckAuthRate before the action (so requests
+// in flight at the same time count too) and releases it when the action
+// fails. A Redis error is ignored (the slot then expires with the window).
+func ReleaseAuthRate(limiter *RateLimiter, ctx context.Context, action, identifier string) {
 	if limiter == nil {
 		return
 	}
-	_, _, _ = limiter.Allow(ctx, fmt.Sprintf("auth:%s:%s", action, identifier), limit, window)
+	_ = limiter.Release(ctx, fmt.Sprintf("auth:%s:%s", action, identifier))
 }
 
 func writeTooManyRequests(w http.ResponseWriter, info RateLimitInfo) {

@@ -662,15 +662,11 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 					identifier = ratelimit.ClientIP(r)
 				}
 				// Limits that count only completed actions: "<action>"
-				// checks without recording, "<action>_record" records
-				// (same counter), called by the handler after success.
-				if base, ok := strings.CutSuffix(action, "_record"); ok && base == "platform_signup_mailbox" {
-					cfg := limits[base]
-					ratelimit.RecordAuthRate(limiter, r.Context(), base, identifier, cfg.limit, cfg.window)
+				// reserves a slot (like any other limit), and the handler
+				// calls "<action>_release" when the action failed.
+				if base, ok := strings.CutSuffix(action, "_release"); ok && base == "platform_signup_mailbox" {
+					ratelimit.ReleaseAuthRate(limiter, r.Context(), base, identifier)
 					return false
-				}
-				if action == "platform_signup_mailbox" {
-					return ratelimit.PeekAuthRate(limiter, w, r.Context(), action, identifier, limits[action].limit)
 				}
 				cfg, ok := limits[action]
 				if !ok {

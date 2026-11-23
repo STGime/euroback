@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,6 +40,30 @@ func TestSignUpHandler_LimitsPerMailbox(t *testing.T) {
 	}
 }
 
+// A signup that fails gives its reserved mailbox slot back, so only
+// signups that created an account use up the limit.
+func TestSignUpHandler_ReleasesMailboxSlotOnFailure(t *testing.T) {
+	var actions []string
+	check := func(w http.ResponseWriter, r *http.Request, action, identifier string) bool {
+		if action != "platform_signup" {
+			actions = append(actions, action+" "+identifier)
+		}
+		return false
+	}
+	h := HandlePlatformSignUp(&PlatformAuthService{}, check)
+	// A reserved domain fails in SignUp before any database access.
+	body := `{"email":"Some.One+a@example.com","password":"a-long-enough-passphrase-42"}`
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodPost, "/platform/auth/signup", bytes.NewBufferString(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400", rec.Code)
+	}
+	want := []string{"platform_signup_mailbox some.one@example.com", "platform_signup_mailbox_release some.one@example.com"}
+	if len(actions) != 2 || actions[0] != want[0] || actions[1] != want[1] {
+		t.Fatalf("actions = %q, want %q", actions, want)
+	}
+}
+
 // A signup to the mailbox of a suspended account is refused (400, the
 // generic "can't be used to sign up"); another mailbox is not.
 func TestSuspendedMailbox_DB(t *testing.T) {
@@ -61,7 +86,7 @@ func TestSuspendedMailbox_DB(t *testing.T) {
 	t.Cleanup(func() { cleanupPlatformUser(context.Background(), pool, suspended) })
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO public.platform_users (email, suspended_at) VALUES ($1, now())`, suspended); err != nil {
-		t.Skipf("cannot insert a platform user here: %v", err)
+		t.Fatalf("insert suspended platform user: %v", err)
 	}
 
 	svc := NewPlatformAuthService(pool, "test-jwt-secret-please-ignore")
@@ -72,6 +97,11 @@ func TestSuspendedMailbox_DB(t *testing.T) {
 	_, err = svc.SignUp(ctx, same, "a-long-enough-passphrase-42", nil, "", "")
 	if err != ErrBlockedSignupDomain || !isUserError(err) {
 		t.Fatalf("SignUp(%s) err = %v, want ErrBlockedSignupDomain (400)", same, err)
+	}
+	// The exact address is left to the insert ("already registered"), so
+	// it doesn't reveal the suspension.
+	if svc.suspendedMailbox(ctx, strings.ToUpper(suspended)) {
+		t.Fatalf("exact address %s must not be answered by the suspended check", suspended)
 	}
 	other := fmt.Sprintf("mb.other.%d@gmail.com", os.Getpid())
 	if svc.suspendedMailbox(ctx, other) {

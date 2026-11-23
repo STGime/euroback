@@ -148,29 +148,33 @@ func TestAuthRate_IPCeilingBoundsEmailSpread(t *testing.T) {
 	}
 }
 
-// PeekAuthRate never records: any number of peeks leaves the counter
-// alone; only RecordAuthRate moves it, and the peek refuses once the
-// recorded count reaches the limit.
-func TestPeekAuthRate_CountsOnlyRecorded(t *testing.T) {
+// A slot reserved by CheckAuthRate and given back by ReleaseAuthRate no
+// longer counts; releasing never takes the counter below zero.
+func TestReleaseAuthRate_GivesSlotBack(t *testing.T) {
 	rl := setupAuthTestLimiter(t)
 	defer rl.Close()
 
-	id := "peek_test_" + time.Now().Format("150405.000000")
-	for i := 0; i < 10; i++ {
-		if PeekAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_peek", id, 2) {
-			t.Fatalf("peek %d refused before anything was recorded", i+1)
+	id := "release_test_" + time.Now().Format("150405.000000")
+	ReleaseAuthRate(rl, t.Context(), "test_release", id) // nothing recorded yet: no-op
+	for i := 0; i < 2; i++ {
+		if CheckAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_release", id, 2, time.Minute) {
+			t.Fatalf("reservation %d refused within the limit", i+1)
 		}
 	}
-	RecordAuthRate(rl, t.Context(), "test_peek", id, 2, time.Minute)
-	if PeekAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_peek", id, 2) {
-		t.Fatal("refused after 1 of 2 recorded")
+	if !CheckAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_release", id, 2, time.Minute) {
+		t.Fatal("third reservation allowed with a limit of 2")
 	}
-	RecordAuthRate(rl, t.Context(), "test_peek", id, 2, time.Minute)
-	w := httptest.NewRecorder()
-	if !PeekAuthRate(rl, w, t.Context(), "test_peek", id, 2) {
-		t.Fatal("allowed after 2 of 2 recorded")
+	// The refused third attempt was recorded too; give back that one and
+	// one reservation: one slot is free again.
+	ReleaseAuthRate(rl, t.Context(), "test_release", id)
+	ReleaseAuthRate(rl, t.Context(), "test_release", id)
+	if CheckAuthRate(rl, httptest.NewRecorder(), t.Context(), "test_release", id, 2, time.Minute) {
+		t.Fatal("refused after a slot was given back")
 	}
-	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
-		t.Fatalf("refusal: status %d, Retry-After %q", w.Code, w.Header().Get("Retry-After"))
+	for i := 0; i < 5; i++ {
+		ReleaseAuthRate(rl, t.Context(), "test_release", id)
+	}
+	if n, err := rl.client.Get(t.Context(), "ratelimit:auth:test_release:"+id).Int64(); err != nil || n != 0 {
+		t.Fatalf("counter after over-release = %d, %v; want 0", n, err)
 	}
 }

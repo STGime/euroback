@@ -132,23 +132,23 @@ func (rl *RateLimiter) Allow(ctx context.Context, key string, limit int, window 
 	return allowed, info, nil
 }
 
-// Count returns how many requests key has recorded in its current window
-// and the seconds until that window ends, without recording one. A key
-// with no window open counts 0.
-func (rl *RateLimiter) Count(ctx context.Context, key string) (int64, int64, error) {
-	redisKey := "ratelimit:" + key
-	n, err := rl.client.Get(ctx, redisKey).Int64()
-	if err == redis.Nil {
-		return 0, 0, nil
+// releaseScript gives back one request recorded by Allow, never taking
+// the counter below zero or touching a window that has already ended.
+var releaseScript = redis.NewScript(`
+local n = tonumber(redis.call("GET", KEYS[1]) or "0")
+if n > 0 then
+    redis.call("DECR", KEYS[1])
+end
+return 0
+`)
+
+// Release gives back one request recorded by Allow in key's current
+// window, for limits that should count only completed actions.
+func (rl *RateLimiter) Release(ctx context.Context, key string) error {
+	if err := releaseScript.Run(ctx, rl.client, []string{"ratelimit:" + key}).Err(); err != nil && err != redis.Nil {
+		return fmt.Errorf("release rate limit slot: %w", err)
 	}
-	if err != nil {
-		return 0, 0, fmt.Errorf("read rate limit counter: %w", err)
-	}
-	ttl, err := rl.client.TTL(ctx, redisKey).Result()
-	if err != nil {
-		return 0, 0, fmt.Errorf("read rate limit ttl: %w", err)
-	}
-	return n, int64(ttl.Seconds()), nil
+	return nil
 }
 
 // Close closes the underlying Redis client.

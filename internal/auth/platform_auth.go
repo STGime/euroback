@@ -231,7 +231,10 @@ func (s *PlatformAuthService) suspendedMailbox(ctx context.Context, email string
 			slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
 			return false
 		}
-		if mailaddr.Base(e) == base {
+		// The exact address is left to the insert, which answers "email
+		// already registered" as for any existing account, so this check
+		// doesn't tell whether a known address is suspended.
+		if !strings.EqualFold(e, email) && mailaddr.Base(e) == base {
 			slog.Info("signup refused: mailbox of a suspended account")
 			return true
 		}
