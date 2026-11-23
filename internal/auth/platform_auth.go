@@ -211,6 +211,10 @@ var ErrUndeliverableEmail = errors.New("this address can't receive email (reserv
 // signup to the mailbox of a suspended account (suspendedMailbox).
 var ErrBlockedSignupDomain = errors.New("this email address can't be used to sign up")
 
+// ErrNotPlainEmail refuses quoted, escaped or otherwise unusual address
+// forms (mailaddr.IsPlain): they reach the same inbox as the plain form.
+var ErrNotPlainEmail = errors.New("please use a plain email address, like name@example.com")
+
 // suspendedMailbox reports whether email delivers to the same mailbox
 // (mailaddr.Base: "+tag" and Gmail dots ignored) as a suspended account,
 // so a suspended user can't come back under "name+1@…". Suspended
@@ -260,6 +264,9 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return nil, fmt.Errorf("email is required")
+	}
+	if !mailaddr.IsPlain(email) {
+		return nil, ErrNotPlainEmail
 	}
 	if mailaddr.IsReserved(email) {
 		return nil, ErrUndeliverableEmail

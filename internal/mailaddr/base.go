@@ -19,6 +19,12 @@ func Base(addr string) string {
 		return addr
 	}
 	local, domain := addr[:at], strings.TrimSuffix(addr[at+1:], ".")
+	// A quoted local part ("name"@…) reaches the same inbox as the
+	// unquoted one; signup refuses them (IsPlain), this keeps accounts
+	// created before that comparable.
+	if len(local) >= 2 && local[0] == '"' && local[len(local)-1] == '"' {
+		local = strings.ReplaceAll(local[1:len(local)-1], `\`, "")
+	}
 	if i := strings.IndexByte(local, '+'); i > 0 {
 		local = local[:i]
 	}

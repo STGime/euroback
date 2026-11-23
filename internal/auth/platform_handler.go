@@ -466,7 +466,7 @@ func isUserError(err error) bool {
 	if errors.Is(err, ErrUndeliverableEmail) {
 		return true
 	}
-	if errors.Is(err, ErrBlockedSignupDomain) {
+	if errors.Is(err, ErrBlockedSignupDomain) || errors.Is(err, ErrNotPlainEmail) {
 		return true
 	}
 	msg := err.Error()
