@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // discordSignupWebhookURL is set by cmd/gateway/main.go from the
@@ -61,9 +62,10 @@ func notifySignupAsync(email string, totalSignups int64) {
 		defer cancel()
 
 		payload := map[string]any{
+			"allowed_mentions": map[string]any{"parse": []string{}}, // never ping anyone
 			"embeds": []map[string]any{{
 				"title":       "🎉 New signup",
-				"description": fmt.Sprintf("`%s` just signed up.\n\n**Total signups:** %d — see Admin → Signup users", strings.ReplaceAll(email, "`", ""), totalSignups),
+				"description": fmt.Sprintf("`%s` just signed up.\n\n**Total signups:** %d — see Admin → Signup users", noticeEmail(email), totalSignups),
 				"url":         "https://console.eurobase.app/admin",
 				"color":       0x10b981, // emerald-500
 				"timestamp":   time.Now().UTC().Format(time.RFC3339),
@@ -90,6 +92,23 @@ func notifySignupAsync(email string, totalSignups int64) {
 			slog.Warn("Discord signup notify: non-2xx response", "status", resp.StatusCode)
 		}
 	}()
+}
+
+// noticeEmail makes the (not yet verified) sign-up address safe to show in
+// a Discord code span: no backticks or control characters, at most 254
+// characters (the longest valid address), so the embed stays within
+// Discord's limits.
+func noticeEmail(email string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r == '`' || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, email)
+	if r := []rune(clean); len(r) > 254 {
+		clean = string(r[:254]) + "…"
+	}
+	return clean
 }
 
 // webhookErr drops the request URL from an HTTP client error: Go formats

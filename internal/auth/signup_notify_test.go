@@ -33,3 +33,13 @@ func TestSignupNoticeNamesEmail(t *testing.T) {
 		t.Fatal("no webhook request")
 	}
 }
+
+func TestNoticeEmailCleansInput(t *testing.T) {
+	if got := noticeEmail("a`b\nc\r\td@example.org"); got != "abcd@example.org" {
+		t.Errorf("control characters / backticks kept: %q", got)
+	}
+	long := strings.Repeat("x", 5000) + "@example.org"
+	if got := []rune(noticeEmail(long)); len(got) != 255 {
+		t.Errorf("long address not cut: %d runes", len(got))
+	}
+}
