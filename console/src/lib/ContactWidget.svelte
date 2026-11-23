@@ -19,7 +19,7 @@
 	let message = $state('');
 
 	let emailInput = $state<HTMLInputElement | null>(null);
-	let previouslyFocused: HTMLElement | null = null;
+	let trigger = $state<HTMLButtonElement | null>(null);
 	let successTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearSuccessTimer() {
@@ -30,7 +30,6 @@
 	}
 
 	async function openWidget() {
-		previouslyFocused = (document.activeElement as HTMLElement) ?? null;
 		open = true;
 		errorMsg = null;
 		document.body.style.overflow = 'hidden';
@@ -38,12 +37,14 @@
 		emailInput?.focus();
 	}
 
-	function closeWidget() {
+	async function closeWidget() {
 		open = false;
 		clearSuccessTimer();
 		document.body.style.overflow = '';
-		previouslyFocused?.focus?.();
-		previouslyFocused = null;
+		// The button stays in the page while the dialog is open (hidden),
+		// so focus can go back to it.
+		await tick();
+		trigger?.focus();
 		// The draft stays, so reopening restores it; only a sent
 		// message clears the form (resetForm).
 	}
@@ -69,7 +70,7 @@
 		}
 		submitting = true;
 		try {
-			const body: Record<string, string> = { email: trimmedEmail, message: trimmedMessage };
+			const body: Record<string, string> = { email: trimmedEmail, message: trimmedMessage, source: 'console' };
 			const trimmedName = name.trim();
 			if (trimmedName) body.name = trimmedName;
 			const res = await fetch(API_URL, {
@@ -120,19 +121,20 @@
 	});
 </script>
 
-{#if !open}
-	<button
-		type="button"
-		aria-label="Contact us"
-		class="fixed bottom-6 right-6 z-40 inline-flex items-center gap-2 rounded-full bg-eurobase-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-gray-900/20 transition-colors hover:bg-eurobase-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-eurobase-500 focus-visible:ring-offset-2"
-		onclick={openWidget}
-	>
-		<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
-			<path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
-		</svg>
-		Contact us
-	</button>
-{:else}
+<button
+	bind:this={trigger}
+	type="button"
+	aria-label="Contact us"
+	style:display={open ? 'none' : undefined}
+	class="fixed bottom-6 right-6 z-40 inline-flex items-center gap-2 rounded-full bg-eurobase-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-gray-900/20 transition-colors hover:bg-eurobase-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-eurobase-500 focus-visible:ring-offset-2"
+	onclick={openWidget}
+>
+	<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+		<path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+	</svg>
+	Contact us
+</button>
+{#if open}
 	<div
 		class="fixed inset-0 z-50 flex items-end justify-end p-4 sm:items-center sm:p-6"
 		role="dialog"

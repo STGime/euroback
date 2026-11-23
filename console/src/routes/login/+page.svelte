@@ -401,7 +401,7 @@
 	</div>
 
 	<!-- Right panel: auth -->
-	<div class="flex w-full lg:w-1/2 items-center justify-center p-8 bg-gray-50">
+	<div class="flex w-full lg:w-1/2 items-center justify-center p-8 pb-24 bg-gray-50">
 		<div class="w-full max-w-sm">
 			<!-- Mobile logo -->
 			<div class="mb-8 lg:hidden text-center">
