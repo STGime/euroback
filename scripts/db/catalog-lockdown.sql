@@ -6,14 +6,10 @@
 -- limits the system catalogs (definitions, columns, statistics) to the
 -- platform roles that already have owner-equivalent access to every
 -- tenant (eurobase_migrator, eurobase_developer), instead of PUBLIC.
--- Tenant roles keep information_schema, whose views show only objects the
--- role has privileges on (its own schema).
---
--- Not covered (by design): object names remain resolvable from ids through
--- the reg* types (e.g. 12345::regclass), which Postgres doesn't
--- access-check, and information_schema lists routine signatures that
--- carry PUBLIC EXECUTE. Definitions, columns, owners and statistics are
--- limited.
+-- Tenant roles keep USAGE on information_schema, whose views show only
+-- objects the role has privileges on (its own schema). Views built on the
+-- definition functions (views, triggers, check_constraints) answer
+-- permission denied for tenant roles.
 --
 -- Never put this in a migration: as eurobase_migrator these GRANT/REVOKEs
 -- on superuser-owned objects are silent no-ops. Check with
@@ -35,8 +31,7 @@ BEGIN
                FROM pg_catalog.pg_class c
               WHERE c.relnamespace = 'pg_catalog'::regnamespace
                 AND c.relkind IN ('r', 'v', 'm')
-                -- only what PUBLIC can read today (pg_authid etc. never
-                -- were; pg_stat_activity is already revoked)
+                -- only what PUBLIC can read (pg_authid etc. never were)
                 AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a
                              WHERE a.grantee = 0 AND a.privilege_type = 'SELECT')
     LOOP
