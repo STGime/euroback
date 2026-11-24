@@ -1112,7 +1112,7 @@
 				<button
 					type="button"
 					onclick={sendCompose}
-					disabled={composeBusy || composeSuccess !== null}
+					disabled={composeBusy || composeSuccess !== null || (composeMode === 'audience' && (broadcastLoading || broadcastError !== null))}
 					class="rounded-md bg-eurobase-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
 				>
 					{composeBusy ? 'Sending…' : 'Send'}
