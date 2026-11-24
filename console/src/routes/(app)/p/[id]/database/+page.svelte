@@ -230,7 +230,8 @@
 		// The preset creates two policies (read for everyone, writes for the
 		// secret key); tables from before that still have the single
 		// `read_only` policy.
-		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, only your secret key can write', policyNames: ['read_only_public_read', 'read_only_service_ops'], legacyPolicyNames: ['read_only'] }
+		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, only your secret key can write', policyNames: ['read_only_public_read', 'read_only_service_ops'], legacyPolicyNames: ['read_only'] },
+		{ id: 'service_only', label: 'Service only', desc: 'Only your secret key (backend) can read or write; app users get nothing', policyNames: ['service_only'] }
 	];
 
 	let activePreset = $derived(() => {
@@ -804,7 +805,7 @@
 							</div>
 
 							{#if !hasUserCol}
-								<p class="mt-1.5 text-[10px] text-amber-600">Owner-based presets require a UUID column (e.g. user_id) that references the user. Add one to this table first, or use "Full access" / "Read only".</p>
+								<p class="mt-1.5 text-[10px] text-amber-600">Owner-based presets require a UUID column (e.g. user_id) that references the user. Add one to this table first, or use "Full access", "Read only" or "Service only".</p>
 							{/if}
 						</div>
 
