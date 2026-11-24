@@ -571,6 +571,8 @@ export interface TableSchema {
 	indexes?: IndexInfo[];
 	triggers?: DBTrigger[];
 	rls_enabled?: boolean;
+	/** FORCE ROW LEVEL SECURITY: the table's owner is subject to the policies too. */
+	force_rls?: boolean;
 }
 
 export interface FileInfo {
@@ -3294,6 +3296,8 @@ export interface SchemaChange {
 export interface RLSAuditEntry {
 	table_name: string;
 	rls_enabled: boolean;
+	/** FORCE ROW LEVEL SECURITY: the table's owner is subject to the policies too. */
+	force_rls: boolean;
 	policy_count: number;
 	severity: 'ok' | 'warning' | 'critical';
 	message: string;

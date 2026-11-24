@@ -55,6 +55,7 @@ func TestSchemaBatchMatchesPerTable_DB(t *testing.T) {
 	q(`CREATE FUNCTION %[1]s.sb_touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`)
 	q(`CREATE TRIGGER sb_books_touch BEFORE INSERT OR UPDATE ON %[1]s.sb_books FOR EACH ROW EXECUTE FUNCTION %[1]s.sb_touch()`)
 	q(`ALTER TABLE %[1]s.sb_books ENABLE ROW LEVEL SECURITY`)
+	q(`ALTER TABLE %[1]s.sb_books FORCE ROW LEVEL SECURITY`)
 	// A trigger with a WHEN condition (pg_get_expr can't print those).
 	q(`CREATE TRIGGER sb_books_when AFTER UPDATE ON %[1]s.sb_books FOR EACH ROW WHEN (NEW.title IS DISTINCT FROM OLD.title) EXECUTE FUNCTION %[1]s.sb_touch()`)
 	// Indexes created out of name order; an expression index.
@@ -131,8 +132,8 @@ func TestSchemaBatchMatchesPerTable_DB(t *testing.T) {
 			tbl, schema).Scan(&rls); err != nil {
 			t.Fatal(err)
 		}
-		if rlsBy[tbl] != rls {
-			t.Errorf("%s rls: batch %v, per-table %v", tbl, rlsBy[tbl], rls)
+		if rlsBy[tbl].On != rls {
+			t.Errorf("%s rls: batch %v, per-table %v", tbl, rlsBy[tbl].On, rls)
 		}
 	}
 	if seen != 6 {
@@ -153,8 +154,8 @@ func TestSchemaBatchMatchesPerTable_DB(t *testing.T) {
 	if !authorFK || titleUnique {
 		t.Errorf("sb_books: author FK %v (want true), title unique %v (want false: only a multi-column UNIQUE)", authorFK, titleUnique)
 	}
-	if len(trgBy["sb_books"]) != 2 || !rlsBy["sb_books"] || rlsBy["sb_authors"] {
-		t.Errorf("sb_books trigger/RLS wrong: triggers %d, rls books %v authors %v", len(trgBy["sb_books"]), rlsBy["sb_books"], rlsBy["sb_authors"])
+	if len(trgBy["sb_books"]) != 2 || !rlsBy["sb_books"].On || !rlsBy["sb_books"].Force || rlsBy["sb_authors"].On || rlsBy["sb_authors"].Force {
+		t.Errorf("sb_books trigger/RLS wrong: triggers %d, rls books %v authors %v", len(trgBy["sb_books"]), rlsBy["sb_books"].On, rlsBy["sb_authors"].On)
 	}
 	if len(idxBy["sb_books"]) != 1 || len(idxBy["sb_link"]) != 1 || !idxBy["sb_link"][0].IsUnique {
 		t.Errorf("indexes wrong: %+v / %+v", idxBy["sb_books"], idxBy["sb_link"])

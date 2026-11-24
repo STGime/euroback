@@ -313,11 +313,18 @@ func indexColumns(def string) string {
 	return ""
 }
 
-// schemaRLS returns, per table in the schema, whether row-level security
-// is on.
-func schemaRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) (map[string]bool, error) {
+// rlsFlags is a table's row-level security state: On (ENABLE ROW LEVEL
+// SECURITY) and Force (FORCE ROW LEVEL SECURITY: the table's owner is
+// subject to the policies too).
+type rlsFlags struct {
+	On    bool
+	Force bool
+}
+
+// schemaRLS returns, per table in the schema, its row-level security flags.
+func schemaRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) (map[string]rlsFlags, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT c.relname, c.relrowsecurity
+		`SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
 		   FROM pg_catalog.pg_class c
 		   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		  WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')`,
@@ -327,14 +334,14 @@ func schemaRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) (map[
 		return nil, fmt.Errorf("query rls flags: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[string]bool)
+	out := make(map[string]rlsFlags)
 	for rows.Next() {
 		var tbl string
-		var on bool
-		if err := rows.Scan(&tbl, &on); err != nil {
+		var f rlsFlags
+		if err := rows.Scan(&tbl, &f.On, &f.Force); err != nil {
 			return nil, fmt.Errorf("scan rls flag: %w", err)
 		}
-		out[tbl] = on
+		out[tbl] = f
 	}
 	return out, rows.Err()
 }
