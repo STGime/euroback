@@ -83,6 +83,15 @@ type temRequest struct {
 	Subject   string       `json:"subject"`
 	HTML      string       `json:"html"`
 	ProjectID string       `json:"project_id"`
+	// AdditionalHeaders are extra message headers (TEM's
+	// additional_headers), e.g. List-Unsubscribe on bulk mail.
+	AdditionalHeaders []Header `json:"additional_headers,omitempty"`
+}
+
+// Header is one extra message header sent through TEM.
+type Header struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 type temAddress struct {
@@ -104,9 +113,30 @@ type temResponse struct {
 	} `json:"emails"`
 }
 
+// WithFrom returns a copy of the client that sends from another address
+// (same credentials and project). Empty fromEmail keeps the current one.
+func (c *EmailClient) WithFrom(fromEmail, fromName string) *EmailClient {
+	cp := *c
+	if fromEmail != "" {
+		cp.fromEmail = fromEmail
+	}
+	if fromName != "" {
+		cp.fromName = fromName
+	}
+	return &cp
+}
+
+// FromEmail is the sender address the client uses.
+func (c *EmailClient) FromEmail() string { return c.fromEmail }
+
 // SendWithID is Send, returning TEM's email id ("" when unconfigured or
 // when the response carries none).
 func (c *EmailClient) SendWithID(ctx context.Context, to, subject, htmlBody string) (string, error) {
+	return c.SendWithHeaders(ctx, to, subject, htmlBody, nil)
+}
+
+// SendWithHeaders is SendWithID with extra message headers.
+func (c *EmailClient) SendWithHeaders(ctx context.Context, to, subject, htmlBody string, headers []Header) (string, error) {
 	if !c.Configured() {
 		slog.Warn("email not configured, logging instead",
 			"to", to,
@@ -122,6 +152,8 @@ func (c *EmailClient) SendWithID(ctx context.Context, to, subject, htmlBody stri
 		Subject:   subject,
 		HTML:      htmlBody,
 		ProjectID: c.projectID,
+
+		AdditionalHeaders: headers,
 	}
 
 	body, err := json.Marshal(payload)

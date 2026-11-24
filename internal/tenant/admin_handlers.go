@@ -19,8 +19,12 @@ import (
 // per-chunk success/failure to the console after a chunked TEM send
 // (closes #35).
 type BulkEmailer interface {
-	SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) (email.BulkResult, error)
+	SendBroadcast(ctx context.Context, msgs []email.BroadcastMessage, subject string) (email.BulkResult, error)
 }
+
+// UnsubscribeURLFunc returns an account's signed unsubscribe link for
+// product updates ("" when unsubscribe links aren't configured).
+type UnsubscribeURLFunc func(userID string) string
 
 // AdminProject is a platform-wide project row returned to superadmins.
 type AdminProject struct {
@@ -153,7 +157,7 @@ func AdminAddAllowlist(pool *pgxpool.Pool) http.HandlerFunc {
 // testers learning who else is in the cohort). All recipients are
 // validated against the live platform_allowlist table so a compromised
 // superadmin token can't use this as a generic mail relay.
-func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.HandlerFunc {
+func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer, unsubscribeURL UnsubscribeURLFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if mailer == nil {
 			http.Error(w, `{"error":"email service not configured"}`, http.StatusServiceUnavailable)
@@ -208,7 +212,10 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 		// `lower(trim(email))` normalization matches
 		// AdminListBroadcastAudience — round-trip is byte-consistent
 		// between the audience listing and the send validation.
-		type source struct{ onAllowlist, hasAccount bool }
+		type source struct {
+			onAllowlist, hasAccount bool
+			userID                  string // the account's id ("" without one)
+		}
 		validSet := make(map[string]source, len(recipients))
 		// Same reserved-TLD filter as AdminListBroadcastAudience —
 		// a malicious/buggy caller can't force a probe address
@@ -219,14 +226,15 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 		rows, err := pool.Query(r.Context(),
 			`SELECT lower(trim(email)) AS email,
 			        BOOL_OR(source = 'allowlist') AS on_allowlist,
-			        BOOL_OR(source = 'user')      AS has_account
+			        BOOL_OR(source = 'user')      AS has_account,
+			        COALESCE(min(user_id), '')    AS user_id
 			   FROM (
-			       SELECT email, 'allowlist' AS source
+			       SELECT email, 'allowlist' AS source, NULL::text AS user_id
 			         FROM public.platform_allowlist
 			        WHERE `+reservedEmailFilterSQL+`
 			          AND `+broadcastAllowlistConsentSQL+`
 			       UNION ALL
-			       SELECT email, 'user' AS source
+			       SELECT email, 'user' AS source, id::text AS user_id
 			         FROM public.platform_users
 			        WHERE `+reservedEmailFilterSQL+`
 			          AND `+broadcastUserConsentSQL+`
@@ -241,10 +249,10 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			return
 		}
 		for rows.Next() {
-			var e string
+			var e, userID string
 			var onAllow, hasAcct bool
-			if err := rows.Scan(&e, &onAllow, &hasAcct); err == nil {
-				validSet[e] = source{onAllowlist: onAllow, hasAccount: hasAcct}
+			if err := rows.Scan(&e, &onAllow, &hasAcct, &userID); err == nil {
+				validSet[e] = source{onAllowlist: onAllow, hasAccount: hasAcct, userID: userID}
 			}
 		}
 		rows.Close()
@@ -287,27 +295,56 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			return
 		}
 
-		result, err := mailer.SendBulkBCC(r.Context(), final, req.Subject, withBroadcastFooter(req.BodyHTML, broadcastConsoleURL()))
-		if err != nil && result.Sent == 0 {
-			// Every chunk failed. Return 502 so the console treats it
-			// as a hard failure to retry.
-			slog.Error("admin bulk email: every chunk failed", "error", err, "count", len(final))
-			http.Error(w, `{"error":"send failed: `+err.Error()+`"}`, http.StatusBadGateway)
-			return
+		// One message per recipient (never BCC): each account gets its
+		// own one-click unsubscribe link, in the footer and in the
+		// List-Unsubscribe header.
+		consoleURL := broadcastConsoleURL()
+		msgs := make([]email.BroadcastMessage, 0, len(final))
+		for _, e := range final {
+			var link string
+			if uid := validSet[strings.ToLower(strings.TrimSpace(e))].userID; uid != "" && unsubscribeURL != nil {
+				link = unsubscribeURL(uid)
+			}
+			msgs = append(msgs, email.BroadcastMessage{
+				To:             e,
+				HTMLBody:       withBroadcastFooter(req.BodyHTML, consoleURL, link),
+				UnsubscribeURL: link,
+			})
 		}
-
-		// status reflects what reached TEM: "sent" when every chunk
-		// went out, "partial" when some chunks landed and some didn't.
-		// The shape (sent / failed / errors) lets the console show
-		// "12 / 15 delivered" and an expandable list of failures so
-		// the operator can retry just the failed addresses.
-		status := "sent"
-		if result.Failed > 0 {
-			status = "partial"
-		}
-
-		if svc := audit.FromContext(r.Context()); svc != nil {
-			actorID, actorEmail := audit.ActorFromContext(r.Context())
+		// Sending one message per recipient takes longer than a request
+		// may run (30 s), so it runs in the background on a context of
+		// its own and the handler answers 202 right away. The outcome
+		// (sent / failed, failing addresses) goes to the audit log and
+		// the gateway log when it's done.
+		auditSvc := audit.FromContext(r.Context())
+		actorID, actorEmail := audit.ActorFromContext(r.Context())
+		remoteAddr := r.RemoteAddr
+		bgCtx := context.WithoutCancel(r.Context())
+		subject := req.Subject
+		skipped := len(recipients) - len(final)
+		recipientCount := len(final)
+		runBroadcast(func() {
+			ctx, cancel := context.WithTimeout(bgCtx, broadcastSendBudget)
+			defer cancel()
+			result, err := mailer.SendBroadcast(ctx, msgs, subject)
+			failedAddrs := make([]string, 0, len(result.Errors))
+			for _, e := range result.Errors {
+				failedAddrs = append(failedAddrs, e.Recipients...)
+			}
+			if err != nil {
+				slog.Error("admin broadcast: nothing sent", "error", err, "count", recipientCount)
+			} else {
+				slog.Info("admin broadcast done", "sent", result.Sent, "failed", result.Failed, "subject", subject)
+			}
+			if len(failedAddrs) > 0 {
+				slog.Warn("admin broadcast: failed recipients", "recipients", failedAddrs)
+			}
+			if auditSvc == nil {
+				return
+			}
+			if len(failedAddrs) > 100 {
+				failedAddrs = failedAddrs[:100]
+			}
 			// Log as ActionBroadcastEmailed (not ActionAllowlistEmailed)
 			// now that the audience is widened. Legacy action constant
 			// is retained in internal/audit/service.go for historical
@@ -315,32 +352,39 @@ func AdminSendAllowlistEmail(pool *pgxpool.Pool, mailer BulkEmailer) http.Handle
 			// reconstruct the exact audience shape at send time —
 			// useful when an operator later asks "who did we tell
 			// about the release?"
-			svc.Log(r.Context(), "", actorID, actorEmail, audit.ActionBroadcastEmailed,
+			auditCtx, auditCancel := context.WithTimeout(bgCtx, 10*time.Second)
+			defer auditCancel()
+			auditSvc.Log(auditCtx, "", actorID, actorEmail, audit.ActionBroadcastEmailed,
 				audit.WithMetadata(map[string]any{
-					"recipient_count":      len(final),
-					"skipped_count":        len(recipients) - len(final),
+					"recipient_count":      recipientCount,
+					"skipped_count":        skipped,
 					"allowlist_only_count": allowlistOnly,
 					"users_only_count":     usersOnly,
 					"both_count":           both,
 					"sent":                 result.Sent,
 					"failed":               result.Failed,
-					"subject":              req.Subject,
+					"failed_recipients":    failedAddrs,
+					"subject":              subject,
 				}),
-				audit.WithIP(r.RemoteAddr))
-		}
+				audit.WithIP(remoteAddr))
+		})
 
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]any{
-			"status": status,
-			"sent":   result.Sent,
-			"failed": result.Failed,
-			"errors": result.Errors,
-			"bcc":    len(final) > 1,
+			"status":     "queued",
+			"recipients": recipientCount,
 			// Left out: bounced, reserved, unverified or opted out.
-			"skipped": len(recipients) - len(final),
+			"skipped": skipped,
 		})
 	}
 }
+
+// broadcastSendBudget bounds one background broadcast.
+const broadcastSendBudget = 30 * time.Minute
+
+// runBroadcast starts a broadcast send; tests replace it to run inline.
+var runBroadcast = func(f func()) { go f() }
 
 // AdminRemoveAllowlist deletes a platform_allowlist entry by email.
 func AdminRemoveAllowlist(pool *pgxpool.Pool) http.HandlerFunc {

@@ -967,7 +967,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Get("/allowlist", tenant.AdminListAllowlist(pool))
 			r.Post("/allowlist", tenant.AdminAddAllowlist(pool))
 			r.Delete("/allowlist/{email}", tenant.AdminRemoveAllowlist(pool))
-			r.Post("/allowlist/email", tenant.AdminSendAllowlistEmail(pool, emailService))
+			r.Post("/allowlist/email", tenant.AdminSendAllowlistEmail(pool, emailService, broadcastUnsubscribeURL(unsubSigner)))
 			// Signup domain blocklist (public.platform_blocked_signup_domains),
 			// enforced in PlatformAuthService.SignUp.
 			r.Get("/blocked-domains", tenant.AdminListBlockedDomains(pool))
@@ -2392,4 +2392,20 @@ func newSDKCatalogPool(pool, developerPool *pgxpool.Pool) *pgxpool.Pool {
 		return developerPool
 	}
 	return p
+}
+
+// broadcastUnsubscribeURL builds an account's signed one-click
+// unsubscribe link for product updates (category beta_updates), on the
+// same base URL the worker uses for the onboarding series.
+func broadcastUnsubscribeURL(signer *email.UnsubscribeSigner) tenant.UnsubscribeURLFunc {
+	if signer == nil {
+		return nil
+	}
+	base := strings.TrimRight(os.Getenv("GATEWAY_BASE_URL"), "/")
+	if base == "" {
+		base = "https://api.eurobase.app"
+	}
+	return func(userID string) string {
+		return email.BuildUnsubscribeURL(signer, base, userID, "beta_updates")
+	}
 }

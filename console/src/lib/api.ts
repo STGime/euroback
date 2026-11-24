@@ -2830,11 +2830,9 @@ export class EurobaseAPI {
 		subject: string,
 		bodyHtml: string
 	): Promise<{
-		status: 'sent' | 'partial';
-		sent: number;
-		failed: number;
-		errors?: { recipients: string[]; error: string }[];
-		bcc: boolean;
+		/** Sending runs in the background; the outcome goes to the audit log. */
+		status: 'queued';
+		recipients: number;
 		/** Left out: bounced, reserved, unverified or opted out. */
 		skipped?: number;
 	}> {
