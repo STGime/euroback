@@ -451,6 +451,10 @@ Realtime events are filtered on the server before they reach a subscriber, based
 | Server / admin (`eb_sk_*` secret API key, or a console user; system tables need developer or above) | Receives every event | Receives every event |
 | Anonymous (`eb_pk_*` public API key, no end-user JWT) | **Receives nothing** | **Receives nothing** |
 
+INSERT and UPDATE events carry the row in `record`. DELETE events carry only `{ id }` in `record`; `old_record` holds the id and the row's owner column(s), which is how the event reaches the row's owner. No other data from a deleted row is sent.
+
+Events come from writes through the data API (`eb.db` insert / update / delete, `/v1/db/{table}`). Writes made inside the database — RPC functions, edge-function SQL, cron jobs, triggers, the SQL editor — don't produce events.
+
 This matches the `owner_access` RLS preset applied by `eb.db.schema.createTable()` when an owner column is detected, so for tables using that preset, realtime and the API agree on whose rows a user gets. Realtime doesn't check your own policies: a custom policy that hides some of a user's own rows doesn't stop realtime from sending them.
 
 **Limitations.** The filter is column-based; realtime doesn't evaluate your RLS policies:

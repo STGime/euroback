@@ -336,10 +336,9 @@ func TestRealtime_DeleteUsesOldRecordOwner(t *testing.T) {
 
 	pub := NewEventPublisher(nil, hub)
 
-	// PublishDelete currently has only one record arg; the update
-	// path (which carries an old record) is what most consumers care
-	// about. Exercise PublishUpdate: new record has the owner col
-	// blanked, but old_record has user_id=A.
+	// Exercise the old_record fallback through PublishUpdate: new
+	// record has the owner col blanked, but old_record has user_id=A.
+	// (PublishDelete uses the same fallback: TestRealtime_DeleteReachesOwner.)
 	_ = pub.PublishUpdate(context.Background(), "p-1", "notes",
 		map[string]interface{}{"id": "n-1"},                 // new (no owner — simulates a column removal/cleanup)
 		map[string]interface{}{"id": "n-1", "user_id": "A"}, // old
@@ -350,5 +349,41 @@ func TestRealtime_DeleteUsesOldRecordOwner(t *testing.T) {
 	}
 	if _, err := b.readWithin(t, 250*time.Millisecond); err == nil {
 		t.Error("B received UPDATE that should have been A-only (old_record owner fallback regression)")
+	}
+}
+
+// TestRealtime_DeleteReachesOwner — the delete handlers pass the deleted
+// row's key + owner column as oldRecord (#995): the owner and the service
+// role get the event; another user and anon don't.
+func TestRealtime_DeleteReachesOwner(t *testing.T) {
+	hub, wsURL, stop := startServerForOwnerTest(t)
+	defer stop()
+
+	a := dialSubscribed(t, wsURL, "user:A", "p-1", "db:notes")
+	defer a.close()
+	b := dialSubscribed(t, wsURL, "user:B", "p-1", "db:notes")
+	defer b.close()
+	anon := dialSubscribed(t, wsURL, "anon-pk", "p-1", "db:notes")
+	defer anon.close()
+	svc := dialSubscribed(t, wsURL, "svc-sk", "p-1", "db:notes")
+	defer svc.close()
+
+	pub := NewEventPublisher(nil, hub)
+	_ = pub.PublishDelete(context.Background(), "p-1", "notes",
+		map[string]interface{}{"id": "n-1"},
+		map[string]interface{}{"id": "n-1", "user_id": "A"},
+	)
+
+	if _, err := a.readWithin(t, 1*time.Second); err != nil {
+		t.Errorf("owner A missed DELETE: %v", err)
+	}
+	if _, err := svc.readWithin(t, 1*time.Second); err != nil {
+		t.Errorf("service client missed DELETE: %v", err)
+	}
+	if _, err := b.readWithin(t, 250*time.Millisecond); err == nil {
+		t.Error("B received A's DELETE")
+	}
+	if _, err := anon.readWithin(t, 250*time.Millisecond); err == nil {
+		t.Error("anon received A's DELETE")
 	}
 }

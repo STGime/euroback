@@ -37,8 +37,11 @@ func (p *EventPublisher) PublishUpdate(ctx context.Context, projectID, table str
 }
 
 // PublishDelete broadcasts a DELETE event for the removed record.
-func (p *EventPublisher) PublishDelete(ctx context.Context, projectID, table string, record map[string]interface{}) error {
-	return p.publish(ctx, projectID, table, "DELETE", record, nil)
+// oldRecord carries the deleted row's primary key and owner column(s)
+// (see OwnerColumns), so the event reaches the row's owner; without an
+// owner it goes to service-role subscribers only.
+func (p *EventPublisher) PublishDelete(ctx context.Context, projectID, table string, record, oldRecord map[string]interface{}) error {
+	return p.publish(ctx, projectID, table, "DELETE", record, oldRecord)
 }
 
 // publish is the internal method that handles both local and Redis broadcasting.
@@ -74,8 +77,9 @@ func (p *EventPublisher) publish(ctx context.Context, projectID, table, eventTyp
 	// (same row for every subscriber), then carry it on the broadcast
 	// envelope. The hub filters per-subscriber based on it. DELETE
 	// events get the owner from oldRecord because record is just
-	// {id: ...} on the DELETE path (see HandleTableDelete in
-	// internal/query/handler.go).
+	// {id: ...} on the DELETE path (the delete handlers in
+	// internal/query/handler.go pass the deleted row's owner columns
+	// there).
 	ownerUserID := ownerUserIDFromRow(record)
 	if ownerUserID == "" && oldRecord != nil {
 		ownerUserID = ownerUserIDFromRow(oldRecord)
@@ -116,6 +120,13 @@ func (p *EventPublisher) publish(ctx context.Context, projectID, table, eventTyp
 // internal/query/ddl_handler.go), so realtime filtering and REST RLS
 // agree on which column scopes a row.
 var ownerColumns = []string{"user_id", "owner_id", "created_by", "uploaded_by"}
+
+// OwnerColumns returns the owner column names in priority order. Writers
+// that don't return the whole row (deletes) read these columns so the
+// event can be delivered to the row's owner.
+func OwnerColumns() []string {
+	return append([]string(nil), ownerColumns...)
+}
 
 // ownerUserIDFromRow returns the row's owner-column value, or "" if
 // the row has no recognised owner column. Used by the hub to decide

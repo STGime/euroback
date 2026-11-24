@@ -362,9 +362,10 @@ func buildUpdateQuery(schemaName, tableName, rowID string, data map[string]inter
 	return sql, args
 }
 
-// buildDeleteQuery builds a parameterized DELETE WHERE id = $1 query.
-func buildDeleteQuery(schemaName, tableName, rowID string) (string, []interface{}) {
+// buildDeleteQuery builds a parameterized DELETE WHERE id = $1 query that
+// returns the key and the given owner columns (deleteReturning).
+func buildDeleteQuery(schemaName, tableName, rowID string, ownerCols []string) (string, []interface{}) {
 	qt := qualifiedTable(schemaName, tableName)
-	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", qt, quoteIdent("id"))
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = $1 RETURNING %s", qt, quoteIdent("id"), deleteReturning(ownerCols))
 	return sql, []interface{}{rowID}
 }

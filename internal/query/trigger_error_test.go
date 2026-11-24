@@ -102,7 +102,8 @@ func TestTriggerFreeze_RealDB(t *testing.T) {
 	check("insert", err)
 	_, err = engine.UpdateRow(ctx, schema, "frozen_things", id, map[string]interface{}{"name": "y"})
 	check("update", err)
-	check("delete", engine.DeleteRow(ctx, schema, "frozen_things", id))
+	_, err = engine.DeleteRow(ctx, schema, "frozen_things", id)
+	check("delete", err)
 
 	rows, _, err := engine.SelectRows(ctx, schema, "frozen_things", QueryParams{Limit: 10})
 	if err != nil || len(rows) != 1 {

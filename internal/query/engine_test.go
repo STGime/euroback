@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -353,9 +354,12 @@ func TestDeleteRow(t *testing.T) {
 	rowID := uuidToString(inserted["id"])
 
 	// Delete it.
-	err = engine.DeleteRow(ctx, schema, "users", rowID)
+	key, err := engine.DeleteRow(ctx, schema, "users", rowID)
 	if err != nil {
 		t.Fatalf("DeleteRow failed: %v", err)
+	}
+	if key["id"] != rowID {
+		t.Errorf("DeleteRow key id = %v, want %s", key["id"], rowID)
 	}
 
 	// Select back: should be empty.
@@ -373,6 +377,68 @@ func TestDeleteRow(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("expected 0 rows after delete, got %d", len(rows))
+	}
+}
+
+// TestDeleteReturnsOwner — deletes return the row's key and owner columns
+// (and nothing else), so the realtime DELETE event can reach the owner (#995).
+func TestDeleteReturnsOwner(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	ctx := context.Background()
+	engine := NewQueryEngine(pool)
+
+	if _, err := pool.Exec(ctx, fmt.Sprintf(
+		`CREATE TABLE %s.rt_notes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), created_by text, user_id uuid, body text)`,
+		quoteIdent(schema))); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), fmt.Sprintf(`DROP TABLE IF EXISTS %s.rt_notes`, quoteIdent(schema)))
+	})
+
+	owner := "11111111-1111-1111-1111-111111111111"
+	insert := func(userID interface{}) string {
+		t.Helper()
+		row, err := engine.InsertRow(ctx, schema, "rt_notes", map[string]interface{}{"user_id": userID, "created_by": "creator", "body": "secret"})
+		if err != nil {
+			t.Fatalf("InsertRow: %v", err)
+		}
+		return uuidToString(row["id"])
+	}
+
+	id := insert(owner)
+	key, err := engine.DeleteRow(ctx, schema, "rt_notes", id)
+	if err != nil {
+		t.Fatalf("DeleteRow: %v", err)
+	}
+	want := map[string]interface{}{"id": id, "user_id": owner, "created_by": "creator"}
+	if fmt.Sprint(key) != fmt.Sprint(want) {
+		t.Errorf("DeleteRow key = %v, want %v (no row data beyond id + owner columns)", key, want)
+	}
+	if _, err := engine.DeleteRow(ctx, schema, "rt_notes", id); err == nil || !strings.Contains(err.Error(), "row not found") {
+		t.Errorf("second DeleteRow: err = %v, want row not found", err)
+	}
+
+	a, b := insert(owner), insert(nil)
+	keys, err := engine.DeleteRows(ctx, schema, "rt_notes", []string{a, b, "22222222-2222-2222-2222-222222222222"})
+	if err != nil {
+		t.Fatalf("DeleteRows: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("DeleteRows returned %d keys, want 2: %v", len(keys), keys)
+	}
+	byID := map[interface{}]map[string]interface{}{}
+	for _, k := range keys {
+		byID[k["id"]] = k
+	}
+	if byID[a]["user_id"] != owner {
+		t.Errorf("bulk key for owned row = %v, want user_id %s", byID[a], owner)
+	}
+	if _, ok := byID[b]["user_id"]; ok {
+		t.Errorf("bulk key for row with NULL user_id should omit it: %v", byID[b])
+	}
+	if _, ok := byID[b]["body"]; ok {
+		t.Errorf("bulk key carries row data: %v", byID[b])
 	}
 }
 
