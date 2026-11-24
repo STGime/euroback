@@ -498,7 +498,7 @@ Example:
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&rlsPreset, "rls-preset", "", "RLS preset: owner_access, public_read_owner_write, authenticated_read_owner_write, full_access, read_only, or none")
+	cmd.Flags().StringVar(&rlsPreset, "rls-preset", "", "RLS preset: owner_access, public_read_owner_write, authenticated_read_owner_write, full_access, read_only, service_only, or none")
 	cmd.Flags().StringVar(&userIDCol, "rls-user-column", "", "Column to use as the owner identifier for RLS (default: auto-detect)")
 	cmd.Flags().BoolVar(&disableRLS, "disable-rls", false, "Turn RLS OFF — use only for genuinely public data")
 	return cmd

@@ -227,7 +227,8 @@
 		{ id: 'public_read_owner_write', label: 'Public read, owner write', desc: 'Anyone can read, only owner can modify', policyNames: ['public_select', 'owner_insert', 'owner_update', 'owner_delete'] },
 		{ id: 'authenticated_read_owner_write', label: 'Auth read, owner write', desc: 'Signed-in users read all, owner modifies', policyNames: ['auth_select', 'owner_insert', 'owner_update', 'owner_delete'] },
 		{ id: 'full_access', label: 'Full access', desc: 'No restrictions (USING true)', policyNames: ['allow_all'] },
-		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, nobody can write', policyNames: ['read_only'] }
+		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, only your secret key can write', policyNames: ['read_only_public_read', 'read_only_service_ops'] },
+		{ id: 'service_only', label: 'Service only', desc: 'Only your secret key (backend) can read or write; app users get nothing', policyNames: ['service_only'] }
 	];
 
 	let activePreset = $derived(() => {
@@ -238,6 +239,10 @@
 		}
 		return null;
 	});
+
+	// Tables that got Read only before it allowed secret-key writes have a
+	// single `read_only` policy: nobody can write, the secret key included.
+	let legacyReadOnly = $derived(policies.length === 1 && policies[0].name === 'read_only');
 
 	async function toggleRLS() {
 		if (!selectedTable) return;
@@ -799,8 +804,11 @@
 								{/each}
 							</div>
 
+							{#if legacyReadOnly}
+								<p class="mt-1.5 text-[10px] text-amber-600">This table has the older "Read only" policy: nobody can write to it, your secret key included. Apply "Read only" again to let your secret key write.</p>
+							{/if}
 							{#if !hasUserCol}
-								<p class="mt-1.5 text-[10px] text-amber-600">Owner-based presets require a UUID column (e.g. user_id) that references the user. Add one to this table first, or use "Full access" / "Read only".</p>
+								<p class="mt-1.5 text-[10px] text-amber-600">Owner-based presets require a UUID column (e.g. user_id) that references the user. Add one to this table first, or use "Full access", "Read only" or "Service only".</p>
 							{/if}
 						</div>
 
