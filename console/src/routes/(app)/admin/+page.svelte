@@ -614,7 +614,7 @@
 				: '';
 		if (
 			!confirm(
-				`Send to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}${recipients.length > 1 ? ' (BCC)' : ''}${audienceLabel}?`
+				`Send to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}${audienceLabel}? Each recipient gets their own copy.`
 			)
 		)
 			return;
@@ -622,31 +622,14 @@
 		composeFailures = [];
 		try {
 			const res = await api.adminSendAllowlistEmail(recipients, composeSubject, composeBody);
-			// Partial success: the server sent SOME chunks, others
-			// failed. Show how many landed + surface the failing
-			// chunks so the operator can retry just those addresses
-			// instead of re-sending to everyone.
-			if (res.status === 'partial') {
-				composeSuccess = `Partial: ${res.sent} sent, ${res.failed} failed${res.bcc ? ' (BCC)' : ''}.${skippedNote(res.skipped)}`;
-				composeFailures = res.errors ?? [];
-				// Only relevant to the 'selected' flow — audience mode
-				// doesn't consult `selected`, so re-selecting the
-				// failures there would silently do nothing on the next
-				// send. Leave the failures visible in the modal
-				// instead so the operator can copy-paste for a manual
-				// retry.
-				if (composeMode === 'selected') {
-					selected = new Set(composeFailures.flatMap((e) => e.recipients));
-				} else if (composeMode === 'signup-selected') {
-					selectedSignups = new Set(composeFailures.flatMap((e) => e.recipients));
-				}
-			} else {
-				composeSuccess = `Sent to ${res.sent}${res.bcc ? ' (BCC)' : ''}.${skippedNote(res.skipped)}`;
-				if (composeMode === 'selected') {
-					selected = new Set();
-				} else if (composeMode === 'signup-selected') {
-					selectedSignups = new Set();
-				}
+			// Sending runs in the background (one message per recipient);
+			// the outcome, including failed addresses, is in the audit log
+			// (broadcast.emailed).
+			composeSuccess = `Sending to ${res.recipients} recipient${res.recipients === 1 ? '' : 's'} in the background. The result appears in the audit log.${skippedNote(res.skipped)}`;
+			if (composeMode === 'selected') {
+				selected = new Set();
+			} else if (composeMode === 'signup-selected') {
+				selectedSignups = new Set();
 			}
 			// Leave modal open so the user can see confirmation; they close manually.
 		} catch (e: any) {

@@ -149,6 +149,10 @@ func (s *stubBulkEmailer) SendBroadcast(ctx context.Context, msgs []email.Broadc
 	return email.BulkResult{Sent: len(msgs)}, nil
 }
 
+// Broadcast sends run inline in tests so the stub has the messages when
+// ServeHTTP returns.
+func init() { runBroadcast = func(f func()) { f() } }
+
 // testUnsubURL stands in for the signed unsubscribe link builder.
 func testUnsubURL(userID string) string { return "https://api.example.test/unsub?u=" + userID }
 
@@ -180,8 +184,8 @@ func TestAdminSendAllowlistEmail_AcceptsWidenedAudience(t *testing.T) {
 
 	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
 	}
 
 	// Should have forwarded three addresses (all three known ones);
@@ -315,8 +319,8 @@ func TestAdminSendAllowlistEmail_DedupsCaseVariantRequest(t *testing.T) {
 
 	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
 	}
 	// Count how many times signup-only appears in the forwarded set.
 	// Any form of the normalized `signup-only@…` counts.
@@ -515,8 +519,8 @@ func TestAdminSendAllowlistEmail_RejectsReservedTLDInSend(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
 	}
 	seen := map[string]bool{}
 	for _, e := range mailer.seen {
@@ -626,7 +630,7 @@ func TestAdminSendAllowlistEmail_ExcludesUnverifiedAndOptedOut(t *testing.T) {
 	mailer := &stubBulkEmailer{}
 	rec := httptest.NewRecorder()
 	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/platform/admin/allowlist/email", strings.NewReader(string(payload))))
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
 	}
 	sent := map[string]bool{}
