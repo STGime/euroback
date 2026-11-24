@@ -227,14 +227,18 @@
 		{ id: 'public_read_owner_write', label: 'Public read, owner write', desc: 'Anyone can read, only owner can modify', policyNames: ['public_select', 'owner_insert', 'owner_update', 'owner_delete'] },
 		{ id: 'authenticated_read_owner_write', label: 'Auth read, owner write', desc: 'Signed-in users read all, owner modifies', policyNames: ['auth_select', 'owner_insert', 'owner_update', 'owner_delete'] },
 		{ id: 'full_access', label: 'Full access', desc: 'No restrictions (USING true)', policyNames: ['allow_all'] },
-		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, nobody can write', policyNames: ['read_only'] }
+		// The preset creates two policies (read for everyone, writes for the
+		// secret key); tables from before that still have the single
+		// `read_only` policy.
+		{ id: 'read_only', label: 'Read only', desc: 'Anyone can read, only your secret key can write', policyNames: ['read_only_public_read', 'read_only_service_ops'], legacyPolicyNames: ['read_only'] }
 	];
 
 	let activePreset = $derived(() => {
 		if (policies.length === 0) return null;
 		const names = new Set(policies.map(p => p.name));
+		const matches = (want: string[]) => want.length === names.size && want.every(n => names.has(n));
 		for (const preset of policyPresets) {
-			if (preset.policyNames.length === names.size && preset.policyNames.every(n => names.has(n))) return preset.id;
+			if (matches(preset.policyNames) || (preset.legacyPolicyNames && matches(preset.legacyPolicyNames))) return preset.id;
 		}
 		return null;
 	});
