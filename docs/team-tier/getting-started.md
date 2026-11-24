@@ -6,9 +6,11 @@ Free and Pro projects live on. It also unlocks organizations + OIDC
 single-sign-on so a company can share access with employees under one
 identity provider.
 
-The tier is currently a **closed beta**: it's free for participating
-customers while we finish paid billing wiring (Mollie subscription
-plan-change is the last piece — see `docs/billing/stacked-pr-plan.md`).
+The tier is currently a **closed beta**: a free 14-day test per
+customer, starting when they create their first Team project
+(extendable from Admin → Projects). Paid Team billing isn't wired yet
+(Mollie subscription plan-change is the last piece — see
+`docs/billing/stacked-pr-plan.md`).
 
 ## What's actually shipped today
 
@@ -43,9 +45,9 @@ State this up front with beta customers so nobody plans around it:
 - **PITR** was removed in favour of snapshots — see
   `docs/runbooks/backup-pitr-test.md` for the reasoning. Restore
   granularity is per-snapshot, not per-second.
-- **Team billing** — free during the closed beta. When Mollie plan-
-  change lands, we'll notify each beta customer with 30 days' notice
-  before turning on charging.
+- **Team billing** — none during the closed beta, which is a 14-day
+  test per customer. When the test ends the project is suspended
+  unless we extend it; paid Team plans come with Mollie plan-change.
 
 ## Onboarding a beta customer — end to end
 
