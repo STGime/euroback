@@ -212,13 +212,20 @@ func TestBuildUpdateQuery(t *testing.T) {
 }
 
 func TestBuildDeleteQuery(t *testing.T) {
-	sql, args := buildDeleteQuery("tenant_abc", "users", "row-id-456")
+	sql, args := buildDeleteQuery("tenant_abc", "users", "row-id-456", []string{"user_id", "created_by"})
 
 	if !strings.Contains(sql, `DELETE FROM "tenant_abc"."users"`) {
 		t.Errorf("expected DELETE FROM with quoted identifiers, got: %s", sql)
 	}
 	if !strings.Contains(sql, `WHERE "id" = $1`) {
 		t.Errorf("expected WHERE id = $1, got: %s", sql)
+	}
+	// Returns the key and the owner columns only (#995), never RETURNING *.
+	if !strings.HasSuffix(sql, `RETURNING "id"::text, "user_id"::text, "created_by"::text`) {
+		t.Errorf("expected RETURNING of id + owner columns, got: %s", sql)
+	}
+	if got, _ := buildDeleteQuery("tenant_abc", "notes", "x", nil); !strings.HasSuffix(got, `RETURNING "id"::text`) {
+		t.Errorf("without owner columns expected RETURNING id only, got: %s", got)
 	}
 	// Raw row ID must not appear in SQL.
 	if strings.Contains(sql, "row-id-456") {

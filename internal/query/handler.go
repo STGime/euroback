@@ -147,7 +147,7 @@ func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) ht
 			return
 		}
 
-		deletedIDs, err := engine.DeleteRows(r.Context(), schema, tableName, body.IDs)
+		deletedRows, err := engine.DeleteRows(r.Context(), schema, tableName, body.IDs)
 		if err != nil {
 			slog.Error("bulk delete failed", "error", err, "schema", schema, "table", tableName)
 			if !handleQueryError(w, err) {
@@ -155,20 +155,20 @@ func HandleTableBulkDelete(engine *QueryEngine, pub *realtime.EventPublisher) ht
 			}
 			return
 		}
-		deleted := len(deletedIDs)
+		deleted := len(deletedRows)
 
 		// Realtime fan-out key is the project UUID, not schema name —
 		// the WebSocket subscriber also keys on the UUID (closes #62).
 		projectID := ProjectIDFromContext(r.Context())
 		if pub != nil {
-			for _, id := range deletedIDs {
-				_ = pub.PublishDelete(r.Context(), projectID, tableName, map[string]interface{}{"id": id})
+			for _, key := range deletedRows {
+				_ = pub.PublishDelete(r.Context(), projectID, tableName, map[string]interface{}{"id": key["id"]}, key)
 			}
 		}
 		if deleted > 0 {
 			evs := make([]events.Event, 0, deleted)
-			for _, id := range deletedIDs {
-				evs = append(evs, events.Event{ProjectID: projectID, Type: events.DBDelete, Table: tableName, Data: map[string]any{"id": id}})
+			for _, key := range deletedRows {
+				evs = append(evs, events.Event{ProjectID: projectID, Type: events.DBDelete, Table: tableName, Data: map[string]any{"id": key["id"]}})
 			}
 			events.FromContext(r.Context()).EmitMany(r.Context(), evs)
 		}
@@ -503,7 +503,7 @@ func handleDeleteRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 			return
 		}
 
-		err := engine.DeleteRow(r.Context(), schema, tableName, rowID)
+		key, err := engine.DeleteRow(r.Context(), schema, tableName, rowID)
 		if err != nil {
 			slog.Error("delete failed", "error", err, "schema", schema, "table", tableName, "id", rowID)
 			if !handleQueryError(w, err) {
@@ -513,7 +513,9 @@ func handleDeleteRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 		}
 
 		if pub != nil {
-			_ = pub.PublishDelete(r.Context(), ProjectIDFromContext(r.Context()), tableName, map[string]interface{}{"id": rowID})
+			// key = id + the row's owner column(s), so the event reaches
+			// the row's owner (#995).
+			_ = pub.PublishDelete(r.Context(), ProjectIDFromContext(r.Context()), tableName, map[string]interface{}{"id": rowID}, key)
 		}
 		emitRowEvent(r, events.DBDelete, tableName, map[string]any{"id": rowID})
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eurobase/euroback/internal/db"
+	"github.com/eurobase/euroback/internal/realtime"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -722,52 +723,73 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 }
 
 // DeleteRow builds and executes a parameterized DELETE WHERE id = $1.
-func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowID string) error {
+// It returns the deleted row's key: "id" plus the realtime owner columns
+// the table has (realtime.OwnerColumns, NULLs left out), so the delete
+// event can be delivered to the row's owner. No other row data.
+func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowID string) (map[string]interface{}, error) {
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
-		return err
+		return nil, err
 	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
-		return err
+		return nil, err
+	}
+	ownerCols, err := tableOwnerColumns(ctx, e.catalogPool(ctx), schemaName, tableName)
+	if err != nil {
+		return nil, err
 	}
 
-	sql, args := buildDeleteQuery(schemaName, tableName, rowID)
+	sql, args := buildDeleteQuery(schemaName, tableName, rowID, ownerCols)
 	slog.Debug("executing delete query", "sql", sql, "args_count", len(args))
 
-	return e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, sql, args...)
+	var deleted []map[string]interface{}
+	err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return fmt.Errorf("execute delete: %w", err)
 		}
-		if tag.RowsAffected() == 0 {
+		deleted, err = collectDeletedKeys(rows, ownerCols)
+		if err != nil {
+			return fmt.Errorf("execute delete: %w", err)
+		}
+		if len(deleted) == 0 {
 			return fmt.Errorf("row not found: %s", rowID)
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return deleted[0], nil
 }
 
 // DeleteRows deletes multiple rows by ID using ANY($1).
-// Returns the IDs of the rows actually deleted (as text), so callers
-// report deletes only for rows that existed.
-func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) ([]string, error) {
+// Returns the keys of the rows actually deleted ("id" as text plus the
+// owner columns, as DeleteRow), so callers report deletes only for rows
+// that existed.
+func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) ([]map[string]interface{}, error) {
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
 	}
+	ownerCols, err := tableOwnerColumns(ctx, e.catalogPool(ctx), schemaName, tableName)
+	if err != nil {
+		return nil, err
+	}
 
 	qt := qualifiedTable(schemaName, tableName)
-	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1) RETURNING %s::text", qt, quoteIdent("id"), quoteIdent("id"))
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = ANY($1) RETURNING %s", qt, quoteIdent("id"), deleteReturning(ownerCols))
 	slog.Debug("executing bulk delete", "sql", sql, "id_count", len(ids))
 
-	var deleted []string
-	err := e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
+	var deleted []map[string]interface{}
+	err = e.WithTenantTx(ctx, schemaName, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, sql, ids)
 		if err != nil {
 			return fmt.Errorf("execute bulk delete: %w", err)
 		}
-		deleted, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		deleted, err = collectDeletedKeys(rows, ownerCols)
 		if err != nil {
 			return fmt.Errorf("execute bulk delete: %w", err)
 		}
@@ -777,6 +799,74 @@ func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName stri
 		return nil, err
 	}
 	return deleted, nil
+}
+
+// tableOwnerColumns returns the realtime owner columns (realtime.OwnerColumns)
+// that the table has, in realtime's priority order.
+func tableOwnerColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) ([]string, error) {
+	candidates := realtime.OwnerColumns()
+	rows, err := pool.Query(ctx,
+		`SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = $2 AND column_name = ANY($3)`,
+		schemaName, tableName, candidates,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query owner columns: %w", err)
+	}
+	present, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("query owner columns: %w", err)
+	}
+	has := make(map[string]bool, len(present))
+	for _, c := range present {
+		has[c] = true
+	}
+	out := make([]string, 0, len(present))
+	for _, c := range candidates {
+		if has[c] {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// deleteReturning is the RETURNING list of a delete: the primary key and
+// the owner columns, all as text.
+func deleteReturning(ownerCols []string) string {
+	parts := make([]string, 0, 1+len(ownerCols))
+	parts = append(parts, quoteIdent("id")+"::text")
+	for _, c := range ownerCols {
+		parts = append(parts, quoteIdent(c)+"::text")
+	}
+	return strings.Join(parts, ", ")
+}
+
+// collectDeletedKeys reads rows of deleteReturning(ownerCols) into maps
+// with "id" and each non-NULL owner column.
+func collectDeletedKeys(rows pgx.Rows, ownerCols []string) ([]map[string]interface{}, error) {
+	defer rows.Close()
+	var out []map[string]interface{}
+	for rows.Next() {
+		vals := make([]*string, 1+len(ownerCols))
+		dest := make([]interface{}, len(vals))
+		for i := range vals {
+			dest[i] = &vals[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		key := make(map[string]interface{}, len(vals))
+		if vals[0] != nil {
+			key["id"] = *vals[0]
+		}
+		for i, c := range ownerCols {
+			if v := vals[i+1]; v != nil {
+				key[c] = *v
+			}
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
 }
 
 // CallFunction calls a PostgreSQL function via SELECT schema.func(args).
