@@ -70,6 +70,17 @@ func TestAuditRLSFlagsTables(t *testing.T) {
 		t.Fatalf("disable rls failed: %v", err)
 	}
 
+	// Table with FORCE ROW LEVEL SECURITY → force_rls true.
+	if err := CreateTable(ctx, pool, schema, "audit_forced", []ColumnDefinition{
+		{Name: "id", Type: "integer", IsPrimaryKey: true},
+	}); err != nil {
+		t.Fatalf("CreateTable failed: %v", err)
+	}
+	defer DropTable(ctx, pool, schema, "audit_forced") //nolint:errcheck
+	if _, err := pool.Exec(ctx, `ALTER TABLE `+schema+`.audit_forced FORCE ROW LEVEL SECURITY`); err != nil {
+		t.Fatalf("force rls failed: %v", err)
+	}
+
 	entries, err := AuditRLS(ctx, pool, schema)
 	if err != nil {
 		t.Fatalf("AuditRLS failed: %v", err)
@@ -90,6 +101,13 @@ func TestAuditRLSFlagsTables(t *testing.T) {
 		t.Fatal("expected audit_rls_off in audit results")
 	} else if e.Severity != "critical" {
 		t.Errorf("audit_rls_off: got severity %q, want critical", e.Severity)
+	}
+
+	if e := byName["audit_forced"]; !e.RLSEnabled || !e.ForceRLS {
+		t.Errorf("audit_forced: rls %v force %v, want both true", e.RLSEnabled, e.ForceRLS)
+	}
+	if byName["audit_no_policy"].ForceRLS {
+		t.Error("audit_no_policy: force_rls should be false")
 	}
 }
 

@@ -1368,8 +1368,11 @@ type RLSPolicy struct {
 
 // RLSAuditEntry describes the RLS posture of a single table.
 type RLSAuditEntry struct {
-	TableName   string `json:"table_name"`
-	RLSEnabled  bool   `json:"rls_enabled"`
+	TableName  string `json:"table_name"`
+	RLSEnabled bool   `json:"rls_enabled"`
+	// ForceRLS: FORCE ROW LEVEL SECURITY is set, so the table's owner
+	// (console SQL, migrations) is subject to the policies too.
+	ForceRLS    bool   `json:"force_rls"`
 	PolicyCount int    `json:"policy_count"`
 	Severity    string `json:"severity"` // "ok" | "warning" | "critical"
 	Message     string `json:"message"`
@@ -1389,7 +1392,7 @@ func AuditRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]RLS
 		return nil, perr
 	}
 	rows, err := pool.Query(ctx,
-		`SELECT c.relname, c.relrowsecurity, COALESCE(p.policy_count, 0)
+		`SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, COALESCE(p.policy_count, 0)
 		 FROM pg_class c
 		 JOIN pg_namespace n ON n.oid = c.relnamespace
 		 LEFT JOIN (
@@ -1407,7 +1410,7 @@ func AuditRLS(ctx context.Context, pool *pgxpool.Pool, schemaName string) ([]RLS
 	out := make([]RLSAuditEntry, 0)
 	for rows.Next() {
 		var e RLSAuditEntry
-		if err := rows.Scan(&e.TableName, &e.RLSEnabled, &e.PolicyCount); err != nil {
+		if err := rows.Scan(&e.TableName, &e.RLSEnabled, &e.ForceRLS, &e.PolicyCount); err != nil {
 			return nil, fmt.Errorf("scan rls audit row: %w", err)
 		}
 		if auditPlatformTables[e.TableName] {

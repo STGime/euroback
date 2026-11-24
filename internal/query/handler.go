@@ -231,6 +231,9 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 			Indexes    []IndexInfo  `json:"indexes,omitempty"`
 			Triggers   []DBTrigger  `json:"triggers,omitempty"`
 			RLSEnabled bool         `json:"rls_enabled"`
+			// ForceRLS: FORCE ROW LEVEL SECURITY, the table owner is
+			// subject to the policies too.
+			ForceRLS bool `json:"force_rls"`
 		}
 
 		// One query per kind for the whole schema (columns, constraints,
@@ -279,7 +282,8 @@ func HandleSchemaIntrospection(pool *pgxpool.Pool) http.HandlerFunc {
 				Columns:    applyConstraints(colsBy[t], consBy[t]),
 				Indexes:    idxBy[t],
 				Triggers:   triggers,
-				RLSEnabled: rlsBy[t],
+				RLSEnabled: rlsBy[t].On,
+				ForceRLS:   rlsBy[t].Force,
 			})
 		}
 

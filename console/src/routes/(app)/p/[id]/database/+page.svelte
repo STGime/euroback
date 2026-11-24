@@ -739,6 +739,12 @@
 					<div class="flex items-center justify-between">
 						<h3 class="text-sm font-semibold text-gray-900">Row-Level Security</h3>
 						<div class="flex items-center gap-2">
+							{#if selectedSchema?.rls_enabled && selectedSchema?.force_rls}
+								<span
+									class="text-xs rounded-md border border-gray-300 bg-gray-50 px-2 py-1 text-gray-700"
+									title="FORCE ROW LEVEL SECURITY is set: the policies also apply to the table's owner (SQL editor, migrations)."
+								>Forced</span>
+							{/if}
 							<button
 								type="button"
 								class="cursor-pointer text-xs rounded-md border px-2 py-1 transition-colors {selectedSchema?.rls_enabled ? 'border-green-300 text-green-700 bg-green-50' : 'border-amber-300 text-amber-700 bg-amber-50'}"
