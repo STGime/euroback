@@ -132,17 +132,25 @@ func TestAdminListBroadcastAudience_DedupesByLowerTrim(t *testing.T) {
 }
 
 // stubBulkEmailer records recipients so tests can assert what the
-// widened validation actually forwarded to SendBulkBCC. It always
+// widened validation actually forwarded to SendBroadcast. It always
 // succeeds — the tests here care about which addresses the handler
 // selected, not TEM behaviour.
 type stubBulkEmailer struct {
 	seen []string
+	msgs []email.BroadcastMessage
 }
 
-func (s *stubBulkEmailer) SendBulkBCC(ctx context.Context, recipients []string, subject, htmlBody string) (email.BulkResult, error) {
-	s.seen = append([]string(nil), recipients...)
-	return email.BulkResult{Sent: len(recipients)}, nil
+func (s *stubBulkEmailer) SendBroadcast(ctx context.Context, msgs []email.BroadcastMessage, subject string) (email.BulkResult, error) {
+	s.seen = s.seen[:0]
+	for _, m := range msgs {
+		s.seen = append(s.seen, m.To)
+	}
+	s.msgs = append([]email.BroadcastMessage(nil), msgs...)
+	return email.BulkResult{Sent: len(msgs)}, nil
 }
+
+// testUnsubURL stands in for the signed unsubscribe link builder.
+func testUnsubURL(userID string) string { return "https://api.example.test/unsub?u=" + userID }
 
 // TestAdminSendAllowlistEmail_AcceptsWidenedAudience is the mirror
 // on the send path: after the audience-endpoint dedups, the send
@@ -170,7 +178,7 @@ func TestAdminSendAllowlistEmail_AcceptsWidenedAudience(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, req)
+	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
@@ -193,6 +201,18 @@ func TestAdminSendAllowlistEmail_AcceptsWidenedAudience(t *testing.T) {
 	}
 	if got["not-registered@test.eurobase.local"] {
 		t.Errorf("unregistered email leaked through validation: %v", mailer.seen)
+	}
+
+	// One message per recipient: accounts get their own unsubscribe
+	// link (header + footer); invite-list-only addresses get none.
+	for _, m := range mailer.msgs {
+		hasAccount := m.To != "allow-only@test.eurobase.local"
+		if hasAccount != (m.UnsubscribeURL != "") {
+			t.Errorf("%s: unsubscribe URL %q, want one only for accounts", m.To, m.UnsubscribeURL)
+		}
+		if m.UnsubscribeURL != "" && !strings.Contains(m.HTMLBody, m.UnsubscribeURL) {
+			t.Errorf("%s: footer lacks the personal unsubscribe link", m.To)
+		}
 	}
 }
 
@@ -267,7 +287,7 @@ func TestAdminListBroadcastAudience_DedupesWithinAllowlist(t *testing.T) {
 
 // TestAdminSendAllowlistEmail_DedupsCaseVariantRequest confirms the
 // send-side belt: a caller passing `Foo@X.com` twice (or with a
-// case-variant of a known DB email) is deduped BEFORE SendBulkBCC.
+// case-variant of a known DB email) is deduped BEFORE SendBroadcast.
 // Otherwise the same recipient could receive multiple copies of
 // the same broadcast — the exact "each exactly once" ask.
 func TestAdminSendAllowlistEmail_DedupsCaseVariantRequest(t *testing.T) {
@@ -293,7 +313,7 @@ func TestAdminSendAllowlistEmail_DedupsCaseVariantRequest(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, req)
+	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
@@ -494,7 +514,7 @@ func TestAdminSendAllowlistEmail_RejectsReservedTLDInSend(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, req)
+	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -530,7 +550,7 @@ func TestAdminSendAllowlistEmail_RejectsIfNoValidRecipients(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, req)
+	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -605,7 +625,7 @@ func TestAdminSendAllowlistEmail_ExcludesUnverifiedAndOptedOut(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"emails": all, "subject": "s", "body_html": "<p>x</p>"})
 	mailer := &stubBulkEmailer{}
 	rec := httptest.NewRecorder()
-	AdminSendAllowlistEmail(pool, mailer).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/platform/admin/allowlist/email", strings.NewReader(string(payload))))
+	AdminSendAllowlistEmail(pool, mailer, testUnsubURL).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/platform/admin/allowlist/email", strings.NewReader(string(payload))))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
 	}

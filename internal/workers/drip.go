@@ -35,7 +35,7 @@ const dripVerifyWait = 7 * 24 * time.Hour
 //     shouldn't re-fire but defence in depth against a manual
 //     re-enqueue or a lost ack).
 //  4. Render the template via email.RenderOnboardingStep.
-//  5. Send via emailService.SendRaw (goes through TEM; no
+//  5. Send via emailService.SendBulkMail (goes through TEM; no
 //     per-project routing — this mail is from the platform to the
 //     tenant, not from the tenant to their end-users).
 //  6. Write a 'sent' row to drip_email_sends. On send failure,
@@ -122,11 +122,11 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 	// re-send. Defends against manual re-enqueue (rerun a completed
 	// job by ID → guard catches it).
 	//
-	// Delivery is at-least-once: a worker crash between SendRaw
+	// Delivery is at-least-once: a worker crash between SendBulkMail
 	// (below) and recordSend leaves no row, so River's retry will
 	// re-send. A concurrent-worker race (two runners picking up the
 	// same job) is not blocked here — both pass this SELECT, both
-	// SendRaw, both recordSend (ON CONFLICT DO UPDATE never raises).
+	// SendBulkMail, both recordSend (ON CONFLICT DO UPDATE never raises).
 	// For onboarding drip that trade-off is acceptable: a duplicate
 	// welcome mail is annoying, not incorrect. Do not build stronger
 	// guarantees (billing side-effects, external one-shot API calls)
@@ -180,12 +180,13 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 	}
 
 	// ── Render + send ──
+	unsubscribeURL := email.BuildUnsubscribeURL(w.Signer, w.BaseURL, args.UserID, "onboarding")
 	data := email.OnboardingData{
 		UserEmail:      userEmail,
 		DisplayName:    stringOrEmpty(displayName),
 		ProjectName:    stringOrEmpty(projectName),
 		ProjectSlug:    stringOrEmpty(projectSlug),
-		UnsubscribeURL: email.BuildUnsubscribeURL(w.Signer, w.BaseURL, args.UserID, "onboarding"),
+		UnsubscribeURL: unsubscribeURL,
 		DocsURL:        w.DocsURL,
 		ConsoleURL:     w.ConsoleURL,
 	}
@@ -198,7 +199,9 @@ func (w *SendDripEmailWorker) Work(ctx context.Context, job *river.Job[jobs.Send
 		_ = w.recordSend(ctx, args.UserID, args.Step, "failed", err.Error())
 		return nil
 	}
-	if err := w.Emails.SendRaw(ctx, userEmail, subject, body); err != nil {
+	// Bulk sender + List-Unsubscribe headers (one-click with the same
+	// signed link as the footer).
+	if err := w.Emails.SendBulkMail(ctx, userEmail, subject, body, unsubscribeURL); err != nil {
 		// Transient failure — let River retry. Also record the
 		// failure so a support-facing SQL query can see the last
 		// error message without grepping worker logs. Duplicate-key

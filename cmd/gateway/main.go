@@ -363,6 +363,10 @@ func main() {
 		emailService = email.NewEmailService(emailClient, pool, consoleURL)
 		slog.Warn("SCW_TEM_SECRET_KEY or EMAIL_FROM_ADDRESS not set, emails will be logged instead of sent")
 	}
+	// Product updates (admin broadcasts) go out from their own sender
+	// when EMAIL_FROM_ADDRESS_BULK is set (a separately registered
+	// sending domain), keeping them apart from sign-in mail.
+	emailService.WithBulkSender(os.Getenv("EMAIL_FROM_ADDRESS_BULK"), os.Getenv("EMAIL_FROM_NAME_BULK"))
 
 	// Auth email log (000135): the gateway role may only insert; the
 	// console reads it and the cleanup deletes on the developer pool.

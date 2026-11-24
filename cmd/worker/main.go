@@ -167,6 +167,10 @@ func main() {
 		firstNonEmpty(os.Getenv("EMAIL_FROM_NAME_DRIP"), "Eurobase"),
 	)
 	emailService := email.NewEmailService(emailClient, pool, consoleURL)
+	// The onboarding series goes out from the bulk sender when
+	// EMAIL_FROM_ADDRESS_BULK is set (see email.WithBulkSender); other
+	// worker mail keeps the address above.
+	emailService.WithBulkSender(os.Getenv("EMAIL_FROM_ADDRESS_BULK"), firstNonEmpty(os.Getenv("EMAIL_FROM_NAME_BULK"), os.Getenv("EMAIL_FROM_NAME_DRIP")))
 	if !emailClient.Configured() {
 		slog.Warn("email client not configured — drip sends will log-only")
 	}

@@ -55,6 +55,10 @@ type EmailService struct {
 	// deliveryLog, when set, records every auth email's outcome for the
 	// project's developers (000135). nil = no log.
 	deliveryLog *DeliveryLog
+
+	// bulk, when set, is the sender for bulk mail (see bulk_mail.go);
+	// nil = bulk mail uses client.
+	bulk *EmailClient
 }
 
 // TemplateGate says whether the project's plan includes custom email
