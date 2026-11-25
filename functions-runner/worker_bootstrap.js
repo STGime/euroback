@@ -19,6 +19,46 @@
 // (no `read` permission means it can't load tsconfig anyway).
 
 (() => {
+  // Functions have no route to Eurobase's own API URLs (the network
+  // policy drops that traffic, by design: function traffic must not
+  // count as API requests). Without this check a fetch there hangs until
+  // the function's time limit (#1004). Refuse it at once with an error
+  // that names the alternatives. This is for a clear error only; the
+  // network policy is what blocks the traffic.
+  const PLATFORM_DOMAINS = ["eurobase.app"];
+  const originalFetch = globalThis.fetch;
+
+  function platformHost(input) {
+    let raw;
+    try {
+      if (typeof input === "string") raw = input;
+      else if (input instanceof URL) raw = input.href;
+      else if (input instanceof Request) raw = input.url;
+      else raw = String(input);
+      const host = new URL(raw).hostname.toLowerCase().replace(/\.$/, "");
+      for (const d of PLATFORM_DOMAINS) {
+        if (host === d || host.endsWith("." + d)) return host;
+      }
+    } catch (_) {
+      // Not a parseable absolute URL: let fetch report it as usual.
+    }
+    return null;
+  }
+
+  globalThis.fetch = function fetch(input, init) {
+    const host = platformHost(input);
+    if (host !== null) {
+      return Promise.reject(
+        new TypeError(
+          "fetch to " + host + " refused: edge functions can't call Eurobase API URLs (*.eurobase.app). " +
+            "Use ctx.db.sql for tables and database functions and ctx.storage for files; " +
+            "call auth endpoints from your client app.",
+        ),
+      );
+    }
+    return originalFetch(input, init);
+  };
+
   // Pending RPC calls to the parent, keyed by call id.
   const pending = new Map();
 

@@ -492,3 +492,58 @@ Deno.test("Request body is delivered to user code as the original bytes", async 
   assert(result.ok);
   assertEquals(result.body, 'echo: {"input": 42}');
 });
+
+Deno.test("fetch to a Eurobase API URL fails at once with a clear error (#1004)", async () => {
+  const result = await spawnAndInvoke({
+    userCode: `
+      globalThis.handler = async (req, ctx) => {
+        const targets = [
+          "https://myproj.eurobase.app/v1/auth/verify-email",
+          new URL("https://API.Eurobase.app./health"),
+          new Request("https://eurobase.app/"),
+        ];
+        const out = [];
+        for (const t of targets) {
+          const start = Date.now();
+          try {
+            await fetch(t);
+            out.push({ ok: true });
+          } catch (e) {
+            out.push({ ok: false, name: e.name, message: e.message, ms: Date.now() - start });
+          }
+        }
+        return Response.json(out);
+      };
+    `,
+  });
+  assert(result.ok, result.error);
+  const parsed = JSON.parse(result.body!);
+  assertEquals(parsed.length, 3);
+  for (const r of parsed) {
+    assertStrictEquals(r.ok, false);
+    assertEquals(r.name, "TypeError");
+    assert(r.message.includes("ctx.db.sql"), r.message);
+    assert(r.ms < 100, "expected an immediate refusal, took " + r.ms + " ms");
+  }
+  assert(parsed[0].message.startsWith("fetch to myproj.eurobase.app refused"), parsed[0].message);
+  assert(parsed[1].message.startsWith("fetch to api.eurobase.app refused"), parsed[1].message);
+});
+
+Deno.test("fetch to look-alike hosts is not refused by the platform check", async () => {
+  // No network in the assertion: an unparseable / non-platform target
+  // must reach the real fetch, which here fails on its own terms.
+  const result = await spawnAndInvoke({
+    userCode: `
+      globalThis.handler = async (req, ctx) => {
+        const out = [];
+        for (const t of ["https://noteurobase.app.invalid/", "https://eurobase.app.invalid/", "not a url"]) {
+          try { await fetch(t); out.push("ok"); }
+          catch (e) { out.push(e.message.includes("refused: edge functions") ? "refused" : "other"); }
+        }
+        return Response.json(out);
+      };
+    `,
+  });
+  assert(result.ok, result.error);
+  assertEquals(JSON.parse(result.body!), ["other", "other", "other"]);
+});
