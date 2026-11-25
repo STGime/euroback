@@ -141,7 +141,7 @@ func uuidToString(v interface{}) string {
 
 func TestInsertAndSelect(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
+	ctx := ContextWithKeyType(context.Background(), "secret") // seeds the users system table
 	engine := NewQueryEngine(pool)
 
 	// Insert a row into the tenant's users table.
@@ -187,7 +187,7 @@ func TestInsertAndSelect(t *testing.T) {
 
 func TestSelectWithFilters(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
+	ctx := ContextWithKeyType(context.Background(), "secret") // seeds the users system table
 	engine := NewQueryEngine(pool)
 
 	// Insert 3 rows with different display names.
@@ -228,7 +228,7 @@ func TestSelectWithFilters(t *testing.T) {
 
 func TestSelectWithOrder(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
+	ctx := ContextWithKeyType(context.Background(), "secret") // seeds the users system table
 	engine := NewQueryEngine(pool)
 
 	// Insert rows.
@@ -264,7 +264,7 @@ func TestSelectWithOrder(t *testing.T) {
 
 func TestSelectWithPagination(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
+	ctx := ContextWithKeyType(context.Background(), "secret") // seeds the users system table
 	engine := NewQueryEngine(pool)
 
 	// Insert 5 rows.
@@ -298,7 +298,7 @@ func TestSelectWithPagination(t *testing.T) {
 
 func TestUpdateRow(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
+	ctx := ContextWithKeyType(context.Background(), "secret") // seeds the users system table
 	engine := NewQueryEngine(pool)
 
 	// Insert a row.
@@ -341,7 +341,7 @@ func TestUpdateRow(t *testing.T) {
 
 func TestDeleteRow(t *testing.T) {
 	pool, schema, _ := setupTestDB(t)
-	ctx := context.Background()
+	ctx := ContextWithKeyType(context.Background(), "secret") // seeds the users system table
 	engine := NewQueryEngine(pool)
 
 	// Insert a row.

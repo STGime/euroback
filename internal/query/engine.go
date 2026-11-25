@@ -612,6 +612,9 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
+	if err := checkAuthTableInsert(ctx, tableName); err != nil {
+		return nil, err
+	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
@@ -690,6 +693,9 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 		return nil, err
 	}
 	if err := checkDeniedColumns(ctx, tableName, cols); err != nil {
+		return nil, err
+	}
+	if err := checkAuthTableUpdate(ctx, tableName, cols); err != nil {
 		return nil, err
 	}
 

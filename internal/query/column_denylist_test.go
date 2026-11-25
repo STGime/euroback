@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -173,5 +174,46 @@ func TestStripDeniedColumns_ScrubsForPublicKeepsForService(t *testing.T) {
 	}
 	if _, ok := vault[0]["nonce"]; ok {
 		t.Fatal("vault_secrets.nonce must be scrubbed for public caller")
+	}
+}
+
+func TestCheckAuthTableInsert(t *testing.T) {
+	for _, table := range []string{"users", "user_identities", "user_passkey_credentials", "webauthn_challenges"} {
+		if err := checkAuthTableInsert(publicCtx(), table); !errors.Is(err, ErrPlatformManagedTable) {
+			t.Errorf("public insert into %s: want ErrPlatformManagedTable, got %v", table, err)
+		}
+		if err := checkAuthTableInsert(context.Background(), table); err == nil {
+			t.Errorf("insert into %s without a key type should be refused", table)
+		}
+		if err := checkAuthTableInsert(serviceCtx(), table); err != nil {
+			t.Errorf("service insert into %s should pass: %v", table, err)
+		}
+	}
+	if err := checkAuthTableInsert(publicCtx(), "clubs"); err != nil {
+		t.Errorf("app table should pass: %v", err)
+	}
+}
+
+func TestCheckAuthTableUpdate(t *testing.T) {
+	ctx := publicCtx()
+	if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", "avatar_url", "metadata", "updated_at"}); err != nil {
+		t.Errorf("profile columns should pass: %v", err)
+	}
+	for _, col := range []string{"email", "email_confirmed_at", "banned_at", "phone", "phone_confirmed_at",
+		"provider", "provider_user_id", "id", "last_sign_in_at", "created_at", "password_hash"} {
+		if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", col}); !errors.Is(err, ErrPlatformManagedTable) {
+			t.Errorf("users.%s: want ErrPlatformManagedTable, got %v", col, err)
+		}
+	}
+	for _, table := range []string{"user_identities", "user_passkey_credentials", "webauthn_challenges"} {
+		if err := checkAuthTableUpdate(ctx, table, []string{"display_name"}); !errors.Is(err, ErrPlatformManagedTable) {
+			t.Errorf("%s update: want ErrPlatformManagedTable, got %v", table, err)
+		}
+	}
+	if err := checkAuthTableUpdate(serviceCtx(), "users", []string{"email", "banned_at"}); err != nil {
+		t.Errorf("service update should pass: %v", err)
+	}
+	if err := checkAuthTableUpdate(ctx, "clubs", []string{"email"}); err != nil {
+		t.Errorf("app table should pass: %v", err)
 	}
 }

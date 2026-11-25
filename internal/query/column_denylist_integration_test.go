@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -133,5 +134,54 @@ func TestIntegration_PasswordHashNotExposed(t *testing.T) {
 	}
 	if rr := call(svcCtx, "SELECT to_jsonb(u) FROM users u"); rr.Code != http.StatusOK {
 		t.Errorf("/sql service row-wrap: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestIntegration_AuthTablesReadOnlyForAppUsers drives the real engine
+// as a signed-in app user: profile columns of their own users row can
+// change and they can delete their own row, but account columns can't
+// change and rows can't be added to the auth tables through the data API.
+func TestIntegration_AuthTablesReadOnlyForAppUsers(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	engine := NewQueryEngine(pool)
+
+	svcCtx := ContextWithKeyType(context.Background(), "secret")
+	seeded, err := engine.InsertRow(svcCtx, schema, "users", map[string]interface{}{"email": "member@example.com"})
+	if err != nil {
+		t.Fatalf("seed insert (service): %v", err)
+	}
+	id := seeded["id"].(string)
+	userCtx := ContextWithEndUserID(ContextWithKeyType(context.Background(), "public"), id)
+
+	if _, err := engine.UpdateRow(userCtx, schema, "users", id, map[string]interface{}{
+		"display_name": "Member", "metadata": map[string]interface{}{"theme": "dark"},
+	}); err != nil {
+		t.Fatalf("profile update should pass: %v", err)
+	}
+	for col, val := range map[string]interface{}{
+		"email":              "other@example.com",
+		"email_confirmed_at": "2026-01-01T00:00:00Z",
+		"banned_at":          nil,
+	} {
+		if _, err := engine.UpdateRow(userCtx, schema, "users", id, map[string]interface{}{col: val}); !errors.Is(err, ErrPlatformManagedTable) {
+			t.Errorf("update of users.%s: want ErrPlatformManagedTable, got %v", col, err)
+		}
+	}
+	if _, err := engine.InsertRow(userCtx, schema, "user_identities", map[string]interface{}{
+		"user_id": id, "provider": "google", "provider_user_id": "x",
+	}); !errors.Is(err, ErrPlatformManagedTable) {
+		t.Errorf("insert into user_identities: want ErrPlatformManagedTable, got %v", err)
+	}
+
+	// The service key still manages accounts.
+	if _, err := engine.UpdateRow(svcCtx, schema, "users", id, map[string]interface{}{"email_confirmed_at": "2026-01-01T00:00:00Z"}); err != nil {
+		t.Errorf("service update should pass: %v", err)
+	}
+
+	// Deleting stays possible through the data API. Limiting it to the
+	// caller's own row is RLS's job, which this harness's superuser
+	// connection doesn't apply, so only the data-API side is checked here.
+	if _, err := engine.DeleteRow(userCtx, schema, "users", id); err != nil {
+		t.Errorf("deleting the own row should pass: %v", err)
 	}
 }
