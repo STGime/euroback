@@ -72,8 +72,14 @@ A friendly reply along the lines of:
 > Organizations + SSO setup: <link to
 > docs/team-tier/organizations-sso.md>.
 >
-> The beta is free while we finalise paid billing. We'll notify
-> you 30 days before we start charging so nothing surprises you.
+> Your 14-day test starts when you create your first Team project.
+> It's free; we'll email you 4 days before it ends. If you need
+> more time, reply to this email and we'll extend it.
+
+The window is per owner and starts at project creation
+(`projects.beta_ends_at`, `tenant.TeamBetaDays`). If the customer
+creates the project the same day, "Your 14-day test starts today"
+fits too. Extend from **Admin → Projects → Extend 14 days**.
 
 Docs to send:
 
