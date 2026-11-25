@@ -2,6 +2,7 @@ package functions
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -112,5 +113,47 @@ func TestIsGatewayControlHeader(t *testing.T) {
 		if isGatewayControlHeader(h) {
 			t.Errorf("%s is a caller header, must be forwardable", h)
 		}
+	}
+}
+
+// Issue #1002: a redirect a function answers with belongs to the caller.
+// The client for runner calls must hand the 3xx back with its Location
+// header and must not fetch the target itself.
+func TestNewRunnerClient_DoesNotFollowRedirects(t *testing.T) {
+	targetHit := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer target.Close()
+
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", target.URL+"/verified")
+			w.WriteHeader(status)
+		}))
+
+		resp, err := NewRunnerClient().Post(runner.URL+"/invoke", "application/json", strings.NewReader("{}"))
+		runner.Close()
+		if err != nil {
+			t.Fatalf("status %d: unexpected error: %v", status, err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != status {
+			t.Errorf("status %d: got %d, the redirect was not passed through", status, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Location"); got != target.URL+"/verified" {
+			t.Errorf("status %d: Location = %q", status, got)
+		}
+	}
+	if targetHit {
+		t.Error("the redirect target was fetched; the client must not follow redirects")
+	}
+}
+
+func TestNewRunnerClient_KeepsTimeoutAboveFunctionLimit(t *testing.T) {
+	if got := NewRunnerClient().Timeout; got != runnerTimeout {
+		t.Errorf("Timeout = %v, want %v", got, runnerTimeout)
 	}
 }
