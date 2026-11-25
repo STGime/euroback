@@ -612,6 +612,9 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
+	if err := checkAuthTableWrite(ctx, tableName); err != nil {
+		return nil, err
+	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
@@ -692,6 +695,9 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 	if err := checkDeniedColumns(ctx, tableName, cols); err != nil {
 		return nil, err
 	}
+	if err := checkAuthTableUpdate(ctx, tableName, cols); err != nil {
+		return nil, err
+	}
 
 	sql, args := buildUpdateQuery(schemaName, tableName, rowID, data)
 	slog.Debug("executing update query", "sql", sql, "args_count", len(args))
@@ -728,6 +734,9 @@ func (e *QueryEngine) UpdateRow(ctx context.Context, schemaName, tableName, rowI
 // event can be delivered to the row's owner. No other row data.
 func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowID string) (map[string]interface{}, error) {
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return nil, err
+	}
+	if err := checkAuthTableWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
 	// Validate table exists.
@@ -769,6 +778,9 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 // that existed.
 func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) ([]map[string]interface{}, error) {
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
+		return nil, err
+	}
+	if err := checkAuthTableWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {

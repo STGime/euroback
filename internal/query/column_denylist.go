@@ -182,6 +182,53 @@ func checkPlatformManagedWrite(ctx context.Context, tableName string) error {
 	return fmt.Errorf("%w: table %q is managed by the storage API (/v1/storage) and is read-only via the data API", ErrPlatformManagedTable, tableName)
 }
 
+// authManagedTables hold an app user's account and sign-in identities.
+// They change through the auth API (and the admin API with the secret
+// key); a non-service caller of the data API may not insert, update or
+// delete their rows. Their RLS policies admit a user's own rows, so
+// without this a signed-in user could edit their own account record
+// (address, confirmation, status) or link sign-in identities to it.
+var authManagedTables = map[string]bool{
+	"users":                    true,
+	"user_identities":          true,
+	"user_passkey_credentials": true,
+	"webauthn_challenges":      true,
+}
+
+// userProfileColumns are the columns of users an app user may still
+// change on their own row through the data API: profile fields that
+// carry no identity or account state.
+var userProfileColumns = map[string]bool{
+	"display_name": true,
+	"avatar_url":   true,
+}
+
+// checkAuthTableWrite refuses a non-service insert or delete on an
+// auth-managed table through the data API.
+func checkAuthTableWrite(ctx context.Context, tableName string) error {
+	if serviceKeyExempt(ctx) || !authManagedTables[tableName] {
+		return nil
+	}
+	return fmt.Errorf("%w: table %q is managed by the auth API and is read-only via the data API", ErrPlatformManagedTable, tableName)
+}
+
+// checkAuthTableUpdate refuses a non-service update of an auth-managed
+// table, except an update of users that changes only profile columns.
+func checkAuthTableUpdate(ctx context.Context, tableName string, cols []string) error {
+	if serviceKeyExempt(ctx) || !authManagedTables[tableName] {
+		return nil
+	}
+	if tableName == "users" {
+		for _, c := range cols {
+			if !userProfileColumns[c] {
+				return fmt.Errorf("%w: column %q of users is managed by the auth API; through the data API an app user can change only display_name and avatar_url", ErrPlatformManagedTable, c)
+			}
+		}
+		return nil
+	}
+	return checkAuthTableWrite(ctx, tableName)
+}
+
 // ErrPlatformManagedTable: a non-service write to a platform-managed table
 // through the data API (403).
 var ErrPlatformManagedTable = errors.New("platform-managed table")

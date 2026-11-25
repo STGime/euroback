@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -133,5 +134,51 @@ func TestIntegration_PasswordHashNotExposed(t *testing.T) {
 	}
 	if rr := call(svcCtx, "SELECT to_jsonb(u) FROM users u"); rr.Code != http.StatusOK {
 		t.Errorf("/sql service row-wrap: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestIntegration_AuthTablesReadOnlyForAppUsers drives the real engine
+// as a signed-in app user: their own users row is visible and its
+// profile columns can change, but account and identity columns, and
+// rows of the other auth tables, can't be written through the data API.
+func TestIntegration_AuthTablesReadOnlyForAppUsers(t *testing.T) {
+	pool, schema, _ := setupTestDB(t)
+	engine := NewQueryEngine(pool)
+
+	svcCtx := ContextWithKeyType(context.Background(), "secret")
+	seeded, err := engine.InsertRow(svcCtx, schema, "users", map[string]interface{}{
+		"email": "member@example.com",
+	})
+	if err != nil {
+		t.Fatalf("seed insert (service): %v", err)
+	}
+	id := seeded["id"].(string)
+	userCtx := ContextWithEndUserID(ContextWithKeyType(context.Background(), "public"), id)
+
+	if _, err := engine.UpdateRow(userCtx, schema, "users", id, map[string]interface{}{"display_name": "Member"}); err != nil {
+		t.Fatalf("profile update should pass: %v", err)
+	}
+	for col, val := range map[string]interface{}{
+		"email":              "other@example.com",
+		"email_confirmed_at": "2026-01-01T00:00:00Z",
+		"banned_at":          nil,
+		"metadata":           map[string]interface{}{"role": "admin"},
+	} {
+		if _, err := engine.UpdateRow(userCtx, schema, "users", id, map[string]interface{}{col: val}); !errors.Is(err, ErrPlatformManagedTable) {
+			t.Errorf("update of users.%s: want ErrPlatformManagedTable, got %v", col, err)
+		}
+	}
+	if _, err := engine.DeleteRow(userCtx, schema, "users", id); !errors.Is(err, ErrPlatformManagedTable) {
+		t.Errorf("delete of own users row: want ErrPlatformManagedTable, got %v", err)
+	}
+	if _, err := engine.InsertRow(userCtx, schema, "user_identities", map[string]interface{}{
+		"user_id": id, "provider": "google", "provider_user_id": "x",
+	}); !errors.Is(err, ErrPlatformManagedTable) {
+		t.Errorf("insert into user_identities: want ErrPlatformManagedTable, got %v", err)
+	}
+
+	// The service key still manages accounts.
+	if _, err := engine.UpdateRow(svcCtx, schema, "users", id, map[string]interface{}{"email_confirmed_at": "2026-01-01T00:00:00Z"}); err != nil {
+		t.Errorf("service update should pass: %v", err)
 	}
 }

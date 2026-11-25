@@ -59,7 +59,7 @@ func TestExecuteSQL(t *testing.T) {
 	engine := NewQueryEngine(pool)
 
 	// Insert test data.
-	_, err := engine.InsertRow(ctx, schema, "users", map[string]interface{}{
+	_, err := engine.InsertRow(ContextWithKeyType(ctx, "secret"), schema, "users", map[string]interface{}{
 		"email":        "sql-test@example.com",
 		"display_name": "SQL Tester",
 	})
@@ -94,7 +94,7 @@ func TestExecuteSQLRowLimit(t *testing.T) {
 
 	// Insert 5 rows.
 	for i := 0; i < 5; i++ {
-		_, err := engine.InsertRow(ctx, schema, "users", map[string]interface{}{
+		_, err := engine.InsertRow(ContextWithKeyType(ctx, "secret"), schema, "users", map[string]interface{}{
 			"display_name": "LimitTest",
 		})
 		if err != nil {
