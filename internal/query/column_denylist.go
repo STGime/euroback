@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -184,10 +185,13 @@ func checkPlatformManagedWrite(ctx context.Context, tableName string) error {
 
 // authManagedTables hold an app user's account and sign-in identities.
 // They change through the auth API (and the admin API with the secret
-// key); a non-service caller of the data API may not insert, update or
-// delete their rows. Their RLS policies admit a user's own rows, so
-// without this a signed-in user could edit their own account record
-// (address, confirmation, status) or link sign-in identities to it.
+// key). Their RLS policies admit a user's own rows, so without these
+// checks a signed-in user could, through the data API, edit their own
+// account state (address, confirmation, ban) or add sign-in identities
+// to their account. For a non-service caller the data API therefore
+// refuses inserts and any update except profile columns of users.
+// Deleting one's own rows stays possible (RLS still limits it to the
+// caller's rows): apps use it for "delete my account".
 var authManagedTables = map[string]bool{
 	"users":                    true,
 	"user_identities":          true,
@@ -196,20 +200,35 @@ var authManagedTables = map[string]bool{
 }
 
 // userProfileColumns are the columns of users an app user may still
-// change on their own row through the data API: profile fields that
-// carry no identity or account state.
+// change on their own row through the data API. metadata is among them:
+// a user can set it at sign-up anyway, so it is never trusted for
+// permissions (the docs say so).
 var userProfileColumns = map[string]bool{
 	"display_name": true,
 	"avatar_url":   true,
+	"metadata":     true,
 }
 
-// checkAuthTableWrite refuses a non-service insert or delete on an
+// refuseAuthTableWrite logs the refusal (so an app that relied on the
+// write shows up in the gateway log with its project) and returns the
+// 403 error.
+func refuseAuthTableWrite(ctx context.Context, op, tableName, column string) error {
+	slog.Warn("data API: refused app write to auth table",
+		"project_id", ProjectIDFromContext(ctx), "op", op, "table", tableName, "column", column,
+		"signed_in", EndUserIDFromContext(ctx) != "")
+	if column != "" {
+		return fmt.Errorf("%w: column %q of users is managed by the auth API; through the data API an app user can change only display_name, avatar_url and metadata", ErrPlatformManagedTable, column)
+	}
+	return fmt.Errorf("%w: rows of %q are created and changed by the auth API, not the data API", ErrPlatformManagedTable, tableName)
+}
+
+// checkAuthTableInsert refuses a non-service insert into an
 // auth-managed table through the data API.
-func checkAuthTableWrite(ctx context.Context, tableName string) error {
+func checkAuthTableInsert(ctx context.Context, tableName string) error {
 	if serviceKeyExempt(ctx) || !authManagedTables[tableName] {
 		return nil
 	}
-	return fmt.Errorf("%w: table %q is managed by the auth API and is read-only via the data API", ErrPlatformManagedTable, tableName)
+	return refuseAuthTableWrite(ctx, "insert", tableName, "")
 }
 
 // checkAuthTableUpdate refuses a non-service update of an auth-managed
@@ -218,15 +237,15 @@ func checkAuthTableUpdate(ctx context.Context, tableName string, cols []string) 
 	if serviceKeyExempt(ctx) || !authManagedTables[tableName] {
 		return nil
 	}
-	if tableName == "users" {
-		for _, c := range cols {
-			if !userProfileColumns[c] {
-				return fmt.Errorf("%w: column %q of users is managed by the auth API; through the data API an app user can change only display_name and avatar_url", ErrPlatformManagedTable, c)
-			}
-		}
-		return nil
+	if tableName != "users" {
+		return refuseAuthTableWrite(ctx, "update", tableName, "")
 	}
-	return checkAuthTableWrite(ctx, tableName)
+	for _, c := range cols {
+		if !userProfileColumns[c] {
+			return refuseAuthTableWrite(ctx, "update", tableName, c)
+		}
+	}
+	return nil
 }
 
 // ErrPlatformManagedTable: a non-service write to a platform-managed table

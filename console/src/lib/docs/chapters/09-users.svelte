@@ -18,7 +18,7 @@
 					<li><strong>Suspend / reactivate</strong> &mdash; temporarily block a user from signing in (revokes all refresh tokens)</li>
 					<li><strong>Delete user</strong> &mdash; permanently remove a user account</li>
 					<li><strong>Reset password</strong> &mdash; set a new password for a user directly (revokes all refresh tokens)</li>
-					<li><strong>Metadata JSON</strong> &mdash; attach arbitrary JSON metadata to any user (e.g., role, department, permissions)</li>
+					<li><strong>Metadata JSON</strong> &mdash; attach arbitrary JSON metadata to any user (e.g., department, preferences). The user can set and change it too (at sign-up and through the data API), so don&rsquo;t base permissions on it: keep roles in a table of your own that only your server writes</li>
 				</ul>
 
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">Account linking</h3>
@@ -58,7 +58,7 @@ curl -G "$API" -H "$AUTH" --data-urlencode "email=ann@example.com"
 
 # create one (no password: they sign in with a magic link)
 curl -X POST "$API" -H "$AUTH" -H "Content-Type: application/json" \
-  -d '{'{'}"email":"ann@example.com","display_name":"Ann","metadata":{'{'}"role":"member"{'}'}{'}'}'
+  -d '{'{'}"email":"ann@example.com","display_name":"Ann","metadata":{'{'}"department":"sales"{'}'}{'}'}'
 
 # change their email
 curl -X PATCH "$API/$USER_ID" -H "$AUTH" -H "Content-Type: application/json" \
@@ -82,7 +82,7 @@ curl -X DELETE "$API/$USER_ID" -H "$AUTH"</pre>
 				</p>
 				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
 					<pre>curl -X POST "$API/batch" -H "$AUTH" -H "Content-Type: application/json" -d '{'{'}"users": [
-  {'{'}"email": "ann@example.com", "display_name": "Ann", "metadata": {'{'}"role": "member"{'}'}{'}'},
+  {'{'}"email": "ann@example.com", "display_name": "Ann", "metadata": {'{'}"department": "sales"{'}'}{'}'},
   {'{'}"email": "ben@example.com", "password_hash": "$2a$10$&hellip;"{'}'}
 ]{'}'}'
 # &rarr; {'{'}"created": 2, "exists": 0, "invalid": 0, "results": [{'{'}"index": 0, "email": "ann@example.com", "status": "created", "id": "&hellip;"{'}'}, &hellip;]{'}'}</pre>

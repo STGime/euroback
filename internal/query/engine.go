@@ -612,7 +612,7 @@ func (e *QueryEngine) InsertRow(ctx context.Context, schemaName, tableName strin
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
-	if err := checkAuthTableWrite(ctx, tableName); err != nil {
+	if err := checkAuthTableInsert(ctx, tableName); err != nil {
 		return nil, err
 	}
 	// Validate table exists.
@@ -736,9 +736,6 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
-	if err := checkAuthTableWrite(ctx, tableName); err != nil {
-		return nil, err
-	}
 	// Validate table exists.
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
 		return nil, err
@@ -778,9 +775,6 @@ func (e *QueryEngine) DeleteRow(ctx context.Context, schemaName, tableName, rowI
 // that existed.
 func (e *QueryEngine) DeleteRows(ctx context.Context, schemaName, tableName string, ids []string) ([]map[string]interface{}, error) {
 	if err := checkPlatformManagedWrite(ctx, tableName); err != nil {
-		return nil, err
-	}
-	if err := checkAuthTableWrite(ctx, tableName); err != nil {
 		return nil, err
 	}
 	if err := ValidateTable(ctx, e.catalogPool(ctx), schemaName, tableName); err != nil {
