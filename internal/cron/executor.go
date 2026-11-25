@@ -91,7 +91,7 @@ func NewExecutor(svc *CronService, pool *pgxpool.Pool) *Executor {
 // message.
 func (e *Executor) WithFunctionInvoker(inv FunctionInvoker) *Executor {
 	if inv.Client == nil {
-		inv.Client = &http.Client{Timeout: 65 * time.Second}
+		inv.Client = functions.NewRunnerClient()
 	}
 	e.invoker = &inv
 	return e
@@ -386,7 +386,7 @@ func (inv *FunctionInvoker) Invoke(ctx context.Context, call FunctionCall) error
 
 	client := inv.Client
 	if client == nil {
-		client = &http.Client{Timeout: 65 * time.Second}
+		client = functions.NewRunnerClient()
 	}
 	resp, err := client.Do(req)
 	if err != nil {

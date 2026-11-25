@@ -106,6 +106,23 @@ func forwardableQuery(rawQuery string) string {
 	return q.Encode()
 }
 
+// runnerTimeout is slightly above the longest a function may run.
+const runnerTimeout = 65 * time.Second
+
+// NewRunnerClient returns the HTTP client for calls to the functions
+// runner. It never follows a redirect: a 3xx the runner answers with is
+// the function's own response (e.g. "confirm the email link, then send
+// the browser to the app"), so it goes back to the caller with its
+// Location header instead of being fetched here (#1002).
+func NewRunnerClient() *http.Client {
+	return &http.Client{
+		Timeout: runnerTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // logSinkKey carries an optional func([]byte) that receives the
 // invocation's decoded log lines (JSON) — set by the console's Test run
 // (#712); unexported, so public traffic can't set it.
@@ -122,7 +139,7 @@ type logSinkKey struct{}
 // can keep working until the secret + corresponding env var land in
 // every environment.
 func HandleInvoke(pool *pgxpool.Pool, svc *Service, runnerURL string, signer *Signer) http.HandlerFunc {
-	client := &http.Client{Timeout: 65 * time.Second} // slightly above max function timeout
+	client := NewRunnerClient()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		functionName := chi.URLParam(r, "name")
