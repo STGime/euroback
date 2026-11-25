@@ -196,11 +196,11 @@ func TestCheckAuthTableInsert(t *testing.T) {
 
 func TestCheckAuthTableUpdate(t *testing.T) {
 	ctx := publicCtx()
-	if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", "avatar_url", "metadata"}); err != nil {
+	if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", "avatar_url", "metadata", "updated_at"}); err != nil {
 		t.Errorf("profile columns should pass: %v", err)
 	}
 	for _, col := range []string{"email", "email_confirmed_at", "banned_at", "phone", "phone_confirmed_at",
-		"provider", "provider_user_id", "id", "last_sign_in_at", "created_at", "updated_at", "password_hash"} {
+		"provider", "provider_user_id", "id", "last_sign_in_at", "created_at", "password_hash"} {
 		if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", col}); !errors.Is(err, ErrPlatformManagedTable) {
 			t.Errorf("users.%s: want ErrPlatformManagedTable, got %v", col, err)
 		}

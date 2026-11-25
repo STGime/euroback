@@ -434,7 +434,9 @@ func handleInsertRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 
 		row, err := engine.InsertRow(r.Context(), schema, tableName, data)
 		if err != nil {
-			slog.Error("insert failed", "error", err, "schema", schema, "table", tableName)
+			if !errors.Is(err, ErrPlatformManagedTable) { // a refusal, logged where it is decided
+				slog.Error("insert failed", "error", err, "schema", schema, "table", tableName)
+			}
 			if !handleQueryError(w, err) {
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}
@@ -474,7 +476,9 @@ func handleUpdateRow(engine *QueryEngine, pub *realtime.EventPublisher) http.Han
 
 		row, err := engine.UpdateRow(r.Context(), schema, tableName, rowID, data)
 		if err != nil {
-			slog.Error("update failed", "error", err, "schema", schema, "table", tableName, "id", rowID)
+			if !errors.Is(err, ErrPlatformManagedTable) { // a refusal, logged where it is decided
+				slog.Error("update failed", "error", err, "schema", schema, "table", tableName, "id", rowID)
+			}
 			if !handleQueryError(w, err) {
 				jsonError(w, "internal server error", http.StatusInternalServerError)
 			}

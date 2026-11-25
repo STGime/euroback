@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 )
 
@@ -207,6 +208,7 @@ var userProfileColumns = map[string]bool{
 	"display_name": true,
 	"avatar_url":   true,
 	"metadata":     true,
+	"updated_at":   true, // clients often send it with a profile edit
 }
 
 // refuseAuthTableWrite logs the refusal (so an app that relied on the
@@ -217,7 +219,7 @@ func refuseAuthTableWrite(ctx context.Context, op, tableName, column string) err
 		"project_id", ProjectIDFromContext(ctx), "op", op, "table", tableName, "column", column,
 		"signed_in", EndUserIDFromContext(ctx) != "")
 	if column != "" {
-		return fmt.Errorf("%w: column %q of users is managed by the auth API; through the data API an app user can change only display_name, avatar_url and metadata", ErrPlatformManagedTable, column)
+		return fmt.Errorf("%w: column %q of users is managed by the auth API; through the data API an app user can change only display_name, avatar_url, metadata and updated_at", ErrPlatformManagedTable, column)
 	}
 	return fmt.Errorf("%w: rows of %q are created and changed by the auth API, not the data API", ErrPlatformManagedTable, tableName)
 }
@@ -240,7 +242,9 @@ func checkAuthTableUpdate(ctx context.Context, tableName string, cols []string) 
 	if tableName != "users" {
 		return refuseAuthTableWrite(ctx, "update", tableName, "")
 	}
-	for _, c := range cols {
+	sorted := append([]string(nil), cols...)
+	sort.Strings(sorted) // the same column is reported for the same request
+	for _, c := range sorted {
 		if !userProfileColumns[c] {
 			return refuseAuthTableWrite(ctx, "update", tableName, c)
 		}
