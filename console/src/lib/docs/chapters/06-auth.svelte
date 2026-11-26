@@ -99,7 +99,7 @@ claims := token.Claims.(jwt.MapClaims) // claims["sub"] = user id`;
 					<li>the user's stored language, <code class="bg-gray-100 border border-gray-200 rounded px-1">users.locale</code>. Once it is set it always decides;</li>
 					<li>the <code class="bg-gray-100 border border-gray-200 rounded px-1">locale</code> your app sends with the request, for example <code class="bg-gray-100 border border-gray-200 rounded px-1">"de"</code> or <code class="bg-gray-100 border border-gray-200 rounded px-1">"nb-NO"</code>;</li>
 					<li>the project's <strong>Auth &rarr; Settings &rarr; Default email language</strong>, if you chose one;</li>
-					<li>on <strong>Automatic</strong> (the default setting): the browser's <code class="bg-gray-100 border border-gray-200 rounded px-1">Accept-Language</code> header;</li>
+					<li>on <strong>Automatic</strong> (the setting for new projects; projects created before email languages existed are set to English, so their emails stay as they were): the browser's <code class="bg-gray-100 border border-gray-200 rounded px-1">Accept-Language</code> header;</li>
 					<li>English.</li>
 				</ol>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">

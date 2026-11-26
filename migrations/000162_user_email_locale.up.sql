@@ -8,10 +8,22 @@
 --     known yet (the request's language, then the project default apply).
 --   * project_email_log.locale: the language each email was sent in.
 --   * provision_tenant: new projects get the column (000147 body + locale).
+--   * auth_config.email_locale = 'en' on every existing project, so nothing
+--     changes for them at deploy.
 --
 -- Dedicated Team databases get the column from dedicated_bootstrap.sql;
 -- the code treats a missing column as "no stored language".
 -- No explicit BEGIN/COMMIT: golang-migrate wraps the file.
+
+-- Existing projects keep English: an explicit default beats the browser's
+-- language, and with one set nothing is stored from the browser at
+-- sign-up, so their emails don't change at deploy. Each project can switch
+-- to Automatic (remove the key) or another language in the console. New
+-- projects start on Automatic.
+UPDATE public.projects
+   SET auth_config = jsonb_set(COALESCE(auth_config, '{}'::jsonb), '{email_locale}', '"en"'::jsonb)
+ WHERE jsonb_typeof(COALESCE(auth_config, '{}'::jsonb)) = 'object'
+   AND NOT (COALESCE(auth_config, '{}'::jsonb) ? 'email_locale');
 
 ALTER TABLE public.project_email_log
     ADD COLUMN IF NOT EXISTS locale TEXT CHECK (locale IS NULL OR length(locale) <= 8);
