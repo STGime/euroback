@@ -21,16 +21,6 @@
 -- queueing every tenant's sign-ins behind it; re-run the deploy then.
 SET LOCAL lock_timeout = '3s';
 
--- Existing projects keep English: an explicit default beats the browser's
--- language, and with one set nothing is stored from the browser at
--- sign-up, so their emails don't change at deploy. Each project can switch
--- to Automatic (remove the key) or another language in the console. New
--- projects start on Automatic.
-UPDATE public.projects
-   SET auth_config = jsonb_set(COALESCE(auth_config, '{}'::jsonb), '{email_locale}', '"en"'::jsonb)
- WHERE jsonb_typeof(COALESCE(auth_config, '{}'::jsonb)) = 'object'
-   AND NOT (COALESCE(auth_config, '{}'::jsonb) ? 'email_locale');
-
 ALTER TABLE public.project_email_log
     ADD COLUMN IF NOT EXISTS locale TEXT CHECK (locale IS NULL OR length(locale) <= 8);
 
@@ -420,3 +410,31 @@ END;
 $fn$;
 
 ALTER FUNCTION public.provision_tenant(UUID, TEXT, TEXT) OWNER TO eurobase_migrator;
+
+-- Existing projects keep English: an explicit default beats the browser's
+-- language, and with one set nothing is stored from the browser at
+-- sign-up, so their emails don't change at deploy. Each project can switch
+-- to Automatic (remove the key) or another language in the console. New
+-- projects start on Automatic.
+--
+-- A project that never saved its auth settings has '{}' (or NULL), which
+-- every gateway reads as "use DefaultAuthConfig()" (localhost:3000 as
+-- redirect URL and CORS origin, email/password on). Adding a key would make
+-- the gateways that still run during the rollout (and any rolled-back
+-- image) read it as a real, nearly empty config. So those rows get the
+-- default config written out in full, plus the language: every version
+-- reads exactly today's defaults. The literal must equal
+-- json.Marshal(tenant.DefaultAuthConfig()) (TestMigration162DefaultConfig).
+--
+-- Last in the file: the projects row locks are held only briefly.
+UPDATE public.projects
+   SET auth_config = '{"providers":{"email_password":{"enabled":true}},"password_min_length":8,"require_email_confirmation":false,"session_duration":"168h","redirect_urls":["http://localhost:3000"],"cors_origins":["http://localhost:3000"]}'::jsonb
+                     || '{"email_locale":"en"}'::jsonb
+ WHERE auth_config IS NULL
+    OR auth_config = '{}'::jsonb
+    OR jsonb_typeof(auth_config) = 'null';
+
+UPDATE public.projects
+   SET auth_config = jsonb_set(auth_config, '{email_locale}', '"en"'::jsonb)
+ WHERE jsonb_typeof(auth_config) = 'object'
+   AND NOT (auth_config ? 'email_locale');

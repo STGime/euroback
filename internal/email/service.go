@@ -307,7 +307,7 @@ func (s *EmailService) sendVerificationEmail(ctx context.Context, projectID, pro
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
-		ExpiresIn:   Duration(lang, "24h"),
+		ExpiresIn:   expiresIn(lang, customHTML, "24h"),
 	})
 	if err != nil {
 		return Delivery{Locale: lang}, fmt.Errorf("render verification email: %w", err)
@@ -353,7 +353,7 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
-		ExpiresIn:   Duration(lang, "1h"),
+		ExpiresIn:   expiresIn(lang, customHTML, "1h"),
 	})
 	if err != nil {
 		return Delivery{Locale: lang}, fmt.Errorf("render password reset email: %w", err)
@@ -426,7 +426,7 @@ func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projec
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
-		ExpiresIn:   Duration(lang, "15m"),
+		ExpiresIn:   expiresIn(lang, customHTML, "15m"),
 	})
 	if err != nil {
 		return Delivery{Locale: lang}, fmt.Errorf("render magic link email: %w", err)
@@ -741,6 +741,16 @@ func appendLocaleQuery(link, lang string) string {
 		return base + "#" + frag
 	}
 	return base
+}
+
+// expiresIn is the {{.ExpiresIn}} text: in the email's language for the
+// built-in templates, English (as before languages existed) for a
+// project's custom body, which may be written in any language.
+func expiresIn(lang, customHTML, key string) string {
+	if customHTML != "" {
+		return Duration(locale.Default, key)
+	}
+	return Duration(lang, key)
 }
 
 // linkWithLocale adds the email's language to its link, but only when the

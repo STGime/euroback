@@ -144,3 +144,12 @@ func TestEnglishTemplatesUnchanged(t *testing.T) {
 		}
 	}
 }
+
+func TestExpiresInCustomBodyStaysEnglish(t *testing.T) {
+	if expiresIn("de", "", "24h") != "24 Stunden" {
+		t.Error("built-in template: want the translated duration")
+	}
+	if expiresIn("de", "<p>{{.ExpiresIn}}</p>", "24h") != "24 hours" {
+		t.Error("custom body: want the English duration, as before languages existed")
+	}
+}

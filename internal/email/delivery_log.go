@@ -92,8 +92,9 @@ type DeliveryLogEntry struct {
 	Via       string    `json:"via,omitempty"`
 	MessageID string    `json:"message_id,omitempty"`
 	Detail    string    `json:"detail,omitempty"`
-	// Locale is the language the email was rendered in (sent / failed
-	// sends; empty for skips and older entries).
+	// Locale is the language the email was rendered in (any send that got
+	// as far as rendering; empty for skips decided before that, and for
+	// older entries).
 	Locale string `json:"locale,omitempty"`
 }
 
