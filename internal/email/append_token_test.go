@@ -41,3 +41,21 @@ func TestAppendTokenQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendLocaleQuery(t *testing.T) {
+	cases := map[[2]string]string{
+		{"https://app.example.com/verify?token=abc", "de"}:   "https://app.example.com/verify?token=abc&locale=de",
+		{"https://app.example.com/#/verify?token=abc", "fr"}: "https://app.example.com/?locale=fr#/verify?token=abc",
+		{"https://app.example.com/v?token=abc#done", "nb"}:   "https://app.example.com/v?token=abc&locale=nb#done",
+		{"https://app.example.com/verify?token=abc", ""}:     "https://app.example.com/verify?token=abc",
+	}
+	for in, want := range cases {
+		if got := appendLocaleQuery(in[0], in[1]); got != want {
+			t.Errorf("appendLocaleQuery(%q, %q) = %q, want %q", in[0], in[1], got, want)
+		}
+	}
+	// Built the way the sends build it: token first, then the language.
+	if got := appendLocaleQuery(appendTokenQuery("https://app.example.com/cb#/x", "tok"), "sv"); got != "https://app.example.com/cb?token=tok&locale=sv#/x" {
+		t.Errorf("token + locale with a fragment: %q", got)
+	}
+}

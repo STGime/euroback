@@ -196,7 +196,7 @@ func TestCheckAuthTableInsert(t *testing.T) {
 
 func TestCheckAuthTableUpdate(t *testing.T) {
 	ctx := publicCtx()
-	if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", "avatar_url", "metadata", "updated_at"}); err != nil {
+	if err := checkAuthTableUpdate(ctx, "users", []string{"display_name", "avatar_url", "metadata", "locale", "updated_at"}); err != nil {
 		t.Errorf("profile columns should pass: %v", err)
 	}
 	for _, col := range []string{"email", "email_confirmed_at", "banned_at", "phone", "phone_confirmed_at",

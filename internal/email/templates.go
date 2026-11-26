@@ -48,53 +48,9 @@ Sent by Eurobase &mdash; EU-Sovereign Backend-as-a-Service
 </html>`
 
 var defaultTemplates = map[string]DefaultTemplate{
-	"verification": {
-		Subject: "Verify your email address",
-		BodyHTML: fmt.Sprintf(baseLayout,
-			"{{.ProjectName}}",
-			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Please verify your email address to complete your registration with <strong>{{.ProjectName}}</strong>.</p>
-<p style="margin:0 0 24px;text-align:center">
-<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Verify Email</a>
-</p>
-<p style="margin:0;color:#71717a;font-size:12px">This link expires in {{.ExpiresIn}}. If you didn't create this account, you can safely ignore this email.</p>`),
-	},
-	"password_reset": {
-		Subject: "Reset your password",
-		BodyHTML: fmt.Sprintf(baseLayout,
-			"{{.ProjectName}}",
-			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">We received a request to reset your password for <strong>{{.ProjectName}}</strong>.</p>
-<p style="margin:0 0 24px;text-align:center">
-<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Reset Password</a>
-</p>
-<p style="margin:0;color:#71717a;font-size:12px">This link expires in {{.ExpiresIn}}. If you didn't request this, you can safely ignore this email.</p>`),
-	},
-	"welcome": {
-		Subject: "Welcome to {{.ProjectName}}",
-		BodyHTML: fmt.Sprintf(baseLayout,
-			"{{.ProjectName}}",
-			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Welcome!</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Your account with <strong>{{.ProjectName}}</strong> has been verified. You're all set to get started.</p>`),
-	},
-	"password_changed": {
-		Subject: "Your password has been changed",
-		BodyHTML: fmt.Sprintf(baseLayout,
-			"{{.ProjectName}}",
-			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Your password for <strong>{{.ProjectName}}</strong> was changed. If you didn't make this change, reset your password now and contact the {{.ProjectName}} team.</p>`),
-	},
-	"magic_link": {
-		Subject: "Sign in to {{.ProjectName}}",
-		BodyHTML: fmt.Sprintf(baseLayout,
-			"{{.ProjectName}}",
-			`<p style="margin:0 0 16px;color:#18181b;font-size:16px">Hi,</p>
-<p style="margin:0 0 24px;color:#3f3f46;font-size:14px;line-height:1.6">Click the button below to sign in to <strong>{{.ProjectName}}</strong>. No password needed.</p>
-<p style="margin:0 0 24px;text-align:center">
-<a href="{{.ActionURL}}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-size:14px;font-weight:600">Sign In</a>
-</p>
-<p style="margin:0;color:#71717a;font-size:12px">This link expires in {{.ExpiresIn}}. If you didn't request this, you can safely ignore this email.</p>`),
-	},
+	// verification, password_reset, welcome, password_changed and
+	// magic_link are added in English by locale_templates.go (built from
+	// locales/en.json); DefaultTemplatesFor has the other languages.
 	// org_invitation is a platform-level notification: an org admin
 	// invited the recipient to their organization. The invitation is
 	// pending until the recipient accepts it in the console (signed in

@@ -91,6 +91,23 @@ claims := token.Claims.(jwt.MapClaims) // claims["sub"] = user id`;
 				<p class="text-sm text-gray-700 leading-relaxed">
 					Sign-in, confirmation and password emails name your app in the subject and the text (&ldquo;Sign in to &hellip;&rdquo;). By default that's the project name. To show a nicer name, set <strong>Auth &rarr; Settings &rarr; App name in emails</strong> (up to 60 characters). Custom email templates get the same value as <code class="bg-gray-100 border border-gray-200 rounded px-1">{'{{.ProjectName}}'}</code>.
 				</p>
+				<h4 class="text-sm font-semibold text-gray-900 mt-4">Email language</h4>
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Verification, password-reset, magic-link and password-changed emails are sent in the user's language: English, German, French, Dutch, Swedish, Spanish or Norwegian (bokmål). For each email the language is chosen in this order:
+				</p>
+				<ol class="list-decimal pl-5 text-sm text-gray-700 space-y-1 mt-2">
+					<li>the user's stored language, <code class="bg-gray-100 border border-gray-200 rounded px-1">users.locale</code>. Once it is set it always decides;</li>
+					<li>the <code class="bg-gray-100 border border-gray-200 rounded px-1">locale</code> your app sends with the request, for example <code class="bg-gray-100 border border-gray-200 rounded px-1">"de"</code> or <code class="bg-gray-100 border border-gray-200 rounded px-1">"nb-NO"</code>;</li>
+					<li>the project's <strong>Auth &rarr; Settings &rarr; Default email language</strong>, if you chose one;</li>
+					<li>on <strong>Automatic</strong> (the setting for new projects; projects created before email languages existed are set to English, so their emails stay as they were): the browser's <code class="bg-gray-100 border border-gray-200 rounded px-1">Accept-Language</code> header;</li>
+					<li>English.</li>
+				</ol>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					<code class="bg-gray-100 border border-gray-200 rounded px-1">locale</code> is an optional field in the body of <code class="bg-gray-100 border border-gray-200 rounded px-1">POST /v1/auth/signup</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/resend-verification</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/forgot-password</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">/v1/auth/request-magic-link</code>. A language that isn't supported counts as not set, and regional variants use the base language (<code class="bg-gray-100 border border-gray-200 rounded px-1">de-AT</code> &rarr; German). At sign-up with email and password, the requested language is stored as <code class="bg-gray-100 border border-gray-200 rounded px-1">users.locale</code> (on Automatic, the browser's language when the app sent none; social login stores the browser's language on Automatic), so later emails stay in that language even from another device. If you chose a default language, the browser's language is never used: an app in one language keeps its emails in that language. Users who signed up before languages existed have no stored language yet. To set or change it, your app updates the signed-in user's own row with <code class="bg-gray-100 border border-gray-200 rounded px-1">PATCH /v1/db/users/&lt;id&gt;</code> and <code class="bg-gray-100 border border-gray-200 rounded px-1">{'{'}"locale": "fr"{'}'}</code>, or your server does it with the secret key.
+				</p>
+				<p class="text-sm text-gray-700 leading-relaxed mt-2">
+					When your app sends <code class="bg-gray-100 border border-gray-200 rounded px-1">locale</code>, the link in the email gets <code class="bg-gray-100 border border-gray-200 rounded px-1">&amp;locale=de</code> after the token, so your confirmation or reset page can show the same language (links of requests without it are unchanged). Auth &rarr; Email log shows the language of each sent email. A custom email template (Pro) is always sent exactly as you wrote it, whatever the user's language (its <code class="bg-gray-100 border border-gray-200 rounded px-1">{'{{.ExpiresIn}}'}</code> stays English, for example "24 hours").
+				</p>
 
 				<h4 class="text-sm font-semibold text-gray-900 mt-4">The verify-email page (copy-paste starter)</h4>
 				<p class="text-sm text-gray-700 leading-relaxed">

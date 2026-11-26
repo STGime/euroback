@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/eurobase/euroback/internal/locale"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1644,8 +1645,8 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 		// middleware's LEFT JOIN of project_databases (added in
 		// subdomain_middleware.go same-PR); otherwise pc.HasDedicatedDB
 		// stays false and the middleware no-ops.
-		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
-		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
+		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw, locale.Middleware).Get("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc))
+		r.With(MaintenanceModeMiddleware, sdkTenantPoolMw, locale.Middleware).Post("/auth/oauth/{provider}/callback", enduser.HandleOAuthCallback(endUserAuthSvc)) // Apple form_post
 
 		// #809: the project's public key for verifying ES256 end-user
 		// tokens locally. Public, no API key; the project comes from the
@@ -1668,6 +1669,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			r.Use(apiKeyMw.Handler)
 			r.Use(MaintenanceModeMiddleware) // before the pool: maintenance answers first
 			r.Use(sdkTenantPoolMw)
+			r.Use(locale.Middleware) // Accept-Language for the auth emails' language
 			r.Post("/signup", enduser.HandleSignUp(endUserAuthSvc, limiter))
 			r.Post("/signin", enduser.HandleSignIn(endUserAuthSvc, limiter))
 			r.Post("/refresh", enduser.HandleRefresh(endUserAuthSvc, limiter))

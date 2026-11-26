@@ -58,7 +58,7 @@ func TestEmailLog_ProductionRoles(t *testing.T) {
 		Flow: FlowMagicLink, Recipient: "petra@perweg.de", Outcome: OutcomeSkipped, Reason: ReasonNoUser,
 	})
 	NewDeliveryLog(gw).Record(ctx, projectID, DeliveryLogEntry{
-		Flow: FlowPasswordReset, Recipient: "a@b.io", Outcome: OutcomeSent, Via: ViaPlatform, MessageID: "tem-1",
+		Flow: FlowPasswordReset, Recipient: "a@b.io", Outcome: OutcomeSent, Via: ViaPlatform, MessageID: "tem-1", Locale: "de",
 	})
 
 	// …but can't read, change or delete.
@@ -87,10 +87,10 @@ func TestEmailLog_ProductionRoles(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("want 2 entries, got %d: %+v", len(entries), entries)
 	}
-	if e := entries[1]; e.Recipient != "p****@perweg.de" || e.Reason != ReasonNoUser || e.Outcome != OutcomeSkipped {
+	if e := entries[1]; e.Recipient != "p****@perweg.de" || e.Reason != ReasonNoUser || e.Outcome != OutcomeSkipped || e.Locale != "" {
 		t.Errorf("skipped entry: %+v", e)
 	}
-	if e := entries[0]; e.Via != ViaPlatform || e.MessageID != "tem-1" {
+	if e := entries[0]; e.Via != ViaPlatform || e.MessageID != "tem-1" || e.Locale != "de" {
 		t.Errorf("sent entry: %+v", e)
 	}
 

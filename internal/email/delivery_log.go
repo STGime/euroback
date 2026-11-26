@@ -92,6 +92,10 @@ type DeliveryLogEntry struct {
 	Via       string    `json:"via,omitempty"`
 	MessageID string    `json:"message_id,omitempty"`
 	Detail    string    `json:"detail,omitempty"`
+	// Locale is the language the email was rendered in (any send that got
+	// as far as rendering; empty for skips decided before that, and for
+	// older entries).
+	Locale string `json:"locale,omitempty"`
 }
 
 // DeliveryLog writes entries. It holds the gateway's runtime pool, which
@@ -140,9 +144,9 @@ func (l *DeliveryLog) Record(ctx context.Context, projectID string, e DeliveryLo
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 	_, err := l.pool.Exec(ctx,
-		`INSERT INTO public.project_email_log (project_id, flow, recipient, outcome, reason, via, message_id, detail)
-		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''))`,
-		projectID, e.Flow, MaskEmail(e.Recipient), e.Outcome, e.Reason, e.Via, e.MessageID, truncate(e.Detail, maxDetailLen))
+		`INSERT INTO public.project_email_log (project_id, flow, recipient, outcome, reason, via, message_id, detail, locale)
+		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''))`,
+		projectID, e.Flow, MaskEmail(e.Recipient), e.Outcome, e.Reason, e.Via, e.MessageID, truncate(e.Detail, maxDetailLen), e.Locale)
 	if err != nil {
 		slog.Warn("email log write failed", "project_id", projectID, "error", err)
 	}
@@ -156,7 +160,7 @@ func ListDeliveryLog(ctx context.Context, pool *pgxpool.Pool, projectID string, 
 	}
 	rows, err := pool.Query(ctx,
 		`SELECT id, created_at, flow, recipient, outcome,
-		        COALESCE(reason, ''), COALESCE(via, ''), COALESCE(message_id, ''), COALESCE(detail, '')
+		        COALESCE(reason, ''), COALESCE(via, ''), COALESCE(message_id, ''), COALESCE(detail, ''), COALESCE(locale, '')
 		 FROM public.project_email_log
 		 WHERE project_id = $1
 		 ORDER BY created_at DESC, id DESC
@@ -168,7 +172,7 @@ func ListDeliveryLog(ctx context.Context, pool *pgxpool.Pool, projectID string, 
 	out := []DeliveryLogEntry{}
 	for rows.Next() {
 		var e DeliveryLogEntry
-		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.Flow, &e.Recipient, &e.Outcome, &e.Reason, &e.Via, &e.MessageID, &e.Detail); err != nil {
+		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.Flow, &e.Recipient, &e.Outcome, &e.Reason, &e.Via, &e.MessageID, &e.Detail, &e.Locale); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

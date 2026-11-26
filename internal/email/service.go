@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/eurobase/euroback/internal/locale"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -137,7 +138,7 @@ func (s *EmailService) recordSend(ctx context.Context, projectID, flow, to strin
 
 // classifySend turns a send's result into a log entry.
 func classifySend(flow, to string, d Delivery, err error) DeliveryLogEntry {
-	e := DeliveryLogEntry{Flow: flow, Recipient: to, Via: d.Via, MessageID: d.MessageID}
+	e := DeliveryLogEntry{Flow: flow, Recipient: to, Via: d.Via, MessageID: d.MessageID, Locale: d.Locale}
 	switch {
 	case err == nil && d.SkipReason != "":
 		e.Via = ""
@@ -165,6 +166,7 @@ func classifySend(flow, to string, d Delivery, err error) DeliveryLogEntry {
 // as far as a send (not configured, or failed while being prepared).
 type Delivery struct {
 	Via       string
+	Locale    string // the language the email was rendered in
 	MessageID string // TEM email id, platform sends only
 	// SkipReason: the platform sender deliberately didn't send (a reserved
 	// test address, or one that bounced recently); logged as "skipped".
@@ -299,18 +301,19 @@ func (s *EmailService) sendVerificationEmail(ctx context.Context, projectID, pro
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := appendTokenQuery(redirectURL, rawToken)
-	subject, body, err := RenderTemplate("verification", customSubject, customHTML, TemplateData{
+	lang := s.Locale(ctx, projectID, schemaName, userID)
+	actionURL := linkWithLocale(ctx, appendTokenQuery(redirectURL, rawToken), lang)
+	subject, body, err := RenderTemplateLocale("verification", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
-		ExpiresIn:   "24 hours",
+		ExpiresIn:   expiresIn(lang, customHTML, "24h"),
 	})
 	if err != nil {
-		return Delivery{}, fmt.Errorf("render verification email: %w", err)
+		return Delivery{Locale: lang}, fmt.Errorf("render verification email: %w", err)
 	}
 
-	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
 }
 
 // SendPasswordResetEmail sends a password reset link to the end-user.
@@ -344,18 +347,19 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := appendTokenQuery(redirectURL, rawToken)
-	subject, body, err := RenderTemplate("password_reset", customSubject, customHTML, TemplateData{
+	lang := s.Locale(ctx, projectID, schemaName, userID)
+	actionURL := linkWithLocale(ctx, appendTokenQuery(redirectURL, rawToken), lang)
+	subject, body, err := RenderTemplateLocale("password_reset", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
-		ExpiresIn:   "1 hour",
+		ExpiresIn:   expiresIn(lang, customHTML, "1h"),
 	})
 	if err != nil {
-		return Delivery{}, fmt.Errorf("render password reset email: %w", err)
+		return Delivery{Locale: lang}, fmt.Errorf("render password reset email: %w", err)
 	}
 
-	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
 }
 
 // SendPasswordChangedEmail tells an end user their password was changed —
@@ -363,25 +367,26 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 // real owner notices a change they didn't make. No link, no token. Uses
 // the project's "password_changed" template (custom on plans that include
 // custom templates) and its sender, like the other auth emails.
-func (s *EmailService) SendPasswordChangedEmail(ctx context.Context, projectID, projectName, userEmail string) error {
-	d, err := s.sendPasswordChangedEmail(ctx, projectID, projectName, userEmail)
+func (s *EmailService) SendPasswordChangedEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) error {
+	d, err := s.sendPasswordChangedEmail(ctx, projectID, projectName, schemaName, userID, userEmail)
 	s.recordSend(ctx, projectID, FlowPasswordChanged, userEmail, d, err)
 	return err
 }
 
-func (s *EmailService) sendPasswordChangedEmail(ctx context.Context, projectID, projectName, userEmail string) (Delivery, error) {
+func (s *EmailService) sendPasswordChangedEmail(ctx context.Context, projectID, projectName, schemaName, userID, userEmail string) (Delivery, error) {
 	customSubject, customHTML, err := s.loadCustomTemplate(ctx, projectID, "password_changed")
 	if err != nil {
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
-	subject, body, err := RenderTemplate("password_changed", customSubject, customHTML, TemplateData{
+	lang := s.Locale(ctx, projectID, schemaName, userID)
+	subject, body, err := RenderTemplateLocale("password_changed", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 	})
 	if err != nil {
-		return Delivery{}, fmt.Errorf("render password changed email: %w", err)
+		return Delivery{Locale: lang}, fmt.Errorf("render password changed email: %w", err)
 	}
-	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
 }
 
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
@@ -415,18 +420,19 @@ func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projec
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 
-	actionURL := appendTokenQuery(redirectURL, rawToken)
-	subject, body, err := RenderTemplate("magic_link", customSubject, customHTML, TemplateData{
+	lang := s.Locale(ctx, projectID, schemaName, userID)
+	actionURL := linkWithLocale(ctx, appendTokenQuery(redirectURL, rawToken), lang)
+	subject, body, err := RenderTemplateLocale("magic_link", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
 		ProjectName: s.displayName(ctx, projectID, projectName),
 		ActionURL:   actionURL,
-		ExpiresIn:   "15 minutes",
+		ExpiresIn:   expiresIn(lang, customHTML, "15m"),
 	})
 	if err != nil {
-		return Delivery{}, fmt.Errorf("render magic link email: %w", err)
+		return Delivery{Locale: lang}, fmt.Errorf("render magic link email: %w", err)
 	}
 
-	return s.sendProjectScoped(ctx, projectID, userEmail, subject, body)
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
 }
 
 // SendPlatformPasswordResetEmail sends a password reset email for console users.
@@ -716,4 +722,80 @@ func appendTokenQuery(redirectURL, rawToken string) string {
 		return base + "#" + frag
 	}
 	return base
+}
+
+// appendLocaleQuery adds `locale=<lang>` to an email link (after the
+// token), so the app's landing page can show the same language as the
+// email. lang is always a supported language code.
+func appendLocaleQuery(link, lang string) string {
+	if lang == "" {
+		return link
+	}
+	base, frag, hasFrag := strings.Cut(link, "#")
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	base += sep + "locale=" + lang
+	if hasFrag {
+		return base + "#" + frag
+	}
+	return base
+}
+
+// expiresIn is the {{.ExpiresIn}} text: in the email's language for the
+// built-in templates, English (as before languages existed) for a
+// project's custom body, which may be written in any language.
+func expiresIn(lang, customHTML, key string) string {
+	if customHTML != "" {
+		return Duration(locale.Default, key)
+	}
+	return Duration(lang, key)
+}
+
+// linkWithLocale adds the email's language to its link, but only when the
+// app sent a "locale" with the request: an app that predates email
+// languages keeps getting exactly the link it parses today.
+func linkWithLocale(ctx context.Context, link, lang string) string {
+	if locale.HintsFrom(ctx).Requested == "" {
+		return link
+	}
+	return appendLocaleQuery(link, lang)
+}
+
+// withLocale stamps the email's language onto a send result for the
+// email log.
+func withLocale(lang string) func(Delivery, error) (Delivery, error) {
+	return func(d Delivery, err error) (Delivery, error) {
+		d.Locale = lang
+		return d, err
+	}
+}
+
+// Locale picks the language of an auth email to an app user (see
+// internal/locale): the user's stored language, then the request's hints,
+// then the project default, then English. Lookups are best-effort: a
+// failed read (for example a dedicated database created before
+// users.locale existed) just skips that step.
+func (s *EmailService) Locale(ctx context.Context, projectID, schemaName, userID string) string {
+	var stored string
+	if schemaName != "" && userID != "" && s.pool != nil {
+		q := fmt.Sprintf(`SELECT COALESCE(locale, '') FROM %s.users WHERE id = $1`, quoteIdent(schemaName))
+		if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, q, userID).Scan(&stored)
+		}); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Debug("email: stored language lookup failed", "error", err, "project_id", projectID)
+			}
+			stored = ""
+		}
+	}
+	var projectDefault string
+	if s.pool != nil && projectID != "" {
+		_ = s.pool.QueryRow(ctx,
+			`SELECT COALESCE(auth_config->>'email_locale', '') FROM public.projects WHERE id = $1`, projectID,
+		).Scan(&projectDefault)
+	}
+	h := locale.HintsFrom(ctx)
+	return locale.Resolve(stored, h.Requested, h.AcceptLanguage, projectDefault)
 }

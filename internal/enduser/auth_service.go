@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eurobase/euroback/internal/locale"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -167,6 +168,26 @@ func (s *AuthService) SetOAuthSecretLookup(lookup OAuthSecretLookup) {
 	s.oauthSecrets = lookup
 }
 
+// storeNewUserLocale saves the language of a user this request created
+// (the app's "locale" field, else Accept-Language unless the project chose
+// a default language) as users.locale, which
+// then decides the language of every later auth email. Best-effort and in
+// its own transaction: a dedicated database created before the column
+// existed just keeps no stored language.
+func (s *AuthService) storeNewUserLocale(ctx context.Context, schemaName, userID, projectDefault string) {
+	l := locale.ForNewUser(ctx, projectDefault)
+	if l == "" || userID == "" {
+		return
+	}
+	q := fmt.Sprintf(`UPDATE %s.users SET locale = $1 WHERE id = $2 AND locale IS NULL`, quoteIdent(schemaName))
+	if err := s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, l, userID)
+		return err
+	}); err != nil {
+		slog.Warn("could not store the new user's language", "error", err, "schema", schemaName)
+	}
+}
+
 // SignUp creates a new end-user in the given tenant schema.
 func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, projectID string, config tenant.AuthConfig, req SignUpRequest) (*AuthResponse, error) {
 	if !config.IsEmailPasswordEnabled() {
@@ -243,6 +264,7 @@ func (s *AuthService) SignUp(ctx context.Context, schemaName, jwtSecret string, 
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 	_ = json.Unmarshal(metadataJSON, &user.Metadata)
+	s.storeNewUserLocale(ctx, schemaName, user.ID, config.EmailLocale)
 
 	slog.Info("end-user signed up", "schema", schemaName, "user_id", user.ID, "email", user.Email)
 	emitUserEvent(ctx, projectID, events.AuthUserCreated, user, "email")
@@ -651,7 +673,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, schemaName, projectID,
 // (#822) in the background: the change already succeeded, and a slow
 // custom SMTP server mustn't hold up the response. The outcome lands in
 // the project's email log like every auth email.
-func (s *AuthService) notifyPasswordChanged(ctx context.Context, projectID, userEmail string) {
+func (s *AuthService) notifyPasswordChanged(ctx context.Context, projectID, schemaName, userID, userEmail string) {
 	if userEmail == "" || !strings.Contains(userEmail, "@") {
 		return // phone-only accounts have no address to tell
 	}
@@ -667,7 +689,7 @@ func (s *AuthService) notifyPasswordChanged(ctx context.Context, projectID, user
 		defer cancel()
 		var projectName string
 		_ = s.pool.QueryRow(ctx, `SELECT name FROM projects WHERE id = $1`, projectID).Scan(&projectName)
-		if err := s.emailService.SendPasswordChangedEmail(ctx, projectID, projectName, userEmail); err != nil {
+		if err := s.emailService.SendPasswordChangedEmail(ctx, projectID, projectName, schemaName, userID, userEmail); err != nil {
 			slog.Warn("password changed notice failed", "error", err, "project_id", projectID)
 		}
 	}()
@@ -714,7 +736,7 @@ func (s *AuthService) ResetPassword(ctx context.Context, schemaName, projectID, 
 	_ = s.asService(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, fmt.Sprintf(`SELECT COALESCE(email, '') FROM %s.users WHERE id = $1`, quoteIdent(schemaName)), userID).Scan(&userEmail)
 	})
-	s.notifyPasswordChanged(ctx, projectID, userEmail)
+	s.notifyPasswordChanged(ctx, projectID, schemaName, userID, userEmail)
 	return nil
 }
 
@@ -1037,6 +1059,7 @@ func (s *AuthService) SignInWithOAuth(ctx context.Context, schemaName, jwtSecret
 		return nil, txErr
 	}
 	if createdUser {
+		s.storeNewUserLocale(ctx, schemaName, user.ID, config.EmailLocale)
 		emitUserEvent(ctx, projectID, events.AuthUserCreated, user, providerName)
 	}
 

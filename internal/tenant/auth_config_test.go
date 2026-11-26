@@ -1,6 +1,9 @@
 package tenant
 
 import (
+	"encoding/json"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -134,5 +137,59 @@ func TestAppNameValidation(t *testing.T) {
 		if tc.ok && c.AppName != tc.want {
 			t.Errorf("%s: AppName = %q, want %q", tc.name, c.AppName, tc.want)
 		}
+	}
+}
+
+// Migration 000162 sets email_locale on every existing project, including
+// ones that never saved auth settings ({}). Those must keep the defaults.
+func TestParseAuthConfig_OnlyEmailLocaleKeepsDefaults(t *testing.T) {
+	def := DefaultAuthConfig()
+	got := ParseAuthConfig([]byte(`{"email_locale":"en"}`))
+	if got.EmailLocale != "en" {
+		t.Errorf("email_locale = %q", got.EmailLocale)
+	}
+	if strings.Join(got.RedirectURLs, ",") != strings.Join(def.RedirectURLs, ",") || strings.Join(got.CORSOrigins, ",") != strings.Join(def.CORSOrigins, ",") {
+		t.Errorf("defaults lost: redirects %v cors %v, want %v / %v", got.RedirectURLs, got.CORSOrigins, def.RedirectURLs, def.CORSOrigins)
+	}
+	if !got.IsCORSOriginAllowed("http://localhost:3000") || got.PasswordMinLength != def.PasswordMinLength || got.SessionDuration != def.SessionDuration || len(got.Providers) != len(def.Providers) {
+		t.Errorf("defaults lost: %+v", got)
+	}
+	// A saved config with other keys is parsed as before.
+	saved := ParseAuthConfig([]byte(`{"email_locale":"de","redirect_urls":["https://app.example.com"],"cors_origins":[]}`))
+	if saved.EmailLocale != "de" || len(saved.RedirectURLs) != 1 || saved.IsCORSOriginAllowed("http://localhost:3000") {
+		t.Errorf("saved config: %+v", saved)
+	}
+}
+
+// Migration 000162 writes the default config out in full (plus
+// email_locale) for projects that never saved auth settings, so gateways
+// without the email_locale special case read exactly today's defaults.
+// The literal in the migration must stay equal to DefaultAuthConfig().
+func TestMigration162DefaultConfig(t *testing.T) {
+	raw, err := os.ReadFile("../../migrations/000162_user_email_locale.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, _ := json.Marshal(DefaultAuthConfig())
+	if !strings.Contains(string(raw), "'"+string(def)+"'::jsonb") {
+		t.Fatalf("000162 must contain the default config %s", def)
+	}
+	// What the migration stores, read the way a gateway without the
+	// special case reads it: a plain unmarshal (then the zero-value fills).
+	var merged map[string]any
+	_ = json.Unmarshal(def, &merged)
+	merged["email_locale"] = "en"
+	stored, _ := json.Marshal(merged)
+	var plain AuthConfig
+	if err := json.Unmarshal(stored, &plain); err != nil {
+		t.Fatal(err)
+	}
+	want := DefaultAuthConfig()
+	want.EmailLocale = "en"
+	if !reflect.DeepEqual(plain, want) {
+		t.Errorf("plain read of the stored config = %+v, want the defaults %+v", plain, want)
+	}
+	if got := ParseAuthConfig(stored); !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseAuthConfig = %+v, want %+v", got, want)
 	}
 }
