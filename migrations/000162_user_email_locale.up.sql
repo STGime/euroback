@@ -14,6 +14,12 @@
 -- Dedicated Team databases get the column from dedicated_bootstrap.sql;
 -- the code treats a missing column as "no stored language".
 -- No explicit BEGIN/COMMIT: golang-migrate wraps the file.
+--
+-- Each ALTER takes an ACCESS EXCLUSIVE lock on a tenant's users table and
+-- keeps it until the end of this transaction. A short lock_timeout makes a
+-- busy table (e.g. a running export) fail the migration quickly instead of
+-- queueing every tenant's sign-ins behind it; re-run the deploy then.
+SET LOCAL lock_timeout = '3s';
 
 -- Existing projects keep English: an explicit default beats the browser's
 -- language, and with one set nothing is stored from the browser at

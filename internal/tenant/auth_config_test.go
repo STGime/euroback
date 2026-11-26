@@ -136,3 +136,24 @@ func TestAppNameValidation(t *testing.T) {
 		}
 	}
 }
+
+// Migration 000162 sets email_locale on every existing project, including
+// ones that never saved auth settings ({}). Those must keep the defaults.
+func TestParseAuthConfig_OnlyEmailLocaleKeepsDefaults(t *testing.T) {
+	def := DefaultAuthConfig()
+	got := ParseAuthConfig([]byte(`{"email_locale":"en"}`))
+	if got.EmailLocale != "en" {
+		t.Errorf("email_locale = %q", got.EmailLocale)
+	}
+	if strings.Join(got.RedirectURLs, ",") != strings.Join(def.RedirectURLs, ",") || strings.Join(got.CORSOrigins, ",") != strings.Join(def.CORSOrigins, ",") {
+		t.Errorf("defaults lost: redirects %v cors %v, want %v / %v", got.RedirectURLs, got.CORSOrigins, def.RedirectURLs, def.CORSOrigins)
+	}
+	if !got.IsCORSOriginAllowed("http://localhost:3000") || got.PasswordMinLength != def.PasswordMinLength || got.SessionDuration != def.SessionDuration || len(got.Providers) != len(def.Providers) {
+		t.Errorf("defaults lost: %+v", got)
+	}
+	// A saved config with other keys is parsed as before.
+	saved := ParseAuthConfig([]byte(`{"email_locale":"de","redirect_urls":["https://app.example.com"],"cors_origins":[]}`))
+	if saved.EmailLocale != "de" || len(saved.RedirectURLs) != 1 || saved.IsCORSOriginAllowed("http://localhost:3000") {
+		t.Errorf("saved config: %+v", saved)
+	}
+}

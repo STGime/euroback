@@ -68,7 +68,8 @@ export interface AuthConfig {
 	app_name?: string;
 	/** Default language of auth emails to app users ("de", "fr", …), used
 	 * when neither the user's stored language nor the request names a
-	 * supported one. Absent = English. */
+	 * supported one; it beats the browser's language. Absent = Automatic
+	 * (the browser's language, else English). */
 	email_locale?: string;
 	/** URL the password-reset email links to. Same allowlist rule. */
 	password_reset_url?: string;

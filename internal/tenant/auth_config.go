@@ -94,7 +94,9 @@ type AuthConfig struct {
 
 	// EmailLocale is the project's default language for auth emails to its
 	// app users, used when neither the user's stored language nor the
-	// request names a supported one (see internal/locale). Empty = English.
+	// request names a supported one; it beats the browser's language (see
+	// internal/locale). Empty = Automatic: the browser's language, else
+	// English.
 	EmailLocale string `json:"email_locale,omitempty"`
 
 	// Passkeys is the per-project WebAuthn (passkey) config (#630). nil or
@@ -964,6 +966,25 @@ func AnnotateOAuthSecretStatus(raw []byte, hasSecret func(provider string) (set,
 func ParseAuthConfig(raw []byte) AuthConfig {
 	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "" || strings.TrimSpace(string(raw)) == "{}" || strings.TrimSpace(string(raw)) == "null" {
 		return DefaultAuthConfig()
+	}
+	// A project that never saved its auth settings but has a default email
+	// language (migration 000162 sets "en" on every existing project) is
+	// still unconfigured: it keeps the full defaults (localhost redirect and
+	// CORS origin, providers), plus the language.
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(raw, &keys) == nil && len(keys) > 0 {
+		onlyLocale := true
+		for k := range keys {
+			if k != "email_locale" {
+				onlyLocale = false
+				break
+			}
+		}
+		if onlyLocale {
+			cfg := DefaultAuthConfig()
+			_ = json.Unmarshal(keys["email_locale"], &cfg.EmailLocale)
+			return cfg
+		}
 	}
 
 	var cfg AuthConfig

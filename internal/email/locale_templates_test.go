@@ -1,6 +1,8 @@
 package email
 
 import (
+	"encoding/json"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -112,5 +114,33 @@ func TestCustomTemplateWinsOverTranslation(t *testing.T) {
 func TestDuration(t *testing.T) {
 	if Duration("de", "24h") != "24 Stunden" || Duration("nb", "15m") != "15 minutter" || Duration("it", "1h") != "1 hour" {
 		t.Error("durations")
+	}
+}
+
+// The English built-ins must stay byte-identical to the templates sent
+// before email languages existed (testdata, captured from the old
+// templates.go), apart from the new lang attribute.
+func TestEnglishTemplatesUnchanged(t *testing.T) {
+	raw, err := os.ReadFile("testdata/en_templates_before_languages.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before map[string]DefaultTemplate
+	if err := json.Unmarshal(raw, &before); err != nil {
+		t.Fatal(err)
+	}
+	now := DefaultTemplatesFor("en")
+	for _, typ := range authTemplateTypes {
+		b, ok := before[typ]
+		if !ok {
+			t.Fatalf("%s missing from testdata", typ)
+		}
+		want := strings.Replace(b.BodyHTML, "<html>", `<html lang="en">`, 1)
+		if now[typ].Subject != b.Subject || now[typ].BodyHTML != want {
+			t.Errorf("%s: English template changed", typ)
+		}
+		if DefaultTemplates()[typ] != now[typ] {
+			t.Errorf("%s: DefaultTemplates() is not the English built-in", typ)
+		}
 	}
 }
