@@ -1854,7 +1854,7 @@ export class EurobaseAPI {
 		});
 	}
 
-	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any>; email_confirmed?: boolean }): Promise<EndUser> {
+	async updateEndUser(projectId: string, userId: string, data: { email?: string; display_name?: string; metadata?: Record<string, any>; email_confirmed?: boolean; locale?: string }): Promise<EndUser> {
 		return this.fetch<EndUser>(`/platform/projects/${projectId}/users/${userId}`, {
 			method: 'PATCH',
 			body: JSON.stringify(data)
@@ -3184,6 +3184,8 @@ export interface EndUser {
 	/** null while the email is unconfirmed (#806); absent from older gateways */
 	email_confirmed_at?: string | null;
 	created_at: string;
+	/** Stored language for auth emails ("de", …); null when none is stored. */
+	locale?: string | null;
 }
 
 export interface EndUserList {

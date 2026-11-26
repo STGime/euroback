@@ -13,7 +13,7 @@
 					<li><strong>Provider column</strong> &mdash; shows how each user signed up (email, google, github, linkedin, apple, phone). Users with multiple linked providers show all badges.</li>
 					<li><strong>Phone-only users</strong> &mdash; users who sign up via SMS OTP appear with their phone number instead of email</li>
 					<li><strong>Create user</strong> &mdash; manually add a user by email; the password is optional (without one they sign in by magic link or a password reset)</li>
-					<li><strong>Edit user</strong> &mdash; update email, display name, or metadata</li>
+					<li><strong>Edit user</strong> &mdash; update email, display name, metadata, or the user's email language</li>
 					<li><strong>Mark confirmed</strong> &mdash; confirm a user's email address by hand (for users who existed before you turned on email confirmation, or can't receive the email)</li>
 					<li><strong>Suspend / reactivate</strong> &mdash; temporarily block a user from signing in (revokes all refresh tokens)</li>
 					<li><strong>Delete user</strong> &mdash; permanently remove a user account</li>
@@ -47,7 +47,7 @@
 					</table>
 				</div>
 				<p class="text-sm text-gray-700 leading-relaxed mt-2">
-					Each user has <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">id</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">phone</code> (when set), <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">display_name</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">providers</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">metadata</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">banned_at</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">last_sign_in_at</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email_confirmed_at</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">created_at</code>.
+					Each user has <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">id</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">phone</code> (when set), <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">display_name</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">providers</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">metadata</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">banned_at</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">last_sign_in_at</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">email_confirmed_at</code>, <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">created_at</code> and <code class="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700">locale</code> (the stored email language, or null).
 				</p>
 				<div class="rounded-lg bg-gray-900 p-4 text-xs font-mono text-green-400 overflow-x-auto mt-2">
 					<pre>API=https://api.eurobase.app/platform/projects/$PROJECT_ID/users

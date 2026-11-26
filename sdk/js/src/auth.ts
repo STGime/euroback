@@ -240,6 +240,11 @@ export interface SignUpCredentials {
    * (#261).
    */
   emailRedirectTo?: string
+  /**
+   * The user's language for their auth emails (`"de"`, `"nb-NO"`, …),
+   * stored for the user at sign-up. Overrides the client's `locale`.
+   */
+  locale?: string
 }
 
 /** Optional payload accepted by forgotPassword / requestMagicLink /
@@ -247,6 +252,21 @@ export interface SignUpCredentials {
 export interface EmailRedirectOptions {
   /** See SignUpCredentials.emailRedirectTo — same contract. */
   emailRedirectTo?: string
+  /** Language of this email (`"de"`, …); overrides the client's `locale`. */
+  locale?: string
+}
+
+/** The device's language tag, or undefined. */
+function deviceLocale(): string | undefined {
+  try {
+    const nav = (globalThis as { navigator?: { language?: string } }).navigator
+    if (nav && typeof nav.language === 'string' && nav.language) return nav.language
+  } catch { /* no navigator */ }
+  try {
+    const l = Intl.DateTimeFormat().resolvedOptions().locale
+    if (l) return l
+  } catch { /* no Intl */ }
+  return undefined
 }
 
 export interface SignInCredentials {
@@ -400,6 +420,19 @@ export class AuthClient {
     return session
   }
 
+  /** The language to send with an auth-email request: the call's, else the
+   * client's `locale`, else none. `"auto"` is the device's language on a
+   * user's device (browser, React Native) and nothing on a server, whose
+   * own language says nothing about the user (and would be stored as
+   * theirs at sign-up). */
+  private emailLocale(explicit?: string): string | undefined {
+    if (explicit) return explicit
+    const configured = this.config.locale
+    if (!configured) return undefined
+    if (configured !== 'auto') return configured
+    return isUserDevice() ? deviceLocale() : undefined
+  }
+
   /**
    * Sign up a new end-user with email + password.
    *
@@ -421,6 +454,8 @@ export class AuthClient {
     }
     if (credentials.metadata !== undefined) body.metadata = credentials.metadata
     if (credentials.emailRedirectTo !== undefined) body.email_redirect_to = credentials.emailRedirectTo
+    const signUpLocale = this.emailLocale(credentials.locale)
+    if (signUpLocale) body.locale = signUpLocale
     const result = await this.http.post('/v1/auth/signup', body)
     if (result.error) {
       return { data: null, error: result.error }
@@ -591,6 +626,8 @@ export class AuthClient {
   async requestMagicLink(email: string, options?: EmailRedirectOptions): Promise<{ error: string | null }> {
     const body: Record<string, any> = { email }
     if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
+    const emailLocale = this.emailLocale(options?.locale)
+    if (emailLocale) body.locale = emailLocale
     const result = await this.http.post('/v1/auth/request-magic-link', body)
     if (result.error) {
       return { error: result.error }
@@ -647,6 +684,8 @@ export class AuthClient {
   async forgotPassword(email: string, options?: EmailRedirectOptions): Promise<{ error: string | null }> {
     const body: Record<string, any> = { email }
     if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
+    const emailLocale = this.emailLocale(options?.locale)
+    if (emailLocale) body.locale = emailLocale
     const result = await this.http.post('/v1/auth/forgot-password', body)
     if (result.error) {
       return { error: result.error }
@@ -723,6 +762,8 @@ export class AuthClient {
   async resendVerification(email: string, options?: EmailRedirectOptions): Promise<{ error: string | null }> {
     const body: Record<string, any> = { email }
     if (options?.emailRedirectTo !== undefined) body.email_redirect_to = options.emailRedirectTo
+    const emailLocale = this.emailLocale(options?.locale)
+    if (emailLocale) body.locale = emailLocale
     const result = await this.http.post('/v1/auth/resend-verification', body)
     if (result.error) {
       return { error: result.error }

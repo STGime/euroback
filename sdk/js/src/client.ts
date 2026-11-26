@@ -44,6 +44,19 @@ export interface EurobaseConfig {
    * session) and `withAccessToken(token)` per request.
    */
   auth?: EurobaseAuthOptions
+  /**
+   * Language of the auth emails (verification, password reset, magic link)
+   * this client asks for: a language tag such as `"de"` or `"nb-NO"`, or
+   * `"auto"` for the device's language (`navigator.language`, else the
+   * `Intl` locale) in a browser or React Native app. On a server `"auto"`
+   * sends nothing (the server's language isn't the user's); pass the
+   * user's language per call there. Sent as `locale` with
+   * `signUp`, `resendVerification`, `forgotPassword` and `requestMagicLink`;
+   * a `locale` in a call's options wins. Omitted: nothing is sent and the
+   * project's default language applies. Supported: en, de, fr, nl, sv, es,
+   * nb (others fall back to the project default).
+   */
+  locale?: string
 }
 
 /**

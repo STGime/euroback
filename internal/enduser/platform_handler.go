@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eurobase/euroback/internal/locale"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -41,6 +42,9 @@ type PlatformUser struct {
 	// EmailConfirmedAt is null until the user confirms their email (#806).
 	EmailConfirmedAt *time.Time `json:"email_confirmed_at"`
 	CreatedAt        time.Time  `json:"created_at"`
+	// Locale is the user's stored language for auth emails ("de", …), null
+	// if none is stored (see internal/locale).
+	Locale *string `json:"locale"`
 }
 
 type createUserRequest struct {
@@ -52,6 +56,9 @@ type createUserRequest struct {
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	// EmailConfirmed defaults to true: the developer vouches for the address.
 	EmailConfirmed *bool `json:"email_confirmed,omitempty"`
+	// Locale is the user's language for auth emails ("de", "nb-NO", …);
+	// stored normalised. Optional.
+	Locale *string `json:"locale,omitempty"`
 }
 
 // adminPasswordError checks a password an admin sets (create, reset):
@@ -74,6 +81,8 @@ type updateUserRequest struct {
 	// EmailConfirmed marks the email confirmed (true; keeps an existing
 	// date) or unconfirmed (false) — #806.
 	EmailConfirmed *bool `json:"email_confirmed,omitempty"`
+	// Locale sets the user's language for auth emails; "" clears it.
+	Locale *string `json:"locale,omitempty"`
 }
 
 type resetPasswordRequest struct {
@@ -290,7 +299,7 @@ func scanUser(rows interface {
 	var u PlatformUser
 	var metadataJSON []byte
 	var providersArr []string
-	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.EmailConfirmedAt, &u.CreatedAt, &providersArr); err != nil {
+	if err := rows.Scan(&u.ID, &u.Email, &u.Phone, &u.DisplayName, &metadataJSON, &u.BannedAt, &u.LastSignInAt, &u.EmailConfirmedAt, &u.CreatedAt, &providersArr, &u.Locale); err != nil {
 		return u, err
 	}
 	if metadataJSON != nil {
@@ -370,7 +379,8 @@ func handleListUsers(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc
 
 		userCols := fmt.Sprintf(
 			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.email_confirmed_at, u.created_at,
-			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[]),
+			 to_jsonb(u)->>'locale'`,
 			qs,
 		)
 
@@ -444,7 +454,8 @@ func handleGetUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFunc {
 		qs := quoteIdent(schema)
 		userCols := fmt.Sprintf(
 			`u.id, u.email, u.phone, u.display_name, u.metadata, u.banned_at, u.last_sign_in_at, u.email_confirmed_at, u.created_at,
-			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[])`,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = u.id ORDER BY i.provider), ARRAY[]::text[]),
+			 to_jsonb(u)->>'locale'`,
 			qs,
 		)
 		q := fmt.Sprintf(`SELECT %s FROM %s.users u WHERE u.id = $1`, userCols, qs)
@@ -515,22 +526,39 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver, limiter ...*rat
 			metadataJSON = []byte("{}")
 		}
 
+		lang, ok := userLocaleParam(w, req.Locale)
+		if !ok {
+			return
+		}
 		qs := quoteIdent(schema)
+		// The locale column is named only when a language is given, so a
+		// dedicated database created before users.locale existed can still
+		// create users without one.
+		cols, vals := "email, password_hash, display_name, metadata, email_confirmed_at", "$1, $2, $3, $4, CASE WHEN $5::bool THEN now() END"
+		args := []interface{}{email, passwordHash, req.DisplayName, string(metadataJSON), confirmed}
+		if lang != nil {
+			cols, vals = cols+", locale", vals+", $6"
+			args = append(args, *lang)
+		}
 		q := fmt.Sprintf(
-			`INSERT INTO %s.users (email, password_hash, display_name, metadata, email_confirmed_at)
-			 VALUES ($1, $2, $3, $4, CASE WHEN $5::bool THEN now() END)
-			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at, ARRAY[]::text[]`,
-			qs,
+			`INSERT INTO %s.users (%s)
+			 VALUES (%s)
+			 RETURNING id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at, ARRAY[]::text[], to_jsonb(users)->>'locale'`,
+			qs, cols, vals,
 		)
 		var u PlatformUser
 		err := edb.RunAsService(r.Context(), tenantPool(r.Context(), pool, resolver), func(ctx context.Context, tx pgx.Tx) error {
 			var e error
-			u, e = scanUser(tx.QueryRow(ctx, q, email, passwordHash, req.DisplayName, string(metadataJSON), confirmed))
+			u, e = scanUser(tx.QueryRow(ctx, q, args...))
 			return e
 		})
 		if err != nil {
 			if isUniqueViolation(err) {
 				writeEmailTaken(w)
+				return
+			}
+			if isUndefinedColumn(err) {
+				writeLocaleUnsupported(w)
 				return
 			}
 			slog.Error("create end-user failed", "error", err, "schema", schema)
@@ -607,6 +635,15 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 			args = append(args, string(metaJSON))
 			argIdx++
 		}
+		if req.Locale != nil {
+			lang, ok := userLocaleParam(w, req.Locale)
+			if !ok {
+				return
+			}
+			setClauses = append(setClauses, fmt.Sprintf("locale = $%d", argIdx))
+			args = append(args, lang) // nil clears it
+			argIdx++
+		}
 
 		if len(setClauses) == 1 { // only updated_at
 			http.Error(w, `{"error":"no fields to update"}`, http.StatusBadRequest)
@@ -616,7 +653,8 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
 			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
-			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[]),
+			 to_jsonb(users)->>'locale'`,
 			qs,
 		)
 		args = append(args, userID)
@@ -640,6 +678,10 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 				http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 				return
 			}
+			if isUndefinedColumn(err) {
+				writeLocaleUnsupported(w)
+				return
+			}
 			slog.Error("update end-user failed", "error", err, "schema", schema, "user_id", userID)
 			http.Error(w, `{"error":"failed to update user"}`, http.StatusInternalServerError)
 			return
@@ -658,6 +700,9 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		}
 		if req.Metadata != nil {
 			fields = append(fields, "metadata")
+		}
+		if req.Locale != nil {
+			fields = append(fields, "locale")
 		}
 		auditUserAction(r, audit.ActionEndUserUpdated, u.ID, map[string]interface{}{"fields": fields})
 
@@ -763,7 +808,8 @@ func handleSuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFu
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
 			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
-			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[]),
+			 to_jsonb(users)->>'locale'`,
 			qs,
 		)
 		q := fmt.Sprintf(
@@ -811,7 +857,8 @@ func handleUnsuspendUser(pool *pgxpool.Pool, resolver PoolResolver) http.Handler
 		qs := quoteIdent(schema)
 		returnCols := fmt.Sprintf(
 			`id, email, phone, display_name, metadata, banned_at, last_sign_in_at, email_confirmed_at, created_at,
-			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[])`,
+			 COALESCE(ARRAY(SELECT DISTINCT i.provider FROM %s.user_identities i WHERE i.user_id = id ORDER BY i.provider), ARRAY[]::text[]),
+			 to_jsonb(users)->>'locale'`,
 			qs,
 		)
 		q := fmt.Sprintf(
@@ -945,4 +992,33 @@ func handleSignOutUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFu
 		auditUserAction(r, audit.ActionEndUserSignedOut, userID, map[string]interface{}{"refresh_tokens_revoked": revoked})
 		writeJSON(w, map[string]interface{}{"status": "signed_out", "refresh_tokens_revoked": revoked}, http.StatusOK)
 	}
+}
+
+// userLocaleParam validates an admin-supplied user language: nil = not
+// given, "" = clear (returns a nil pointer with ok), otherwise a supported
+// language, stored normalised ("nb-NO" -> "nb"). Writes the 400 itself.
+func userLocaleParam(w http.ResponseWriter, raw *string) (*string, bool) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, true
+	}
+	l := locale.Normalize(*raw)
+	if l == "" {
+		writeJSON(w, map[string]string{"error": "locale must be one of " + strings.Join(locale.Supported, ", ")}, http.StatusBadRequest)
+		return nil, false
+	}
+	return &l, true
+}
+
+// isUndefinedColumn: SQLSTATE 42703, here a dedicated database created
+// before users.locale existed.
+func isUndefinedColumn(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
+}
+
+func writeLocaleUnsupported(w http.ResponseWriter) {
+	writeJSON(w, map[string]string{
+		"error": "this project's database can't store a user's email language yet; contact support",
+		"code":  "locale_unsupported",
+	}, http.StatusConflict)
 }
