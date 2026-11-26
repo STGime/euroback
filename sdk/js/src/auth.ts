@@ -421,12 +421,16 @@ export class AuthClient {
   }
 
   /** The language to send with an auth-email request: the call's, else the
-   * client's `locale` (`"auto"` = the device's), else none. */
+   * client's `locale`, else none. `"auto"` is the device's language on a
+   * user's device (browser, React Native) and nothing on a server, whose
+   * own language says nothing about the user (and would be stored as
+   * theirs at sign-up). */
   private emailLocale(explicit?: string): string | undefined {
     if (explicit) return explicit
     const configured = this.config.locale
     if (!configured) return undefined
-    return configured === 'auto' ? deviceLocale() : configured
+    if (configured !== 'auto') return configured
+    return isUserDevice() ? deviceLocale() : undefined
   }
 
   /**

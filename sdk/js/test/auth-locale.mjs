@@ -42,11 +42,18 @@ for (const b of await bodiesFor(createClient({ url: URL_BASE, apiKey: 'eb_pk_tes
   assert.equal(b.locale, 'de')
 }
 
-// 3. "auto" sends the device's language.
+// 3. "auto" on a server sends nothing (the server's language isn't the
+//    user's), even where navigator.language exists (Node 21+, Deno).
 Object.defineProperty(globalThis, 'navigator', { value: { language: 'sv-SE' }, configurable: true })
+for (const b of await bodiesFor(createClient({ url: URL_BASE, apiKey: 'eb_pk_test', locale: 'auto' }))) {
+  assert.equal('locale' in b, false, `auto on a server must send none: ${JSON.stringify(b)}`)
+}
+// ...and on a user's device (a browser) the device's language.
+globalThis.document = {}
 for (const b of await bodiesFor(createClient({ url: URL_BASE, apiKey: 'eb_pk_test', locale: 'auto' }))) {
   assert.equal(b.locale, 'sv-SE')
 }
+delete globalThis.document
 
 // 4. A call's own locale wins over the client's.
 captured = []

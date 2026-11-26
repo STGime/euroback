@@ -557,6 +557,10 @@ func handleCreateUser(pool *pgxpool.Pool, resolver PoolResolver, limiter ...*rat
 				writeEmailTaken(w)
 				return
 			}
+			if isUndefinedColumn(err) {
+				writeLocaleUnsupported(w)
+				return
+			}
 			slog.Error("create end-user failed", "error", err, "schema", schema)
 			http.Error(w, `{"error":"failed to create user"}`, http.StatusInternalServerError)
 			return
@@ -674,6 +678,10 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 				http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 				return
 			}
+			if isUndefinedColumn(err) {
+				writeLocaleUnsupported(w)
+				return
+			}
 			slog.Error("update end-user failed", "error", err, "schema", schema, "user_id", userID)
 			http.Error(w, `{"error":"failed to update user"}`, http.StatusInternalServerError)
 			return
@@ -692,6 +700,9 @@ func handleUpdateUser(pool *pgxpool.Pool, resolver PoolResolver) http.HandlerFun
 		}
 		if req.Metadata != nil {
 			fields = append(fields, "metadata")
+		}
+		if req.Locale != nil {
+			fields = append(fields, "locale")
 		}
 		auditUserAction(r, audit.ActionEndUserUpdated, u.ID, map[string]interface{}{"fields": fields})
 
@@ -996,4 +1007,18 @@ func userLocaleParam(w http.ResponseWriter, raw *string) (*string, bool) {
 		return nil, false
 	}
 	return &l, true
+}
+
+// isUndefinedColumn: SQLSTATE 42703, here a dedicated database created
+// before users.locale existed.
+func isUndefinedColumn(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
+}
+
+func writeLocaleUnsupported(w http.ResponseWriter) {
+	writeJSON(w, map[string]string{
+		"error": "this project's database can't store a user's email language yet; contact support",
+		"code":  "locale_unsupported",
+	}, http.StatusConflict)
 }

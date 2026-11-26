@@ -168,8 +168,8 @@ func TestAdminAPI_DB(t *testing.T) {
 
 	// The user's email language (#1007 follow-up): no language yet, set
 	// normalised, refused when unsupported, cleared with "".
-	if strings.Contains(body, `"locale":"`) || !strings.Contains(body, `"locale":null`) {
-		t.Fatalf("new user should have no language: %s", body)
+	if code, body := call(secret, "GET", "/"+u.ID, ""); code != 200 || strings.Contains(body, `"locale":"`) || !strings.Contains(body, `"locale":null`) {
+		t.Fatalf("a user created without a language should have none: %d %s", code, body)
 	}
 	if code, body := call(secret, "PATCH", "/"+u.ID, `{"locale":"nb-NO"}`); code != 200 || !strings.Contains(body, `"locale":"nb"`) {
 		t.Fatalf("set locale: %d %s", code, body)

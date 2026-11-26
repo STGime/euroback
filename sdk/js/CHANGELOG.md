@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added — auth emails in the user's language
 
-- **`createClient({ …, locale })`:** the language of the auth emails this client asks for, as a tag (`"de"`, `"nb-NO"`) or `"auto"` for the device's language (`navigator.language`, else the `Intl` locale, which covers React Native and Node). It is sent as `locale` with `signUp`, `resendVerification`, `forgotPassword` and `requestMagicLink`. At sign-up, the gateway stores it as the user's language, and their later emails use it.
+- **`createClient({ …, locale })`:** the language of the auth emails this client asks for, as a tag (`"de"`, `"nb-NO"`) or `"auto"` for the device's language (`navigator.language`, else the `Intl` locale) in a browser or React Native app. On a server, `"auto"` sends nothing, because the server's language isn't the user's and would be stored as theirs; pass the user's language per call there. It is sent as `locale` with `signUp`, `resendVerification`, `forgotPassword` and `requestMagicLink`. At sign-up, the gateway stores it as the user's language, and their later emails use it.
 - **Per call:** `signUp({ …, locale })`, and `{ locale }` in the options of the other three. These win over the client's `locale`.
 - **Without either, nothing changes:** no `locale` is sent and the project's default language applies. The SDK never picks a language on its own, so updating it doesn't change any project's emails. When a `locale` is sent, the email link also carries `&locale=<lang>` after the token.
 - **`auth.admin`:** `createUser({ …, locale })` and `updateUserById(id, { locale })`. `""` clears the stored language. `AdminUser.locale` is the stored language, or `null`.
