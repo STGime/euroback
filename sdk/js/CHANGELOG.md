@@ -2,6 +2,19 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.14.0 — 2026-11-26
+
+### Added — auth emails in the user's language
+
+- **`createClient({ …, locale })`:** the language of the auth emails this client asks for, as a tag (`"de"`, `"nb-NO"`) or `"auto"` for the device's language (`navigator.language`, else the `Intl` locale, which covers React Native and Node). It is sent as `locale` with `signUp`, `resendVerification`, `forgotPassword` and `requestMagicLink`. At sign-up, the gateway stores it as the user's language, and their later emails use it.
+- **Per call:** `signUp({ …, locale })`, and `{ locale }` in the options of the other three. These win over the client's `locale`.
+- **Without either, nothing changes:** no `locale` is sent and the project's default language applies. The SDK never picks a language on its own, so updating it doesn't change any project's emails. When a `locale` is sent, the email link also carries `&locale=<lang>` after the token.
+- **`auth.admin`:** `createUser({ …, locale })` and `updateUserById(id, { locale })`. `""` clears the stored language. `AdminUser.locale` is the stored language, or `null`.
+
+Supported: en, de, fr, nl, sv, es, nb. Other values fall back to the project default; the admin API refuses them (400).
+
+Requires the gateway change that adds email languages (#1007) and the admin `locale` field.
+
 ## 0.13.1 — 2026-11-20
 
 ### Fixed

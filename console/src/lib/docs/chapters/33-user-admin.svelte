@@ -23,9 +23,9 @@ const eb = createClient({
 const { data, error, status, code } = await eb.auth.admin.listUsers({ perPage: 20 })`;
 
 	const methodsCode = `eb.auth.admin.listUsers({ page, perPage, search })      // { users, total }
-eb.auth.admin.createUser({ email, password, emailConfirmed, displayName, metadata })
+eb.auth.admin.createUser({ email, password, emailConfirmed, displayName, metadata, locale })
 eb.auth.admin.getUserById(id)
-eb.auth.admin.updateUserById(id, { email, displayName, metadata, emailConfirmed })
+eb.auth.admin.updateUserById(id, { email, displayName, metadata, emailConfirmed, locale })
 eb.auth.admin.deleteUser(id)                             // data: null
 eb.auth.admin.suspendUser(id)
 eb.auth.admin.unsuspendUser(id)
@@ -43,7 +43,8 @@ eb.auth.admin.signOutUser(id)                            // { status: 'signed_ou
   "banned_at": null,
   "last_sign_in_at": null,
   "email_confirmed_at": "2026-11-20T09:12:44Z",
-  "created_at": "2026-11-20T09:12:44Z"
+  "created_at": "2026-11-20T09:12:44Z",
+  "locale": "de"
 }`;
 
 	const curlCode = `export EB=https://your-project.eurobase.app/v1/auth/admin/users
@@ -275,9 +276,9 @@ console.log({ created, existing, failed })`;
 				</thead>
 				<tbody class="divide-y divide-gray-100">
 					<tr><td class="px-3 py-2"><code class={c}>listUsers</code></td><td class="px-3 py-2"><code class={c}>GET /</code></td><td class="px-3 py-2">query <code class={c}>page</code> (from 1), <code class={c}>per_page</code> (1–200, default 50), <code class={c}>search</code> (part of the email, display name or id), <code class={c}>email</code> (exact match)</td><td class="px-3 py-2">200 <code class={c}>{'{'} users, total {'}'}</code>, newest first</td></tr>
-					<tr><td class="px-3 py-2"><code class={c}>createUser</code></td><td class="px-3 py-2"><code class={c}>POST /</code></td><td class="px-3 py-2"><code class={c}>email</code>; optional <code class={c}>password</code>, <code class={c}>email_confirmed</code> (default <code class={c}>true</code>), <code class={c}>display_name</code>, <code class={c}>metadata</code></td><td class="px-3 py-2">201 user</td></tr>
+					<tr><td class="px-3 py-2"><code class={c}>createUser</code></td><td class="px-3 py-2"><code class={c}>POST /</code></td><td class="px-3 py-2"><code class={c}>email</code>; optional <code class={c}>password</code>, <code class={c}>email_confirmed</code> (default <code class={c}>true</code>), <code class={c}>display_name</code>, <code class={c}>metadata</code>, <code class={c}>locale</code> (the user's email language, e.g. <code class={c}>"de"</code>)</td><td class="px-3 py-2">201 user</td></tr>
 					<tr><td class="px-3 py-2"><code class={c}>getUserById</code></td><td class="px-3 py-2"><code class={c}>GET /{'{'}id{'}'}</code></td><td class="px-3 py-2">—</td><td class="px-3 py-2">200 user</td></tr>
-					<tr><td class="px-3 py-2"><code class={c}>updateUserById</code></td><td class="px-3 py-2"><code class={c}>PATCH /{'{'}id{'}'}</code></td><td class="px-3 py-2">any of <code class={c}>email</code>, <code class={c}>display_name</code>, <code class={c}>metadata</code> (replaces the whole object), <code class={c}>email_confirmed</code></td><td class="px-3 py-2">200 user</td></tr>
+					<tr><td class="px-3 py-2"><code class={c}>updateUserById</code></td><td class="px-3 py-2"><code class={c}>PATCH /{'{'}id{'}'}</code></td><td class="px-3 py-2">any of <code class={c}>email</code>, <code class={c}>display_name</code>, <code class={c}>metadata</code> (replaces the whole object), <code class={c}>email_confirmed</code>, <code class={c}>locale</code> (<code class={c}>""</code> clears it)</td><td class="px-3 py-2">200 user</td></tr>
 					<tr><td class="px-3 py-2"><code class={c}>deleteUser</code></td><td class="px-3 py-2"><code class={c}>DELETE /{'{'}id{'}'}</code></td><td class="px-3 py-2">—</td><td class="px-3 py-2">204</td></tr>
 					<tr><td class="px-3 py-2"><code class={c}>suspendUser</code></td><td class="px-3 py-2"><code class={c}>POST /{'{'}id{'}'}/suspend</code></td><td class="px-3 py-2">—</td><td class="px-3 py-2">200 user (<code class={c}>banned_at</code> set)</td></tr>
 					<tr><td class="px-3 py-2"><code class={c}>unsuspendUser</code></td><td class="px-3 py-2"><code class={c}>DELETE /{'{'}id{'}'}/suspend</code></td><td class="px-3 py-2">—</td><td class="px-3 py-2">200 user</td></tr>

@@ -1,6 +1,6 @@
 {
   "name": "@eurobase/sdk",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "description": "Eurobase TypeScript SDK — EU-sovereign Backend-as-a-Service. Auth, database, storage, realtime, functions, vault, and schema DDL.",
   "main": "./dist/cjs/index.js",
   "module": "./dist/index.js",
@@ -36,7 +36,7 @@
   "scripts": {
     "build": "tsc && node test/fix-dist-imports.mjs && tsc -p tsconfig.cjs.json && node test/write-cjs-package.mjs",
     "prepublishOnly": "npm run build",
-    "test": "npm run build && node test/token-propagation.mjs && node test/realtime-url.mjs && node test/schedules.mjs && node test/auth-export.mjs && node test/auth-email-redirect.mjs && node test/repeated-filters.mjs && node test/storage-public-url.mjs && node test/oauth-session-user.mjs && node test/auth-passkey.mjs && node test/refresh-timer.mjs && node test/email-confirmation.mjs && node test/update-password.mjs && node test/session-robustness.mjs && node test/rpc.mjs && node test/server-side.mjs && node test/admin.mjs && node test/cjs-require.cjs"
+    "test": "npm run build && node test/token-propagation.mjs && node test/realtime-url.mjs && node test/schedules.mjs && node test/auth-export.mjs && node test/auth-email-redirect.mjs && node test/auth-locale.mjs && node test/repeated-filters.mjs && node test/storage-public-url.mjs && node test/oauth-session-user.mjs && node test/auth-passkey.mjs && node test/refresh-timer.mjs && node test/email-confirmation.mjs && node test/update-password.mjs && node test/session-robustness.mjs && node test/rpc.mjs && node test/server-side.mjs && node test/admin.mjs && node test/cjs-require.cjs"
   },
   "keywords": [
     "eurobase",

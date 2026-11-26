@@ -37,6 +37,8 @@ export interface AdminUser {
   /** Null until the email address is confirmed. */
   email_confirmed_at: string | null
   created_at: string
+  /** Stored language for auth emails (`"de"`, …); null when none is stored. */
+  locale?: string | null
 }
 
 /** One page of users, newest first. */
@@ -63,6 +65,8 @@ export interface AdminCreateUserParams {
   emailConfirmed?: boolean
   displayName?: string
   metadata?: Record<string, unknown>
+  /** The user's language for auth emails (`"de"`, `"nb-NO"`, …), stored normalised. */
+  locale?: string
 }
 
 export interface AdminUpdateUserParams {
@@ -72,6 +76,8 @@ export interface AdminUpdateUserParams {
   metadata?: Record<string, unknown>
   /** `true` confirms the email (keeps an existing date), `false` marks it unconfirmed. */
   emailConfirmed?: boolean
+  /** The user's language for auth emails; `""` clears it (the project default applies). */
+  locale?: string
 }
 
 /** Every admin method resolves to this; it never throws. */
@@ -165,6 +171,7 @@ export class AdminClient {
     if (params.emailConfirmed !== undefined) body.email_confirmed = params.emailConfirmed
     if (params.displayName !== undefined) body.display_name = params.displayName
     if (params.metadata !== undefined) body.metadata = params.metadata
+    if (params.locale !== undefined) body.locale = params.locale
     return this.request('POST', '', body)
   }
 
@@ -173,13 +180,14 @@ export class AdminClient {
     return this.request('GET', this.userPath(id))
   }
 
-  /** Change a user's email, display name, metadata or confirmation. */
+  /** Change a user's email, display name, metadata, confirmation or email language. */
   updateUserById(id: string, params: AdminUpdateUserParams): Promise<AdminResult<AdminUser>> {
     const body: Record<string, unknown> = {}
     if (params.email !== undefined) body.email = params.email
     if (params.displayName !== undefined) body.display_name = params.displayName
     if (params.metadata !== undefined) body.metadata = params.metadata
     if (params.emailConfirmed !== undefined) body.email_confirmed = params.emailConfirmed
+    if (params.locale !== undefined) body.locale = params.locale
     return this.request('PATCH', this.userPath(id), body)
   }
 

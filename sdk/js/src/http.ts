@@ -11,6 +11,8 @@ export interface EurobaseConfig {
   projectId?: string
   /** Session handling of `auth` (server mode: `{ persistSession: false }`). */
   auth?: EurobaseAuthOptions
+  /** Auth-email language (`"de"`, `"auto"`, …). See client.ts. */
+  locale?: string
 }
 
 /** Session handling of the client's `auth`. */

@@ -26,11 +26,17 @@
 	let createError: string | null = $state(null);
 	let creating = $state(false);
 
+	// Languages of the built-in auth emails (internal/locale.Supported).
+	const EMAIL_LANGUAGES: Record<string, string> = {
+		en: 'English', de: 'Deutsch', fr: 'Français', nl: 'Nederlands', sv: 'Svenska', es: 'Español', nb: 'Norsk (bokmål)'
+	};
+
 	// Edit form
 	let editUser: EndUser | null = $state(null);
 	let editEmail = $state('');
 	let editDisplayName = $state('');
 	let editMetadata = $state('');
+	let editLocale = $state('');
 	let editError: string | null = $state(null);
 	let saving = $state(false);
 
@@ -128,6 +134,7 @@
 		editEmail = user.email ?? '';
 		editDisplayName = user.display_name ?? '';
 		editMetadata = JSON.stringify(user.metadata, null, 2);
+		editLocale = user.locale ?? '';
 		editError = null;
 	}
 
@@ -146,10 +153,12 @@
 					return;
 				}
 			}
-			const data: { email?: string; display_name?: string; metadata?: Record<string, any> } = {};
+			const data: { email?: string; display_name?: string; metadata?: Record<string, any>; locale?: string } = {};
 			if (editEmail.trim() !== editUser.email) data.email = editEmail.trim();
 			if (editDisplayName !== (editUser.display_name ?? '')) data.display_name = editDisplayName;
 			if (metadata !== undefined) data.metadata = metadata;
+			// "" clears the stored language (the project default applies again).
+			if (editLocale !== (editUser.locale ?? '')) data.locale = editLocale;
 
 			if (Object.keys(data).length === 0) {
 				editUser = null;
@@ -553,6 +562,10 @@
 													<dd class="text-gray-900">{user.display_name ?? '—'}</dd>
 												</div>
 												<div class="flex gap-2">
+													<dt class="text-gray-400 w-24 shrink-0">Email language</dt>
+													<dd class="text-gray-900">{user.locale ? (EMAIL_LANGUAGES[user.locale] ?? user.locale) : 'Not set (project default)'}</dd>
+												</div>
+												<div class="flex gap-2">
 													<dt class="text-gray-400 w-24 shrink-0">Status</dt>
 													<dd>{user.banned_at ? `Suspended since ${formatDateTime(user.banned_at)}` : 'Active'}</dd>
 												</div>
@@ -650,7 +663,7 @@
 				</div>
 				<div>
 					<label for="user-metadata" class="block text-sm font-medium text-gray-700 mb-1">Metadata <span class="text-gray-400 font-normal">(optional)</span></label>
-					<textarea id="user-metadata" bind:value={createMetadata} placeholder={'{"role": "admin", "company": "Acme"}'} rows="3"
+					<textarea id="user-metadata" bind:value={createMetadata} placeholder={'{"department": "sales", "company": "Acme"}'} rows="3"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none"></textarea>
 					<p class="mt-1 text-xs text-gray-400">JSON object for custom user data.</p>
 				</div>
@@ -694,6 +707,17 @@
 					<label for="edit-name" class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
 					<input id="edit-name" type="text" bind:value={editDisplayName} placeholder="Optional"
 						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-300 focus:border-eurobase-500 focus:outline-none" />
+				</div>
+				<div>
+					<label for="edit-locale" class="block text-sm font-medium text-gray-700 mb-1">Email language</label>
+					<select id="edit-locale" bind:value={editLocale}
+						class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-eurobase-500 focus:outline-none">
+						<option value="">Not set (project default)</option>
+						{#each Object.entries(EMAIL_LANGUAGES) as [code, name]}
+							<option value={code}>{name}</option>
+						{/each}
+					</select>
+					<p class="mt-1 text-xs text-gray-400">Language of this user's sign-in, confirmation and password emails.</p>
 				</div>
 				<div>
 					<label for="edit-metadata" class="block text-sm font-medium text-gray-700 mb-1">Metadata</label>

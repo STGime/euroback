@@ -166,6 +166,30 @@ func TestAdminAPI_DB(t *testing.T) {
 		t.Fatalf("update to a taken email: %d (want 409)", code)
 	}
 
+	// The user's email language (#1007 follow-up): no language yet, set
+	// normalised, refused when unsupported, cleared with "".
+	if strings.Contains(body, `"locale":"`) || !strings.Contains(body, `"locale":null`) {
+		t.Fatalf("new user should have no language: %s", body)
+	}
+	if code, body := call(secret, "PATCH", "/"+u.ID, `{"locale":"nb-NO"}`); code != 200 || !strings.Contains(body, `"locale":"nb"`) {
+		t.Fatalf("set locale: %d %s", code, body)
+	}
+	if code, body := call(secret, "GET", "/"+u.ID, ""); code != 200 || !strings.Contains(body, `"locale":"nb"`) {
+		t.Fatalf("get after setting locale: %d %s", code, body)
+	}
+	if code, _ := call(secret, "PATCH", "/"+u.ID, `{"locale":"it"}`); code != http.StatusBadRequest {
+		t.Fatalf("unsupported locale: %d (want 400)", code)
+	}
+	if code, body := call(secret, "PATCH", "/"+u.ID, `{"locale":""}`); code != 200 || !strings.Contains(body, `"locale":null`) {
+		t.Fatalf("clear locale: %d %s", code, body)
+	}
+	if code, body := call(secret, "POST", "", `{"email":"lang@example.com","locale":"de-CH"}`); code != http.StatusCreated || !strings.Contains(body, `"locale":"de"`) {
+		t.Fatalf("create with locale: %d %s", code, body)
+	}
+	if code, _ := call(secret, "POST", "", `{"email":"lang2@example.com","locale":"xx"}`); code != http.StatusBadRequest {
+		t.Fatalf("create with unsupported locale: %d (want 400)", code)
+	}
+
 	liveTokens := func() int {
 		var n int
 		_ = admin.QueryRow(ctx, `SELECT count(*) FROM `+quoteIdent(schema)+`.refresh_tokens WHERE user_id=$1 AND revoked_at IS NULL`, u.ID).Scan(&n)
@@ -263,8 +287,9 @@ func TestAdminAPI_DB(t *testing.T) {
 			t.Errorf("no audit entry for %s (seen %v)", a, seen)
 		}
 	}
-	if seen[audit.ActionEndUserCreated] != 3 {
-		t.Errorf("created entries = %d, want 3 (refused creates aren't audited)", seen[audit.ActionEndUserCreated])
+	// 3 creates above plus the one with a locale; refused creates aren't audited.
+	if seen[audit.ActionEndUserCreated] != 4 {
+		t.Errorf("created entries = %d, want 4 (refused creates aren't audited)", seen[audit.ActionEndUserCreated])
 	}
 
 	// Password hashing is limited per project: 10 per 5 s, then 429.
