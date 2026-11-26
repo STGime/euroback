@@ -35,7 +35,16 @@ BEGIN
          WHERE p.schema_name IS NOT NULL
            AND to_regclass(quote_ident(p.schema_name) || '.users') IS NOT NULL
     LOOP
-        EXECUTE format('ALTER TABLE %I.users ADD COLUMN IF NOT EXISTS locale TEXT CHECK (locale IS NULL OR length(locale) <= 35)', rec.schema_name);
+        -- A column of that name the project added itself (possible before
+        -- console SQL moved to the project's own login) would be adopted
+        -- silently and its values would decide the email language: stop
+        -- instead, so it is looked at before this deploys.
+        IF EXISTS (SELECT 1 FROM pg_attribute
+                    WHERE attrelid = to_regclass(quote_ident(rec.schema_name) || '.users')
+                      AND attname = 'locale' AND NOT attisdropped) THEN
+            RAISE EXCEPTION '000162: %.users already has a "locale" column; check it before applying this migration', rec.schema_name;
+        END IF;
+        EXECUTE format('ALTER TABLE %I.users ADD COLUMN locale TEXT CHECK (locale IS NULL OR length(locale) <= 35)', rec.schema_name);
     END LOOP;
 END$$;
 
