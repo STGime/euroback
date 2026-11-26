@@ -66,6 +66,10 @@ export interface AuthConfig {
 	/** Product name shown to end users in auth emails (subject and body).
 	 * Empty / absent = the project name. Max 60 characters. */
 	app_name?: string;
+	/** Default language of auth emails to app users ("de", "fr", …), used
+	 * when neither the user's stored language nor the request names a
+	 * supported one. Absent = English. */
+	email_locale?: string;
 	/** URL the password-reset email links to. Same allowlist rule. */
 	password_reset_url?: string;
 	/** URL the magic-link email links to. Same allowlist rule. */
@@ -157,6 +161,8 @@ export interface EmailLogEntry {
 	via?: 'platform' | 'custom_smtp';
 	message_id?: string;
 	detail?: string;
+	/** Language the email was sent in (absent for skips and older entries). */
+	locale?: string;
 }
 
 /** A message in the admin inbox (support ticket or contact request). */

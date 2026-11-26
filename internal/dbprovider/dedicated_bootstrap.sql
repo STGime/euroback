@@ -241,6 +241,7 @@ BEGIN
             phone_confirmed_at TIMESTAMPTZ,
             last_sign_in_at    TIMESTAMPTZ,
             banned_at          TIMESTAMPTZ,
+            locale             TEXT CHECK (locale IS NULL OR length(locale) <= 35),
             created_at         TIMESTAMPTZ DEFAULT now(),
             updated_at         TIMESTAMPTZ DEFAULT now()
         )',

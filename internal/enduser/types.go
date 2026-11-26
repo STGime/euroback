@@ -41,6 +41,10 @@ type SignUpRequest struct {
 	Email    string                 `json:"email"`
 	Password string                 `json:"password"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	// Locale is the app user's language (e.g. "de", "nb-NO"), stored as
+	// users.locale for their auth emails. Optional: Accept-Language is
+	// used when it's empty or unsupported.
+	Locale string `json:"locale,omitempty"`
 
 	// EmailRedirectTo overrides auth_config.email_verification_url
 	// for this signup only (#258, part of #257). Must be a member of

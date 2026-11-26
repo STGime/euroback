@@ -3,6 +3,7 @@ package tenant
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/eurobase/euroback/internal/locale"
 	"net/url"
 	"strings"
 	"time"
@@ -90,6 +91,11 @@ type AuthConfig struct {
 	// (subject and body). Empty = the project name. Plain text, at most
 	// MaxAppNameLength characters, no control characters.
 	AppName string `json:"app_name,omitempty"`
+
+	// EmailLocale is the project's default language for auth emails to its
+	// app users, used when neither the user's stored language nor the
+	// request names a supported one (see internal/locale). Empty = English.
+	EmailLocale string `json:"email_locale,omitempty"`
 
 	// Passkeys is the per-project WebAuthn (passkey) config (#630). nil or
 	// disabled = off. When enabled, RPID is the relying-party id — the
@@ -453,6 +459,14 @@ func DefaultAuthConfig() AuthConfig {
 const MaxAppNameLength = 60
 
 func (c *AuthConfig) Validate() error {
+	c.EmailLocale = strings.TrimSpace(c.EmailLocale)
+	if c.EmailLocale != "" {
+		l := locale.Normalize(c.EmailLocale)
+		if l == "" {
+			return fmt.Errorf("email_locale must be one of %s", strings.Join(locale.Supported, ", "))
+		}
+		c.EmailLocale = l
+	}
 	c.AppName = strings.TrimSpace(c.AppName)
 	if utf8.RuneCountInString(c.AppName) > MaxAppNameLength {
 		return fmt.Errorf("app_name must be at most %d characters", MaxAppNameLength)

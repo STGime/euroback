@@ -66,6 +66,7 @@
 	// of the redirect_urls list above or the backend rejects PATCH.
 	let emailVerificationUrl = $state('');
 	let appName = $state('');
+	let emailLocale = $state('');
 	let passwordResetUrl = $state('');
 	let magicLinkUrl = $state('');
 	// #630: end-user passkeys (per-project WebAuthn relying party).
@@ -242,9 +243,14 @@
 		address_bounced: "Not sent: mail to this address failed recently, so Eurobase's email service skips it for up to 30 days to keep delivery working for everyone. Use a real mailbox, or your own SMTP sender (Pro)."
 	};
 
+	const EMAIL_LANGUAGE: Record<string, string> = {
+		en: 'English', de: 'German', fr: 'French', nl: 'Dutch', sv: 'Swedish', es: 'Spanish', nb: 'Norwegian'
+	};
+
 	function emailLogExplanation(e: EmailLogEntry): string {
+		const lang = e.locale ? ` Language: ${EMAIL_LANGUAGE[e.locale] ?? e.locale}.` : '';
 		if (e.outcome === 'sent') {
-			return e.via === 'custom_smtp' ? 'Handed to your SMTP server.' : "Handed to Eurobase's email service (Scaleway TEM).";
+			return (e.via === 'custom_smtp' ? 'Handed to your SMTP server.' : "Handed to Eurobase's email service (Scaleway TEM).") + lang;
 		}
 		const base = (e.reason && REASON_TEXT[e.reason]) || e.reason || '';
 		if (e.reason === 'redirect_rejected' && e.detail) return `${base} Requested: ${e.detail}`;
@@ -458,6 +464,7 @@
 			corsOrigins = (cfg.cors_origins ?? []).join('\n');
 			emailVerificationUrl = projectCtx.project?.auth_config?.email_verification_url ?? '';
 			appName = projectCtx.project?.auth_config?.app_name ?? '';
+			emailLocale = projectCtx.project?.auth_config?.email_locale ?? '';
 			passwordResetUrl = projectCtx.project?.auth_config?.password_reset_url ?? '';
 			magicLinkUrl = projectCtx.project?.auth_config?.magic_link_url ?? '';
 
@@ -696,7 +703,8 @@
 				redirect_urls: redirectUrls.split('\n').map(u => u.trim()).filter(Boolean),
 				cors_origins: corsOrigins.split('\n').map(u => u.trim()).filter(Boolean),
 				// undefined drops the key, so clearing the field falls back to the project name.
-				app_name: appName.trim() || undefined
+				app_name: appName.trim() || undefined,
+				email_locale: emailLocale || undefined
 			};
 			// #630: passkeys. Send the block when the toggle is on or there's
 			// leftover config; the backend validates (origin host must be
@@ -1536,6 +1544,26 @@
 							placeholder={projectCtx.project?.name ?? 'My App'}
 							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
 						/>
+					</div>
+
+					<!-- Default language of auth emails -->
+					<div class="mt-4">
+						<label for="email-locale" class="block text-sm font-medium text-gray-700">Default email language</label>
+						<p class="text-xs text-gray-400 mt-0.5">Each user gets auth emails in the language stored for them (from your app's <code class="bg-gray-100 rounded px-1">locale</code>). Otherwise: <strong>Automatic</strong> uses their browser's language, a chosen language is used for everyone. A custom email template is always sent as you wrote it.</p>
+						<select
+							id="email-locale"
+							bind:value={emailLocale}
+							class="mt-1.5 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-eurobase-500 focus:ring-2 focus:ring-eurobase-500/20 focus:outline-none transition-colors"
+						>
+							<option value="">Automatic (browser language, else English)</option>
+							<option value="en">English</option>
+							<option value="de">Deutsch</option>
+							<option value="fr">Français</option>
+							<option value="nl">Nederlands</option>
+							<option value="sv">Svenska</option>
+							<option value="es">Español</option>
+							<option value="nb">Norsk (bokmål)</option>
+						</select>
 					</div>
 
 					<!-- Email-flow redirect URLs (#260, part of #257) -->
