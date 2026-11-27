@@ -25,7 +25,7 @@
 				<h3 class="text-lg font-semibold text-gray-900 mt-6">What you'll need from your provider</h3>
 				<ul class="text-sm text-gray-700 space-y-1.5 ml-4 list-disc">
 					<li><strong>Host</strong> &mdash; the SMTP server's public host name (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">smtp-relay.brevo.com</code>, <code class="bg-gray-100 border border-gray-200 rounded px-1">in.mailjet.com</code>).</li>
-					<li><strong>Port</strong> &mdash; 587 (STARTTLS) or 465 (TLS); 2525 if your provider offers it. Port 25 isn't accepted: it's for server-to-server delivery, not for sending from an account.</li>
+					<li><strong>Port</strong> &mdash; 587 (STARTTLS) or 465 (TLS); 2525 if your provider offers it. Port 25 isn't accepted: it's for server-to-server delivery, not for sending from an account. <strong>Right now, our hosting provider blocks outgoing connections on 465 and 587</strong>, so use <strong>2525 with STARTTLS</strong> (Brevo, for example, offers it). The SMTP tab shows a notice while the block is in place, and we'll update this page once it's lifted.</li>
 					<li><strong>Username + Password</strong> (required) &mdash; the SMTP credentials from your provider. Often the username is an API key identifier and the "password" is the secret half.</li>
 					<li><strong>From address</strong> &mdash; the email address auth messages will come from (e.g. <code class="bg-gray-100 border border-gray-200 rounded px-1">noreply@yourdomain.com</code>). Must be a domain you've verified with your provider.</li>
 					<li><strong>From name</strong> &mdash; optional display name (e.g. "LexVault").</li>
@@ -59,7 +59,7 @@
 				</p>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1 mt-2">
 					<li><strong>No answer / timeout</strong> &mdash; wrong host or port, or the server only accepts connections from its own network. If Eurobase itself can't make outgoing SMTP connections at the moment, the SMTP tab shows a notice saying so.</li>
-					<li><strong>Connection refused</strong> &mdash; wrong port. Most providers use 587 with STARTTLS, or 465 with TLS.</li>
+					<li><strong>Connection refused</strong> &mdash; wrong port. Most providers use 587 with STARTTLS, or 465 with TLS; while those are blocked (see Port above), use 2525 with STARTTLS.</li>
 					<li><strong>“Doesn't use TLS from the start” / no greeting</strong> &mdash; the encryption doesn't match the port: 465 needs TLS, 587 needs STARTTLS.</li>
 					<li><strong>Login rejected</strong> &mdash; wrong username or password; some providers need an app-specific password for SMTP.</li>
 					<li><strong>From address refused</strong> &mdash; the From address must be one your SMTP account may send as.</li>

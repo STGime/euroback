@@ -86,10 +86,27 @@ func TestExplainSMTPError(t *testing.T) {
 		t.Errorf("timeout, not blocked: %q", h)
 	}
 	SetSMTPEgressBlocked(true)
-	if h := ExplainSMTPError(dialTimeout); !strings.Contains(h, "hosting provider currently blocks") {
-		t.Errorf("timeout, blocked: %q", h)
+	if h := ExplainSMTPError(dialTimeout); !strings.Contains(h, "hosting provider currently blocks") || !strings.Contains(h, "2525") {
+		t.Errorf("timeout on 587, blocked: %q", h)
+	}
+	open := &SMTPError{Stage: StageDial, Addr: "smtp-relay.example.eu:2525", Encryption: EncryptionSTARTTLS, Err: &net.OpError{Op: "dial", Err: timeoutErr{}}}
+	if h := ExplainSMTPError(open); strings.Contains(h, "hosting provider") || !strings.Contains(h, "No answer from smtp-relay.example.eu:2525 within the time limit") {
+		t.Errorf("timeout on 2525 (open), blocked: %q", h)
+	}
+	if !SMTPPortBlocked(465) || !SMTPPortBlocked(587) || SMTPPortBlocked(2525) {
+		t.Error("SMTPPortBlocked: want 465 and 587 blocked, 2525 open")
+	}
+	refused := &SMTPError{Stage: StageDial, Addr: "h:2525", Err: errors.New("connect: connection refused")}
+	if h := ExplainSMTPError(refused); !strings.Contains(h, "use 2525 with STARTTLS") || strings.Contains(h, "usually 587") {
+		t.Errorf("refused, blocked: %q", h)
 	}
 	SetSMTPEgressBlocked(false)
+	if h := ExplainSMTPError(refused); !strings.Contains(h, "usually 587 with STARTTLS") {
+		t.Errorf("refused, not blocked: %q", h)
+	}
+	if SMTPPortBlocked(587) {
+		t.Error("SMTPPortBlocked(587) with no block")
+	}
 
 	for _, c := range []struct {
 		err  error

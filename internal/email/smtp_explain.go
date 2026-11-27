@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -49,9 +51,11 @@ func (e *SMTPError) Error() string {
 func (e *SMTPError) Unwrap() error { return e.Err }
 
 // smtpEgressBlocked: outbound SMTP from the platform is blocked by the
-// hosting provider (Scaleway's default security group blocks ports 25,
-// 465 and 587). Set from CUSTOM_SMTP_EGRESS_BLOCKED; while set, a
-// connect timeout is explained as the block, not as a wrong host.
+// hosting provider on the usual submission ports (Scaleway's default
+// security group blocks 25, 465 and 587; 2525 is open). Set from
+// CUSTOM_SMTP_EGRESS_BLOCKED; while set, a connect timeout on a blocked
+// port is explained as the block, not as a wrong host, and the console
+// suggests port 2525.
 var smtpEgressBlocked atomic.Bool
 
 // SetSMTPEgressBlocked records whether outbound SMTP is blocked.
@@ -60,9 +64,32 @@ func SetSMTPEgressBlocked(blocked bool) { smtpEgressBlocked.Store(blocked) }
 // SMTPEgressBlocked reports whether outbound SMTP is blocked.
 func SMTPEgressBlocked() bool { return smtpEgressBlocked.Load() }
 
+// BlockedSMTPPorts are the ports the block covers; OpenSMTPPort is the
+// submission port that still works while it's in place.
+var BlockedSMTPPorts = []int{465, 587}
+
+const OpenSMTPPort = 2525
+
+// SMTPPortBlocked reports whether port is blocked right now.
+func SMTPPortBlocked(port int) bool {
+	if !SMTPEgressBlocked() {
+		return false
+	}
+	return port == 25 || slices.Contains(BlockedSMTPPorts, port)
+}
+
+// portAdvice is the usual port / encryption pairs, or while the block is
+// in place, the one that works.
+func portAdvice() string {
+	if SMTPEgressBlocked() {
+		return fmt.Sprintf("use %d with STARTTLS while ports 465 and 587 are blocked", OpenSMTPPort)
+	}
+	return "usually 587 with STARTTLS, or 465 with TLS"
+}
+
 // EgressBlockedNotice is shown wherever custom SMTP is configured while
 // the block is in place.
-const EgressBlockedNotice = "Eurobase's hosting provider currently blocks outgoing SMTP connections (ports 25, 465 and 587), so Eurobase can't reach your SMTP server yet. We're working on lifting this. Until then, disconnect custom SMTP: a verified sender is still used and its emails fail, while without one auth emails go out through Eurobase's default sender."
+const EgressBlockedNotice = "Eurobase's hosting provider currently blocks outgoing SMTP connections on ports 465 and 587, so a sender on those ports can't be reached. Port 2525 works: if your mail provider offers it (Brevo does, for example), use port 2525 with STARTTLS. We're working on lifting the block. A verified sender on 465 or 587 is still used and its emails fail, so switch it to 2525 or disconnect it; without a custom sender, auth emails go out through Eurobase's default sender."
 
 // DescribeSMTPError is the explanation followed by the raw error. It is
 // shown to the project's developers: a DNS error names the resolver that
@@ -111,14 +138,14 @@ func ExplainSMTPError(err error) string {
 		case errors.As(se.Err, &dnsErr):
 			return "The host name wasn't found. Check its spelling — use the SMTP server name from your mail provider's settings."
 		case isTimeout(se.Err):
-			if SMTPEgressBlocked() {
+			if p, perr := strconv.Atoi(port); perr == nil && SMTPPortBlocked(p) {
 				return fmt.Sprintf("No answer from %s. %s", se.Addr, EgressBlockedNotice)
 			}
 			return fmt.Sprintf("No answer from %s within the time limit. Check the host and port, and that the server accepts connections from outside your own network.", se.Addr)
 		case errors.Is(se.Err, syscall.ECONNREFUSED) || strings.Contains(msg, "connection refused"):
-			return fmt.Sprintf("The server refused the connection on port %s. Check the port — usually 587 with STARTTLS, or 465 with TLS.", port)
+			return fmt.Sprintf("The server refused the connection on port %s. Check the port — %s.", port, portAdvice())
 		case errors.As(se.Err, &recErr) || strings.Contains(msg, "first record does not look like a tls handshake"):
-			return fmt.Sprintf("Port %s doesn't use TLS from the start. Choose STARTTLS (usually port 587), or port 465 with TLS.", port)
+			return fmt.Sprintf("Port %s doesn't use TLS from the start. Choose STARTTLS — %s.", port, portAdvice())
 		case certProblem:
 			return "The server's certificate isn't valid for this host name. Use the exact SMTP host name from your mail provider (not an IP address or an alias)."
 		}
