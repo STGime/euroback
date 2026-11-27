@@ -8,6 +8,7 @@
 // Run locally with: deno test --no-check bridge_test.ts
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { dbErrorReply } from "./bridge.ts";
 import type {
   ParentToWorker,
   SerializedRequest,
@@ -113,4 +114,14 @@ Deno.test("Headers tuples preserve case the way Headers normalises", () => {
   for (const [k, v] of serialized) rebuilt.set(k, v);
   assertEquals(rebuilt.get("content-type"), "application/json");
   assertEquals(rebuilt.get("x-custom"), "v1");
+});
+
+Deno.test("dbErrorReply passes SQLSTATE codes only", () => {
+  assertEquals(dbErrorReply(Object.assign(new Error("deadlock detected"), { code: "40P01" })), { error: "deadlock detected", code: "40P01" });
+  assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: "CONNECTION_CLOSED" })), { error: "x" });
+  assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: "4000" })), { error: "x" });
+  assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: 23505 })), { error: "x" });
+  assertEquals(dbErrorReply(new Error("retry shortly")), { error: "retry shortly" });
+  assertEquals(dbErrorReply("plain"), { error: "plain" });
+  assertEquals(dbErrorReply(null), { error: "null" });
 });

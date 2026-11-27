@@ -80,7 +80,11 @@
     if (!handler) return;
     pending.delete(msg.id);
     if (msg.error) {
-      handler.reject(new Error(String(msg.error)));
+      const err = new Error(String(msg.error));
+      // A database error's SQLSTATE (ctx.db.sql), like the driver's own
+      // errors: err.code === "40P01" etc.
+      if (typeof msg.code === "string") err.code = msg.code;
+      handler.reject(err);
       return;
     }
     if (Object.prototype.hasOwnProperty.call(msg, "rows")) {
