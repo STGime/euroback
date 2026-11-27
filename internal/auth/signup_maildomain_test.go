@@ -12,10 +12,19 @@ type fakeMailResolver struct {
 	mxErr   error
 	hosts   []string
 	hostErr error
+	asked   *[]string // names looked up, when set
 }
 
-func (f fakeMailResolver) LookupMX(context.Context, string) ([]*net.MX, error) { return f.mx, f.mxErr }
-func (f fakeMailResolver) LookupHost(context.Context, string) ([]string, error) {
+func (f fakeMailResolver) LookupMX(_ context.Context, name string) ([]*net.MX, error) {
+	if f.asked != nil {
+		*f.asked = append(*f.asked, name)
+	}
+	return f.mx, f.mxErr
+}
+func (f fakeMailResolver) LookupHost(_ context.Context, name string) ([]string, error) {
+	if f.asked != nil {
+		*f.asked = append(*f.asked, name)
+	}
 	return f.hosts, f.hostErr
 }
 
@@ -47,6 +56,28 @@ func TestCheckMailDomain(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
 		}
+	}
+}
+
+// Names are looked up absolute (no search list) and in punycode.
+func TestCheckMailDomain_AbsolutePunycodeName(t *testing.T) {
+	var asked []string
+	r := fakeMailResolver{mxErr: errNotFound, hosts: []string{"192.0.2.1"}, asked: &asked}
+	if v, _ := checkMailDomain(context.Background(), r, "münchen.de"); v != mailDomainOK {
+		t.Fatalf("münchen.de: verdict %d, want ok", v)
+	}
+	want := []string{"xn--mnchen-3ya.de.", "xn--mnchen-3ya.de."}
+	if len(asked) != 2 || asked[0] != want[0] || asked[1] != want[1] {
+		t.Fatalf("looked up %v, want %v", asked, want)
+	}
+	asked = nil
+	_, _ = checkMailDomain(context.Background(), r, "gmail.com")
+	if len(asked) == 0 || asked[0] != "gmail.com." {
+		t.Fatalf("looked up %v, want absolute gmail.com.", asked)
+	}
+	// A name IDNA can't convert is unknown (allowed), not refused.
+	if v, _ := checkMailDomain(context.Background(), r, "a\u00a0b.example"); v != mailDomainUnknown {
+		t.Fatalf("unconvertible name: verdict %d, want unknown", v)
 	}
 }
 

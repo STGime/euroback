@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 // ErrNoMailDomain refuses a platform signup whose email domain can't
@@ -46,10 +48,22 @@ const (
 // the caller lets through (abuse mitigation must not block real signups
 // during a DNS problem on our side).
 func checkMailDomain(ctx context.Context, r mailDomainResolver, domain string) (mailDomainVerdict, error) {
+	// Go's resolver doesn't convert internationalised names: it reports a
+	// non-ASCII name as "not found" without asking. Look up the punycode
+	// form; a name that can't be converted is "unknown" (allowed).
+	ascii, err := idna.Lookup.ToASCII(domain)
+	if err != nil || ascii == "" {
+		return mailDomainUnknown, err
+	}
+	// An absolute name, so the pod's DNS search list (cluster-internal
+	// suffixes) is never tried: fewer queries, and internal names can't
+	// pass as mail domains.
+	name := strings.TrimSuffix(ascii, ".") + "."
+
 	ctx, cancel := context.WithTimeout(ctx, mailDomainCheckTimeout)
 	defer cancel()
 
-	mxs, err := r.LookupMX(ctx, domain)
+	mxs, err := r.LookupMX(ctx, name)
 	switch {
 	case err == nil:
 		nullMX := false
@@ -68,7 +82,7 @@ func checkMailDomain(ctx context.Context, r mailDomainResolver, domain string) (
 		return mailDomainUnknown, err
 	}
 
-	hosts, err := r.LookupHost(ctx, domain)
+	hosts, err := r.LookupHost(ctx, name)
 	switch {
 	case err == nil && len(hosts) > 0:
 		return mailDomainOK, nil
