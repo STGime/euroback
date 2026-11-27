@@ -155,24 +155,33 @@ func ValidateTenantMigrationSQL(sql string) error {
 
 // forbiddenRefNameRe reads the object name after a schema qualifier: a
 // plain identifier or a double-quoted one.
-var forbiddenRefNameRe = regexp.MustCompile(`^\s*("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)`)
+var forbiddenRefNameRe = regexp.MustCompile(`^\s*("(?:[^"]|"")*"|[\p{L}_][\p{L}\p{N}_$]*)`)
 
 // forbiddenReference returns the forbidden qualified reference the scan
 // found at loc (in scanned, which has the same length as original), with
 // the object name read from the original text, e.g. `public.auth_uid`, so
-// the error says what to change. Capped at 80 characters.
+// the error says what to change. Capped at 80 characters; control
+// characters (possible inside a quoted name) become "?". When no name can
+// be read (a comment after the dot, end of input), it is "public.…".
 func forbiddenReference(original, scanned string, loc []int) string {
 	qual := strings.Join(strings.Fields(scanned[loc[0]:loc[1]]), "")
+	// stripSQLLiterals keeps every byte's position; the check guards the
+	// offset arithmetic should that ever change.
 	if len(original) != len(scanned) {
-		return qual + "..."
+		return qual + "…"
 	}
 	name := forbiddenRefNameRe.FindStringSubmatch(original[loc[1]:])
 	if name == nil {
-		return qual + "..."
+		return qual + "…"
 	}
-	ref := qual + name[1]
+	ref := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, qual+name[1])
 	if r := []rune(ref); len(r) > 80 {
-		ref = string(r[:80]) + "..."
+		ref = string(r[:80]) + "…"
 	}
 	return ref
 }

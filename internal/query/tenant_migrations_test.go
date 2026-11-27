@@ -177,6 +177,9 @@ func TestValidateTenantMigrationSQL_NamesForbiddenReference(t *testing.T) {
 		// A string literal before it doesn't either.
 		{`INSERT INTO t (s) VALUES ('it''s public. here'); SELECT public.helper_x();`, "(public.helper_x)"},
 		{`SELECT * FROM pg_catalog.pg_class;`, "(pg_catalog.pg_class)"},
+		{`SELECT public.über();`, "(public.über)"},
+		{"SELECT * FROM public.\"a\nb\x1b\";", `(public."a?b?")`},
+		{`SELECT public.`, "(public.…)"},
 	}
 	for _, tc := range cases {
 		err := ValidateTenantMigrationSQL(tc.sql)
