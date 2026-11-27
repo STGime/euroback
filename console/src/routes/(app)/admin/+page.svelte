@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { api, type AdminProject, type BlockedDomainEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
@@ -7,6 +7,53 @@
 	let newBlockedDomain = $state('');
 	let newBlockedReason = $state('');
 	let blockedBusy = $state(false);
+	// Server-side paging + search: the list can hold thousands of domains.
+	const BLOCKED_PAGE_SIZE = 50;
+	let blockedTotal = $state(0);
+	let blockedOffset = $state(0);
+	let blockedQuery = $state('');
+	let blockedLoading = $state(false);
+	let blockedSearchTimer: ReturnType<typeof setTimeout> | undefined;
+	let blockedRequest = 0;
+
+	async function loadBlockedDomains() {
+		const req = ++blockedRequest;
+		blockedLoading = true;
+		try {
+			const res = await api.adminListBlockedDomains({
+				q: blockedQuery.trim() || undefined,
+				limit: BLOCKED_PAGE_SIZE,
+				offset: blockedOffset
+			});
+			if (req !== blockedRequest) return; // a newer search / page won
+			// Deleting the last row of the last page: step back a page.
+			if (res.entries.length === 0 && res.total > 0 && blockedOffset > 0) {
+				blockedOffset = Math.max(0, Math.floor((res.total - 1) / BLOCKED_PAGE_SIZE) * BLOCKED_PAGE_SIZE);
+				return loadBlockedDomains();
+			}
+			blockedDomains = res.entries;
+			blockedTotal = res.total;
+		} catch (e: any) {
+			if (req === blockedRequest) error = e?.message ?? 'Failed to load blocked domains';
+		} finally {
+			if (req === blockedRequest) blockedLoading = false;
+		}
+	}
+
+	function onBlockedSearch() {
+		clearTimeout(blockedSearchTimer);
+		blockedSearchTimer = setTimeout(() => {
+			blockedOffset = 0;
+			loadBlockedDomains();
+		}, 250);
+	}
+
+	onDestroy(() => clearTimeout(blockedSearchTimer));
+
+	function blockedPage(delta: number) {
+		blockedOffset = Math.max(0, blockedOffset + delta * BLOCKED_PAGE_SIZE);
+		loadBlockedDomains();
+	}
 
 	// Top-of-page section navigation. The admin view is long (projects,
 	// users, blocked domains, team beta, contact triage), so
@@ -153,15 +200,14 @@
 		loading = true;
 		error = null;
 		try {
-			const [p, bd, tb, su, profile] = await Promise.all([
+			const [p, , tb, su, profile] = await Promise.all([
 				api.adminListAllProjects(),
-				api.adminListBlockedDomains(),
+				loadBlockedDomains(),
 				api.adminListTeamBetaUsers(),
 				api.adminListSignupUsers(),
 				api.getProfile(),
 			]);
 			projects = p.projects;
-			blockedDomains = bd.entries;
 			teamBeta = tb.entries;
 			signupUsers = su.users;
 			// Drop selections that no longer get product updates (their
@@ -376,7 +422,10 @@
 			await api.adminAddBlockedDomain(newBlockedDomain.trim(), newBlockedReason.trim() || undefined);
 			newBlockedDomain = '';
 			newBlockedReason = '';
-			await refresh();
+			// Show the new entry: it's newest, so first on an unfiltered page 1.
+			blockedQuery = '';
+			blockedOffset = 0;
+			await loadBlockedDomains();
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to block domain';
 		} finally {
@@ -390,7 +439,7 @@
 		error = null;
 		try {
 			await api.adminRemoveBlockedDomain(domain);
-			await refresh();
+			await loadBlockedDomains();
 		} catch (e: any) {
 			error = e?.message ?? 'Failed to unblock domain';
 		} finally {
@@ -605,8 +654,22 @@
 			</button>
 		</div>
 
-		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
-			<table class="w-full text-sm">
+		<div class="flex items-center justify-between gap-3">
+			<input
+				type="search"
+				bind:value={blockedQuery}
+				oninput={onBlockedSearch}
+				placeholder="Search domains…"
+				aria-label="Search blocked domains"
+				class="w-full max-w-xs rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+			/>
+			<span class="text-xs text-gray-500 whitespace-nowrap" aria-live="polite">
+				{#if blockedLoading}Loading…{:else}{blockedTotal.toLocaleString()} {blockedQuery.trim() ? 'matching' : 'blocked'}{/if}
+			</span>
+		</div>
+
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto" class:opacity-60={blockedLoading}>
+			<table class="w-full text-sm" aria-busy={blockedLoading}>
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
 						<th class="px-4 py-2">Domain</th>
@@ -616,10 +679,12 @@
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
-					{#if loading}
+					{#if (loading || blockedLoading) && blockedDomains.length === 0}
 						<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">Loading…</td></tr>
 					{:else if blockedDomains.length === 0}
-						<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">No blocked domains.</td></tr>
+						<tr><td colspan="4" class="px-4 py-6 text-center text-gray-400">
+							{blockedQuery.trim() ? 'No matching domains.' : 'No blocked domains.'}
+						</td></tr>
 					{:else}
 						{#each blockedDomains as d}
 							<tr>
@@ -642,6 +707,30 @@
 				</tbody>
 			</table>
 		</div>
+		{#if blockedTotal > BLOCKED_PAGE_SIZE}
+			<div class="flex items-center justify-end gap-3 text-xs text-gray-500">
+				<span>
+					{(blockedOffset + 1).toLocaleString()}–{Math.min(blockedOffset + BLOCKED_PAGE_SIZE, blockedTotal).toLocaleString()}
+					of {blockedTotal.toLocaleString()}
+				</span>
+				<button
+					type="button"
+					onclick={() => blockedPage(-1)}
+					disabled={blockedLoading || blockedOffset === 0}
+					class="rounded-md border border-gray-300 px-3 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+				>
+					Previous
+				</button>
+				<button
+					type="button"
+					onclick={() => blockedPage(1)}
+					disabled={blockedLoading || blockedOffset + BLOCKED_PAGE_SIZE >= blockedTotal}
+					class="rounded-md border border-gray-300 px-3 py-1 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+				>
+					Next
+				</button>
+			</div>
+		{/if}
 	</section>
 	{/if}
 

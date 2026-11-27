@@ -2685,9 +2685,19 @@ export class EurobaseAPI {
 		});
 	}
 
-	/** List all blocked signup domains. Superadmin only. */
-	async adminListBlockedDomains(): Promise<{ entries: BlockedDomainEntry[]; total: number }> {
-		return this.fetch<{ entries: BlockedDomainEntry[]; total: number }>('/platform/admin/blocked-domains');
+	/** One page of blocked signup domains, newest first; `q` filters by a
+	 * substring of the domain. `total` counts the matching rows. Superadmin only. */
+	async adminListBlockedDomains(
+		opts: { q?: string; limit?: number; offset?: number } = {}
+	): Promise<{ entries: BlockedDomainEntry[]; total: number; limit: number; offset: number }> {
+		const params = new URLSearchParams();
+		if (opts.q) params.set('q', opts.q);
+		if (opts.limit) params.set('limit', String(opts.limit));
+		if (opts.offset) params.set('offset', String(opts.offset));
+		const qs = params.toString();
+		return this.fetch<{ entries: BlockedDomainEntry[]; total: number; limit: number; offset: number }>(
+			`/platform/admin/blocked-domains${qs ? `?${qs}` : ''}`
+		);
 	}
 
 	/** Add a domain to the signup blocklist. Superadmin only. */
