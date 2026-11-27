@@ -75,6 +75,11 @@ spec:
               value: "8080"
             - name: METRICS_PORT
               value: "9100"
+            # Refuse platform signups whose email domain can't receive mail (no MX
+            # and no A/AAAA, or a null MX); a failed DNS lookup is logged and the
+            # signup allowed.
+            - name: SIGNUP_MX_CHECK
+              value: "true"
             # Scaleway's default security group on the Kapsule nodes blocks
             # outbound SMTP on 25/465/587; 2525 is open. Explains connect
             # timeouts on a blocked port as the block, and the console
