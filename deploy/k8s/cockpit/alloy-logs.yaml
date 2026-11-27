@@ -75,17 +75,43 @@ data:
     }
 
     loki.process "redact" {
+      // Cap line length first: Loki refuses very long lines, and every
+      // later stage runs regexes over the whole line.
+      stage.truncate {
+        rule {
+          limit  = "16KiB"
+          suffix = "…[truncated]"
+        }
+      }
+
       // Customer function output stays out. The runner's stdout also carries
       // what tenant code prints (console.log in the Worker, and the ctx.log
-      // mirror "[fn:<project>] LEVEL: …"); that is customer data, kept in
-      // edge_function_logs only. Keep the runner's own lines, the
-      // runner-written "[fn:<project>] Worker error" / "vault.get failed"
-      // lines (the failure reason for an invocation), and stack-trace
-      // continuation lines.
+      // mirror "[fn:<project>] LEVEL: …"); that stays in edge_function_logs.
+      // Keep the runner's own lines (prefixes below), the runner-written
+      // "[fn:<project>] Worker error" / "vault.get failed" lines, Deno's own
+      // "error: …" / "Warning" lines, and Deno-format stack frames.
+      // Tenant code shares the stdout, so it *can* print a line that starts
+      // with one of these prefixes: treat runner lines in Cockpit as hints,
+      // not proof. The rate limit below bounds what one tenant can push.
       stage.match {
-        selector            = `{app="functions"} !~ "^(\\[(runner|tenant-db|vault)\\]|\\[fn:[^\\]]+\\] (Worker error|vault\\.get failed)|Eurobase Function Runner|rejecting request|HMAC_SECRET|accepting unsigned|Failed to load function|\\s+at )"`
+        selector            = `{app="functions"} !~ "^(\\[(runner|tenant-db|vault)\\]|\\[fn\\] |\\[fn:[^\\]]+\\] (Worker error|vault\\.get failed)|Eurobase Function Runner|rejecting |HMAC_SECRET|accepting unsigned|Failed to load function|FATAL|error: |Warning|    at )"`
         action              = "drop"
         drop_counter_reason = "customer_function_output"
+      }
+      stage.match {
+        selector = `{app="functions"}`
+        stage.limit {
+          rate  = 20
+          burst = 200
+          drop  = true
+        }
+      }
+
+      // The message of a Worker error is the tenant's thrown Error message
+      // (often contains their users' data); keep only the error class.
+      stage.replace {
+        expression = `\] Worker error: (?:Uncaught (?:\(in promise\) )?)?(?:[A-Z][A-Za-z]*(?:Error|Exception):?\s*)?(.+)`
+        replace    = "[message not shipped]"
       }
 
       // slog JSON lines carry "level"; other lines (ingress, runner) don't.
@@ -102,21 +128,45 @@ data:
         values = { level = "" }
       }
 
-      // Email addresses: keep the first character and the domain, like
-      // email.MaskEmail ("a****@example.com"); also URL-encoded (%40).
+      // Passwords in connection strings (scheme://user:password@host);
+      // before the email rule, which would otherwise read user:password@host
+      // as an address.
       stage.replace {
-        expression = `[A-Za-z0-9._%+-]([A-Za-z0-9._%+-]*)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`
+        expression = `://[^:/@\s"]+:([^@\s/"]+)@`
+        replace    = "[redacted]"
+      }
+
+      // Email addresses: keep the first character and the domain, like
+      // email.MaskEmail ("a****@example.com"); also non-ASCII and
+      // URL-encoded (%40) addresses.
+      stage.replace {
+        expression = `[\p{L}\p{N}._%+-]([\p{L}\p{N}._%+-]*)@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.\p{L}{2,}`
         replace    = "****"
       }
       stage.replace {
-        expression = `[A-Za-z0-9._+-]([A-Za-z0-9._+-]*)%40[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`
+        expression = `[\p{L}\p{N}._+-]([\p{L}\p{N}._+-]*)%40[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.\p{L}{2,}`
         replace    = "****"
       }
 
+      // Phone numbers in international format (SMS sign-in logs them): keep
+      // the country prefix and the last two digits.
+      stage.replace {
+        expression = `\+\d{2}(\d{4,11})\d{2}\b`
+        replace    = "****"
+      }
+
+      // Paths and query strings of full URLs (customer webhook URLs often
+      // carry a secret in the path); the host stays.
+      stage.replace {
+        expression = `\bhttps?://[^/\s"'\\?#]+([/?#][^\s"'\\]*)`
+        replace    = "/[redacted]"
+      }
+
       // Credentials, should one ever reach a log line: JWTs, Eurobase API
-      // keys, webhook signing secrets, bearer / basic auth, X-Api-Key, and
+      // keys, webhook signing secrets, bearer / basic auth, X-Api-Key,
       // "key":"value" (JSON, also escaped inside a JSON string) or key=value
-      // (query string, logfmt) pairs named like a credential. Plain
+      // (logfmt) pairs named like a credential, and secret-bearing query
+      // parameters (nginx error lines carry the request line). Plain
       // "token: …" in prose (error messages) is left alone, and so is a bare
       // "secret" field: the worker logs the k8s Secret's *name* there.
       stage.replace {
@@ -141,6 +191,10 @@ data:
       }
       stage.replace {
         expression = `(?i)(?:^|[^A-Za-z0-9_])(?:apikey|api_key|token|access_token|refresh_token|id_token|token_hash|code_verifier|password|client_secret|jwt_secret|webhook_secret|signing_secret)=([^&\s,"\\]+)`
+        replace    = "[redacted]"
+      }
+      stage.replace {
+        expression = `(?i)[?&](?:code|otp|secret|sig|signature|x-amz-signature|x-amz-credential)=([^&\s"\\]+)`
         replace    = "[redacted]"
       }
 

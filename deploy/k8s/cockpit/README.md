@@ -107,31 +107,45 @@ pods in eurobase + ingress-nginx      alloy-logs pod                       Scale
 ```
 
 - **What:** every container's stdout/stderr in `eurobase` and `ingress-nginx`
-  (ingress access lines include client IPs), **except customer function
-  output**: in the functions runner only its own lines (`[runner]`,
-  `[tenant-db]`, `[vault]`, startup / request-rejection lines, the
-  runner-written `[fn:<project>] Worker error` / `vault.get failed` lines and
-  stack-trace continuations) are sent. What tenant code prints
-  (`console.log`, the `[fn:<project>] LEVEL:` mirror of `ctx.log`) stays in
-  `edge_function_logs`.
+  (ingress access lines include client IPs), lines cut at 16 KiB, **except
+  customer function output**: from the functions runner only lines with the
+  runner's own prefixes (`[runner]`, `[tenant-db]`, `[vault]`, `[fn] `,
+  startup / request-rejection / `FATAL` lines, Deno's `error:` / `Warning`
+  lines, Deno-format stack frames, and `[fn:<project>] Worker error` /
+  `vault.get failed`) are sent, at most 20 lines/s (burst 200). A Worker
+  error keeps the error class; its message (the tenant's text) is replaced.
+  What tenant code prints (`console.log`, the `[fn:<project>] LEVEL:` mirror
+  of `ctx.log`) stays in `edge_function_logs`. Tenant code shares the
+  runner's stdout, so it can print a line that starts with one of those
+  prefixes: read runner lines in Cockpit as hints, not proof.
 - **Labels:** `namespace`, `app`, `container`, `level` (only `DEBUG` / `INFO`
   / `WARN` / `ERROR` from slog's JSON `level`), plus `job` and `instance`
   (`namespace/pod:container`) added by `loki.source.kubernetes`. Project ids,
   user ids and emails stay in the line, never a label.
-- **Masked before sending:** email addresses, also URL-encoded
-  (`a****@example.com`, like `email.MaskEmail`); JWTs; `eb_pk_` / `eb_sk_` /
-  `eb_pat_` / `eb_ptk_` keys and `whsec_` secrets; `Bearer …` / `Basic …`;
-  `X-Api-Key`; values of `apikey`, `token`, `access_token`, `refresh_token`,
-  `id_token`, `token_hash`, `code_verifier`, `password`, `client_secret`,
-  `jwt_secret`, `webhook_secret`, `signing_secret` as JSON fields (also
-  escaped inside a JSON string) or `key=value`. A value containing an
-  escaped quote is only masked up to that quote.
+- **Masked before sending:** email addresses, also non-ASCII and
+  URL-encoded (`a****@example.com`, like `email.MaskEmail`); phone numbers in
+  international format (`+46****67`); paths and query strings of full URLs
+  (`https://host/[redacted]`); passwords in connection strings; JWTs;
+  `eb_pk_` / `eb_sk_` / `eb_pat_` / `eb_ptk_` keys and `whsec_` secrets;
+  `Bearer …` / `Basic …`; `X-Api-Key`; values of `apikey`, `token`,
+  `access_token`, `refresh_token`, `id_token`, `token_hash`, `code_verifier`,
+  `password`, `client_secret`, `jwt_secret`, `webhook_secret`,
+  `signing_secret` as JSON fields (also escaped inside a JSON string) or
+  `key=value`; query parameters `code`, `otp`, `secret`, `sig`, `signature`,
+  `X-Amz-Signature`, `X-Amz-Credential`. A value containing an escaped quote
+  is only masked up to that quote.
 - **Restarts:** read positions are kept in an emptyDir. When the collector
   pod is recreated (first apply, config change, node drain) it re-sends every
   container's retained log once (kubelet keeps ~10Mi per container), so
-  expect duplicates around that time. App deploys don't cause this.
+  expect duplicates around that time (Loki drops exact repeats on the same
+  stream, and refuses entries older than its accepted window with 400s in
+  the collector's log). App deploys don't cause this.
+- **Cockpit unreachable:** `loki.write` retries with backoff for a few
+  minutes, then drops the batch; reading pauses meanwhile, so memory stays
+  bounded. A long outage loses lines that kubelet rotates away.
 - **Access:** read pods and `pods/log` in the two namespaces (Roles, no
-  ClusterRole); egress only to DNS, the API server and HTTPS; no ingress.
+  ClusterRole); no ingress; egress to DNS and to TCP 443 / 6443 on any
+  address (the Cockpit push endpoint and the API server).
 - **Cost:** custom logs are billed per GB ingested (we produce well under
   0.1 GB a month); 7 days of retention are free.
 
