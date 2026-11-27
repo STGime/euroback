@@ -190,7 +190,11 @@ type Delivery struct {
 // surface the error rather than silently falling back to the
 // platform sender — the failure is what the operator needs to fix,
 // not a hidden retry that hides the problem.
-func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, subject, htmlBody string) (Delivery, error) {
+//
+// projectName is the name the recipient knows the app by (displayName);
+// the platform sender puts it in the sender name ("<app> via Eurobase",
+// ProjectSenderName). A custom sender keeps the project's own name.
+func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, projectName, to, subject, htmlBody string) (Delivery, error) {
 	if s.senderSvc != nil && projectID != "" {
 		sender, err := s.senderSvc.LoadForSend(ctx, projectID)
 		switch {
@@ -235,7 +239,21 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, to, sub
 	if reason, detail := s.platformSendSkip(ctx, to); reason != "" {
 		return Delivery{SkipReason: reason, SkipDetail: detail}, nil
 	}
-	id, err := s.client.SendWithID(ctx, to, subject, htmlBody)
+	name := ProjectSenderName(projectName, s.client.FromName())
+	if name == "" {
+		id, err := s.client.SendWithID(ctx, to, subject, htmlBody)
+		return Delivery{Via: ViaPlatform, MessageID: id}, err
+	}
+	id, err := s.client.WithFrom("", name).SendWithID(ctx, to, subject, htmlBody)
+	if rejectedSenderName(err) {
+		// The provider refused the request, and the only part a project
+		// controls in it besides the text is the sender name: send again
+		// under the platform's own name rather than fail the user's
+		// sign-in email.
+		slog.Warn("email: provider refused the project sender name, sent under the platform name",
+			"project_id", projectID, "error", err)
+		id, err = s.client.SendWithID(ctx, to, subject, htmlBody)
+	}
 	return Delivery{Via: ViaPlatform, MessageID: id}, err
 }
 
@@ -303,9 +321,10 @@ func (s *EmailService) sendVerificationEmail(ctx context.Context, projectID, pro
 
 	lang := s.Locale(ctx, projectID, schemaName, userID)
 	actionURL := linkWithLocale(ctx, appendTokenQuery(redirectURL, rawToken), lang)
+	name := s.displayName(ctx, projectID, projectName)
 	subject, body, err := RenderTemplateLocale("verification", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: s.displayName(ctx, projectID, projectName),
+		ProjectName: name,
 		ActionURL:   actionURL,
 		ExpiresIn:   expiresIn(lang, customHTML, "24h"),
 	})
@@ -313,7 +332,7 @@ func (s *EmailService) sendVerificationEmail(ctx context.Context, projectID, pro
 		return Delivery{Locale: lang}, fmt.Errorf("render verification email: %w", err)
 	}
 
-	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, name, userEmail, subject, body))
 }
 
 // SendPasswordResetEmail sends a password reset link to the end-user.
@@ -349,9 +368,10 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 
 	lang := s.Locale(ctx, projectID, schemaName, userID)
 	actionURL := linkWithLocale(ctx, appendTokenQuery(redirectURL, rawToken), lang)
+	name := s.displayName(ctx, projectID, projectName)
 	subject, body, err := RenderTemplateLocale("password_reset", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: s.displayName(ctx, projectID, projectName),
+		ProjectName: name,
 		ActionURL:   actionURL,
 		ExpiresIn:   expiresIn(lang, customHTML, "1h"),
 	})
@@ -359,7 +379,7 @@ func (s *EmailService) sendPasswordResetEmail(ctx context.Context, projectID, pr
 		return Delivery{Locale: lang}, fmt.Errorf("render password reset email: %w", err)
 	}
 
-	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, name, userEmail, subject, body))
 }
 
 // SendPasswordChangedEmail tells an end user their password was changed —
@@ -379,14 +399,15 @@ func (s *EmailService) sendPasswordChangedEmail(ctx context.Context, projectID, 
 		slog.Warn("failed to load custom template, using default", "error", err)
 	}
 	lang := s.Locale(ctx, projectID, schemaName, userID)
+	name := s.displayName(ctx, projectID, projectName)
 	subject, body, err := RenderTemplateLocale("password_changed", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: s.displayName(ctx, projectID, projectName),
+		ProjectName: name,
 	})
 	if err != nil {
 		return Delivery{Locale: lang}, fmt.Errorf("render password changed email: %w", err)
 	}
-	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, name, userEmail, subject, body))
 }
 
 // SendMagicLinkEmail sends a magic link sign-in email to the end-user.
@@ -422,9 +443,10 @@ func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projec
 
 	lang := s.Locale(ctx, projectID, schemaName, userID)
 	actionURL := linkWithLocale(ctx, appendTokenQuery(redirectURL, rawToken), lang)
+	name := s.displayName(ctx, projectID, projectName)
 	subject, body, err := RenderTemplateLocale("magic_link", lang, customSubject, customHTML, TemplateData{
 		UserEmail:   userEmail,
-		ProjectName: s.displayName(ctx, projectID, projectName),
+		ProjectName: name,
 		ActionURL:   actionURL,
 		ExpiresIn:   expiresIn(lang, customHTML, "15m"),
 	})
@@ -432,7 +454,7 @@ func (s *EmailService) sendMagicLinkEmail(ctx context.Context, projectID, projec
 		return Delivery{Locale: lang}, fmt.Errorf("render magic link email: %w", err)
 	}
 
-	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, userEmail, subject, body))
+	return withLocale(lang)(s.sendProjectScoped(ctx, projectID, name, userEmail, subject, body))
 }
 
 // SendPlatformPasswordResetEmail sends a password reset email for console users.

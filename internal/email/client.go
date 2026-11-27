@@ -129,6 +129,9 @@ func (c *EmailClient) WithFrom(fromEmail, fromName string) *EmailClient {
 // FromEmail is the sender address the client uses.
 func (c *EmailClient) FromEmail() string { return c.fromEmail }
 
+// FromName is the sender name the client uses.
+func (c *EmailClient) FromName() string { return c.fromName }
+
 // SendWithID is Send, returning TEM's email id ("" when unconfigured or
 // when the response carries none).
 func (c *EmailClient) SendWithID(ctx context.Context, to, subject, htmlBody string) (string, error) {
