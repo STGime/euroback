@@ -3,6 +3,7 @@ package tenant
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,20 +39,67 @@ func normalizeBlockedDomain(raw string) (string, bool) {
 	return d, true
 }
 
-// AdminListBlockedDomains returns every signup-blocklist entry.
+// Page size for the blocked-domains list. The list can hold thousands of
+// rows (a bulk-loaded disposable-email list), so it is paginated.
+const (
+	blockedDomainsDefaultLimit = 50
+	blockedDomainsMaxLimit     = 200
+)
+
+// blockedDomainsQuery reads ?q= (substring of the domain), ?limit= and
+// ?offset= for the blocked-domains list, clamped to sane values.
+func blockedDomainsQuery(r *http.Request) (q string, limit, offset int) {
+	v := r.URL.Query()
+	q = strings.ToLower(strings.TrimSpace(v.Get("q")))
+	if len(q) > 253 {
+		q = q[:253]
+	}
+	limit = blockedDomainsDefaultLimit
+	if n, err := strconv.Atoi(v.Get("limit")); err == nil && n > 0 {
+		limit = min(n, blockedDomainsMaxLimit)
+	}
+	if n, err := strconv.Atoi(v.Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
+	return q, limit, offset
+}
+
+// escapeLikePattern escapes LIKE's wildcards (and its escape character) so
+// a search matches the text literally.
+func escapeLikePattern(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// AdminListBlockedDomains returns one page of signup-blocklist entries,
+// newest first, optionally filtered by a substring of the domain.
+// Response: {entries, total (matching rows), limit, offset}.
 func AdminListBlockedDomains(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		q, limit, offset := blockedDomainsQuery(r)
+		pattern := "%" + escapeLikePattern(q) + "%"
+
+		var total int
+		if err := pool.QueryRow(r.Context(),
+			`SELECT count(*) FROM public.platform_blocked_signup_domains WHERE domain LIKE $1`,
+			pattern).Scan(&total); err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
 		rows, err := pool.Query(r.Context(),
 			`SELECT domain, reason, created_at
 			   FROM public.platform_blocked_signup_domains
-			  ORDER BY created_at DESC`)
+			  WHERE domain LIKE $1
+			  ORDER BY created_at DESC, domain
+			  LIMIT $2 OFFSET $3`,
+			pattern, limit, offset)
 		if err != nil {
 			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		out := make([]BlockedDomainEntry, 0)
+		out := make([]BlockedDomainEntry, 0, limit)
 		for rows.Next() {
 			var e BlockedDomainEntry
 			if err := rows.Scan(&e.Domain, &e.Reason, &e.CreatedAt); err != nil {
@@ -60,9 +108,15 @@ func AdminListBlockedDomains(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, e)
 		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"entries": out, "total": len(out)})
+		json.NewEncoder(w).Encode(map[string]any{
+			"entries": out, "total": total, "limit": limit, "offset": offset,
+		})
 	}
 }
 
