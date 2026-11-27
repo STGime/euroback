@@ -14,7 +14,8 @@ func TestProjectSenderName(t *testing.T) {
 		{"Café Ölstuga", "Eurobase", "Café Ölstuga via Eurobase"},
 		{"  spaced\t\tout  ", "Eurobase", "spaced out via Eurobase"},
 		{"Line\r\nBcc: x@y.z", "Eurobase", "Line Bcc x y.z via Eurobase"},
-		{`Evil" <admin@eurobase.app>`, "Eurobase", "Evil admin eurobase.app via Eurobase"},
+		{`Evil" <admin@example.org>`, "Eurobase", "Evil admin example.org via Eurobase"},
+		{`Evil" <admin@eurobase.app>`, "Eurobase", ""},
 		{"bidi‮evil", "Eurobase", "bidievil via Eurobase"},
 		{"zero​width", "Eurobase", "zerowidth via Eurobase"},
 		{"App", "", "App via Eurobase"},
@@ -71,5 +72,27 @@ func TestProjectSenderName_Truncates(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Fatal("cut name is not valid UTF-8")
+	}
+}
+
+func TestProjectSenderName_Brands(t *testing.T) {
+	for _, n := range []string{
+		"PayPal Security", "Pay Pal", "p-a-y-p-a-l", "PAYPA1 support", "g00gle accounts",
+		"Eurobase", "Eurobase Security", "Euro Base team", "Apple ID", "Microsoft 365",
+		"Outlook Team", "Hotmail", "DHL Express", "Sparkasse via Klarna", "BankID", "Révolut",
+		"ＰａｙＰａｌ", "office365 login",
+	} {
+		if got := ProjectSenderName(n, "Eurobase"); got != "" {
+			t.Errorf("ProjectSenderName(%q) = %q, want \"\" (platform name)", n, got)
+		}
+	}
+	for _, n := range []string{
+		"Innebandy pilot test", "Pineapple Club", "Delivery Hub", "Visual Studio Fans",
+		"Liveable City", "Stripes FC", "Ideally", "Seagull Sailing", "Applesauce",
+		"Gamla Stan Guide", "Euro Bakery", "SmartLegalPro",
+	} {
+		if got := ProjectSenderName(n, "Eurobase"); got != n+" via Eurobase" {
+			t.Errorf("ProjectSenderName(%q) = %q, want it kept", n, got)
+		}
 	}
 }

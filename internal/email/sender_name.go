@@ -32,6 +32,12 @@ const maxProjectSenderName = 40
 // which a mail client would decode into those characters) become spaces,
 // runs of spaces collapse, and it is cut at maxProjectSenderName
 // characters.
+//
+// A name that looks like Eurobase itself or a well-known brand (payment,
+// mail, big tech, banks, parcel services — impersonatesBrand) also gets
+// "" so the email goes out under the platform's own name: a project
+// can't send "PayPal Security via Eurobase". Only the sender name; the
+// name in the email text is unchanged.
 func ProjectSenderName(project, platform string) string {
 	var b strings.Builder
 	space := false
@@ -57,7 +63,7 @@ func ProjectSenderName(project, platform string) string {
 	if utf8.RuneCountInString(name) > maxProjectSenderName {
 		name = strings.TrimSpace(string([]rune(name)[:maxProjectSenderName])) + "…"
 	}
-	if name == "" {
+	if name == "" || impersonatesBrand(name) {
 		return ""
 	}
 	platform = strings.TrimSpace(platform)
@@ -74,4 +80,63 @@ func ProjectSenderName(project, platform string) string {
 func rejectedSenderName(err error) bool {
 	var te *TEMError
 	return errors.As(err, &te) && (te.Status == http.StatusBadRequest || te.Status == http.StatusUnprocessableEntity)
+}
+
+// brandWords are matched as whole words of a name; brandSquashed also
+// inside the name with spaces, punctuation and digit look-alikes removed
+// ("Pay Pal", "g00gle"), so only names long and specific enough not to
+// hit ordinary words.
+var (
+	brandWords = []string{
+		"eurobase", "scaleway",
+		"paypal", "stripe", "mollie", "klarna", "revolut", "n26", "visa", "mastercard", "amex",
+		"swish", "vipps", "mobilepay", "bankid", "itsme", "ideal", "twint",
+		"apple", "icloud", "google", "gmail", "microsoft", "outlook", "hotmail", "office365", "live",
+		"amazon", "aws", "facebook", "instagram", "whatsapp", "netflix", "linkedin", "spotify",
+		"dropbox", "docusign", "adobe", "ebay", "steam", "binance", "coinbase",
+		"dhl", "fedex", "postnord", "gls", "dpd",
+	}
+	brandSquashed = []string{
+		"eurobase", "scaleway", "paypal", "mollie", "klarna", "revolut", "mastercard", "bankid",
+		"icloud", "google", "gmail", "microsoft", "outlook", "hotmail", "office365",
+		"amazon", "facebook", "instagram", "whatsapp", "netflix", "linkedin", "spotify",
+		"dropbox", "docusign", "binance", "coinbase", "postnord",
+	}
+	leet = strings.NewReplacer("0", "o", "1", "l", "3", "e", "4", "a", "5", "s", "7", "t", "$", "s", "|", "l", "@", "a")
+)
+
+// impersonatesBrand reports whether name (already NFKC-folded) names
+// Eurobase or a well-known brand. Case and accents are ignored.
+func impersonatesBrand(name string) bool {
+	var folded strings.Builder
+	for _, r := range norm.NFKD.String(strings.ToLower(name)) {
+		if !unicode.Is(unicode.Mn, r) {
+			folded.WriteRune(r)
+		}
+	}
+	f := folded.String()
+	words := strings.FieldsFunc(f, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	for _, w := range words {
+		for _, b := range brandWords {
+			if w == b {
+				return true
+			}
+		}
+	}
+	squashed := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) {
+			return r
+		}
+		if r < 128 && strings.ContainsRune("013457$|@", r) {
+			return r
+		}
+		return -1
+	}, f)
+	squashed = leet.Replace(squashed)
+	for _, b := range brandSquashed {
+		if strings.Contains(squashed, b) {
+			return true
+		}
+	}
+	return false
 }
