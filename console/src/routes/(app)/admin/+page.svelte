@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
-	import { api, type AdminProject, type BlockedDomainEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient } from '$lib/api.js';
+	import { api, type AdminProject, type BlockedDomainEntry, type BlockedDomainSyncStatus, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
 	let blockedDomains = $state<BlockedDomainEntry[]>([]);
@@ -15,6 +15,7 @@
 	let blockedLoading = $state(false);
 	let blockedSearchTimer: ReturnType<typeof setTimeout> | undefined;
 	let blockedRequest = 0;
+	let blockedSync = $state<BlockedDomainSyncStatus | null>(null);
 
 	async function loadBlockedDomains() {
 		const req = ++blockedRequest;
@@ -33,6 +34,7 @@
 			}
 			blockedDomains = res.entries;
 			blockedTotal = res.total;
+			blockedSync = res.sync ?? null;
 		} catch (e: any) {
 			if (req === blockedRequest) error = e?.message ?? 'Failed to load blocked domains';
 		} finally {
@@ -433,8 +435,12 @@
 		}
 	}
 
-	async function removeBlockedDomain(domain: string) {
-		if (blockedBusy || !confirm(`Unblock ${domain}? New signups from this domain will be allowed again.`)) return;
+	async function removeBlockedDomain(domain: string, source: BlockedDomainEntry['source']) {
+		const msg =
+			source === 'disposable_list'
+				? `Unblock ${domain}? New signups from this domain will be allowed again, and the weekly list sync won't add it back.`
+				: `Unblock ${domain}? New signups from this domain will be allowed again.`;
+		if (blockedBusy || !confirm(msg)) return;
 		blockedBusy = true;
 		error = null;
 		try {
@@ -620,8 +626,21 @@
 		<p class="text-xs text-gray-500">
 			New platform signups from these domains (and their subdomains) are refused. Use this for
 			abuse / throwaway domains. It does not affect existing accounts — suspend or delete those from
-			Signup Users below.
+			Signup Users below. Entries marked <em>list</em> come from a public list of disposable email
+			providers, synced weekly; unblocking one keeps it out of later syncs.
 		</p>
+		{#if blockedSync?.last_run_at}
+			<p class="text-xs {blockedSync.error ? 'text-red-600' : 'text-gray-500'}">
+				{#if blockedSync.error}
+					Last list sync {new Date(blockedSync.last_run_at).toLocaleString()} failed: {blockedSync.error}.
+					{#if blockedSync.last_ok_at}Last successful: {new Date(blockedSync.last_ok_at).toLocaleString()}.{/if}
+				{:else}
+					List synced {new Date(blockedSync.last_run_at).toLocaleString()}:
+					{(blockedSync.list_size ?? 0).toLocaleString()} domains, {blockedSync.added ?? 0} added,
+					{blockedSync.removed ?? 0} removed.
+				{/if}
+			</p>
+		{/if}
 		<div class="flex gap-2 items-end">
 			<div class="flex-1">
 				<label for="blocked-new-domain" class="text-xs text-gray-500 block mb-1">Domain</label>
@@ -688,13 +707,22 @@
 					{:else}
 						{#each blockedDomains as d}
 							<tr>
-								<td class="px-4 py-2 font-mono text-gray-900">{d.domain}</td>
+								<td class="px-4 py-2 font-mono text-gray-900">
+									{d.domain}
+									<span
+										class="ml-2 rounded px-1.5 py-0.5 font-sans text-[10px] font-medium uppercase {d.source === 'disposable_list'
+											? 'bg-gray-100 text-gray-500'
+											: 'bg-amber-50 text-amber-700'}"
+									>
+										{d.source === 'disposable_list' ? 'list' : 'manual'}
+									</span>
+								</td>
 								<td class="px-4 py-2 text-gray-600">{d.reason ?? ''}</td>
 								<td class="px-4 py-2 text-gray-500">{new Date(d.created_at).toLocaleDateString()}</td>
 								<td class="px-4 py-2 text-right">
 									<button
 										type="button"
-										onclick={() => removeBlockedDomain(d.domain)}
+										onclick={() => removeBlockedDomain(d.domain, d.source)}
 										disabled={blockedBusy}
 										class="text-xs font-medium text-red-600 hover:text-red-700 disabled:opacity-40 cursor-pointer"
 									>

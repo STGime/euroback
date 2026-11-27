@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/eurobase/euroback/internal/audit"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,6 +21,20 @@ type BlockedDomainEntry struct {
 	Domain    string    `json:"domain"`
 	Reason    *string   `json:"reason,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+	// Source: "manual" (an admin added it) or "disposable_list" (the
+	// weekly sync, workers.StartDisposableDomainSync, added it).
+	Source string `json:"source"`
+}
+
+// BlockedDomainSyncStatus is the last run of the disposable-domain list
+// sync (public.platform_blocked_domain_sync).
+type BlockedDomainSyncStatus struct {
+	LastRunAt *time.Time `json:"last_run_at"`
+	LastOKAt  *time.Time `json:"last_ok_at"`
+	ListSize  *int       `json:"list_size"`
+	Added     *int       `json:"added"`
+	Removed   *int       `json:"removed"`
+	Error     *string    `json:"error,omitempty"`
 }
 
 // normalizeBlockedDomain lowercases, trims, and strips a leading "@" or
@@ -76,7 +92,7 @@ func escapeLikePattern(s string) string {
 
 // AdminListBlockedDomains returns one page of signup-blocklist entries,
 // newest first, optionally filtered by a substring of the domain.
-// Response: {entries, total (matching rows), limit, offset}.
+// Response: {entries, total (matching rows), limit, offset, sync}.
 func AdminListBlockedDomains(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q, limit, offset := blockedDomainsQuery(r)
@@ -91,7 +107,7 @@ func AdminListBlockedDomains(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		rows, err := pool.Query(r.Context(),
-			`SELECT domain, reason, created_at
+			`SELECT domain, reason, created_at, source
 			   FROM public.platform_blocked_signup_domains
 			  WHERE domain LIKE $1
 			  ORDER BY created_at DESC, domain
@@ -106,7 +122,7 @@ func AdminListBlockedDomains(pool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]BlockedDomainEntry, 0, limit)
 		for rows.Next() {
 			var e BlockedDomainEntry
-			if err := rows.Scan(&e.Domain, &e.Reason, &e.CreatedAt); err != nil {
+			if err := rows.Scan(&e.Domain, &e.Reason, &e.CreatedAt, &e.Source); err != nil {
 				http.Error(w, `{"error":"scan failed"}`, http.StatusInternalServerError)
 				return
 			}
@@ -117,9 +133,19 @@ func AdminListBlockedDomains(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		var sync BlockedDomainSyncStatus
+		if err := pool.QueryRow(r.Context(),
+			`SELECT last_run_at, last_ok_at, list_size, added, removed, error
+			   FROM public.platform_blocked_domain_sync WHERE id = 1`).Scan(
+			&sync.LastRunAt, &sync.LastOKAt, &sync.ListSize, &sync.Added, &sync.Removed, &sync.Error); err != nil &&
+			!errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"entries": out, "total": total, "limit": limit, "offset": offset,
+			"entries": out, "total": total, "limit": limit, "offset": offset, "sync": sync,
 		})
 	}
 }
@@ -141,11 +167,20 @@ func AdminAddBlockedDomain(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if _, err := pool.Exec(r.Context(),
-			`INSERT INTO public.platform_blocked_signup_domains (domain, reason)
-			 VALUES ($1, NULLIF($2, ''))
-			 ON CONFLICT (domain) DO UPDATE SET reason = EXCLUDED.reason`,
-			domain, strings.TrimSpace(req.Reason)); err != nil {
+		// A domain blocked by hand is "manual" (the list sync never removes
+		// it), and no longer excluded from the list.
+		if err := pgx.BeginFunc(r.Context(), pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(r.Context(),
+				`INSERT INTO public.platform_blocked_signup_domains (domain, reason, source)
+				 VALUES ($1, NULLIF($2, ''), 'manual')
+				 ON CONFLICT (domain) DO UPDATE SET reason = EXCLUDED.reason, source = 'manual'`,
+				domain, strings.TrimSpace(req.Reason)); err != nil {
+				return err
+			}
+			_, err := tx.Exec(r.Context(),
+				`DELETE FROM public.platform_blocked_domain_exclusions WHERE domain = $1`, domain)
+			return err
+		}); err != nil {
 			http.Error(w, `{"error":"insert failed"}`, http.StatusInternalServerError)
 			return
 		}
@@ -172,13 +207,32 @@ func AdminRemoveBlockedDomain(pool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, `{"error":"a valid domain is required"}`, http.StatusBadRequest)
 			return
 		}
-		tag, err := pool.Exec(r.Context(),
-			`DELETE FROM public.platform_blocked_signup_domains WHERE domain = $1`, domain)
-		if err != nil {
+		// Unblocking a domain that came from the disposable list records an
+		// exclusion, so the weekly sync doesn't add it back.
+		found := false
+		if err := pgx.BeginFunc(r.Context(), pool, func(tx pgx.Tx) error {
+			var source string
+			err := tx.QueryRow(r.Context(),
+				`DELETE FROM public.platform_blocked_signup_domains WHERE domain = $1 RETURNING source`,
+				domain).Scan(&source)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			found = true
+			if source == "disposable_list" {
+				_, err = tx.Exec(r.Context(),
+					`INSERT INTO public.platform_blocked_domain_exclusions (domain) VALUES ($1)
+					 ON CONFLICT (domain) DO NOTHING`, domain)
+			}
+			return err
+		}); err != nil {
 			http.Error(w, `{"error":"delete failed"}`, http.StatusInternalServerError)
 			return
 		}
-		if tag.RowsAffected() == 0 {
+		if !found {
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
 		}

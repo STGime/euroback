@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestBlockedDomainsQuery_Clamps(t *testing.T) {
@@ -123,5 +125,65 @@ func TestAdminListBlockedDomains_PaginatesAndFilters(t *testing.T) {
 	}
 	if p := get("q=ZZ-PAGETEST-X"); p.Total != 1 || p.Entries[0].Domain != "zz-pagetest-x.example" {
 		t.Fatalf("case-insensitive search: %+v", p)
+	}
+}
+
+// TestBlockedDomains_UnblockListDomainExcludes: unblocking a domain that
+// came from the disposable list records an exclusion (the weekly sync
+// won't re-add it); blocking it by hand again clears the exclusion and
+// makes the row manual.
+func TestBlockedDomains_UnblockListDomainExcludes(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	var ok bool
+	if err := pool.QueryRow(ctx,
+		`SELECT to_regclass('public.platform_blocked_domain_exclusions') IS NOT NULL`).Scan(&ok); err != nil || !ok {
+		t.Skip("migration 000163 not applied in the test database")
+	}
+	const d = "zz-unblock-test.example"
+	clean := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.platform_blocked_signup_domains WHERE domain = $1`, d)
+		_, _ = pool.Exec(ctx, `DELETE FROM public.platform_blocked_domain_exclusions WHERE domain = $1`, d)
+	}
+	clean()
+	t.Cleanup(clean)
+	if _, err := pool.Exec(ctx, `INSERT INTO public.platform_blocked_signup_domains (domain, reason, source)
+		VALUES ($1, 'list', 'disposable_list')`, d); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	r.Delete("/blocked-domains/{domain}", AdminRemoveBlockedDomain(pool))
+	r.Post("/blocked-domains", AdminAddBlockedDomain(pool))
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/blocked-domains/"+d, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unblock: status %d: %s", rec.Code, rec.Body.String())
+	}
+	var excluded bool
+	_ = pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.platform_blocked_domain_exclusions WHERE domain = $1)`, d).Scan(&excluded)
+	if !excluded {
+		t.Fatal("unblocking a list domain recorded no exclusion")
+	}
+
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/blocked-domains", strings.NewReader(`{"domain":"`+d+`"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("block: status %d: %s", rec.Code, rec.Body.String())
+	}
+	var source string
+	_ = pool.QueryRow(ctx, `SELECT source FROM public.platform_blocked_signup_domains WHERE domain = $1`, d).Scan(&source)
+	_ = pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.platform_blocked_domain_exclusions WHERE domain = $1)`, d).Scan(&excluded)
+	if source != "manual" || excluded {
+		t.Fatalf("after manual block: source %q, excluded %v; want manual, false", source, excluded)
+	}
+
+	// Unblocking a manual row records no exclusion.
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/blocked-domains/"+d, nil))
+	_ = pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.platform_blocked_domain_exclusions WHERE domain = $1)`, d).Scan(&excluded)
+	if rec.Code != http.StatusNoContent || excluded {
+		t.Fatalf("unblock manual: status %d, excluded %v", rec.Code, excluded)
 	}
 }

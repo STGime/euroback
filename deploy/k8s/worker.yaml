@@ -60,6 +60,10 @@ spec:
             # #653: publish the runner pooler's tenant userlist here.
             - name: PGB_USERLIST_SECRET
               value: pgbouncer-tenant-userlist
+            # Weekly sync of the signup blocklist with this public
+            # (CC0) list of disposable email domains; empty = off.
+            - name: DISPOSABLE_DOMAINS_URL
+              value: https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/main/disposable_email_blocklist.conf
             - name: ENVIRONMENT
               valueFrom:
                 configMapKeyRef:

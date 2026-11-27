@@ -395,6 +395,18 @@ export interface BlockedDomainEntry {
 	domain: string;
 	reason: string | null;
 	created_at: string;
+	/** 'manual' (added by an admin) or 'disposable_list' (weekly list sync). */
+	source: 'manual' | 'disposable_list';
+}
+
+/** Last run of the weekly disposable-domain list sync. */
+export interface BlockedDomainSyncStatus {
+	last_run_at: string | null;
+	last_ok_at: string | null;
+	list_size: number | null;
+	added: number | null;
+	removed: number | null;
+	error?: string | null;
 }
 
 // One row on GET /platform/admin/broadcast/audience — the deduped
@@ -2689,15 +2701,19 @@ export class EurobaseAPI {
 	 * substring of the domain. `total` counts the matching rows. Superadmin only. */
 	async adminListBlockedDomains(
 		opts: { q?: string; limit?: number; offset?: number } = {}
-	): Promise<{ entries: BlockedDomainEntry[]; total: number; limit: number; offset: number }> {
+	): Promise<{
+		entries: BlockedDomainEntry[];
+		total: number;
+		limit: number;
+		offset: number;
+		sync: BlockedDomainSyncStatus;
+	}> {
 		const params = new URLSearchParams();
 		if (opts.q) params.set('q', opts.q);
 		if (opts.limit) params.set('limit', String(opts.limit));
 		if (opts.offset) params.set('offset', String(opts.offset));
 		const qs = params.toString();
-		return this.fetch<{ entries: BlockedDomainEntry[]; total: number; limit: number; offset: number }>(
-			`/platform/admin/blocked-domains${qs ? `?${qs}` : ''}`
-		);
+		return this.fetch(`/platform/admin/blocked-domains${qs ? `?${qs}` : ''}`);
 	}
 
 	/** Add a domain to the signup blocklist. Superadmin only. */
