@@ -17,6 +17,10 @@
 					Once configured and verified, all auth emails for your project (verification, password reset, magic link) route through your SMTP instead of the platform sender. The platform "emails per hour" cap no longer applies to your sends &mdash; you're now bounded by your provider's own limits.
 				</p>
 
+				<p class="text-sm text-gray-700 leading-relaxed">
+					Without custom SMTP, auth emails come from <code class="bg-gray-100 border border-gray-200 rounded px-1">noreply@eurobase.app</code> with your app's name in the sender name, e.g. <strong>Acme via Eurobase</strong> (the app name from Auth settings, else the project name; up to 40 characters). Your users see an app they signed up to, not only "Eurobase". With custom SMTP, the from address and name are the ones you set.
+				</p>
+
 				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>
 				<p class="text-sm text-gray-700 leading-relaxed">
 					In the console: <strong>Auth &rarr; SMTP</strong> tab. Only project admins can configure this &mdash; members with the "developer" or "viewer" role can't see the credentials. If a project drops back to Free, a sender saved earlier is kept but not used, and auth emails go out through Eurobase's sender; after upgrading again, run a test send to use it again.
