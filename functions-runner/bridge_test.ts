@@ -116,11 +116,16 @@ Deno.test("Headers tuples preserve case the way Headers normalises", () => {
   assertEquals(rebuilt.get("x-custom"), "v1");
 });
 
-Deno.test("dbErrorReply passes SQLSTATE codes only", () => {
-  assertEquals(dbErrorReply(Object.assign(new Error("deadlock detected"), { code: "40P01" })), { error: "deadlock detected", code: "40P01" });
+Deno.test("dbErrorReply passes SQLSTATE codes of server errors only", () => {
+  const pg = (message: string, code: unknown) => Object.assign(new Error(message), { name: "PostgresError", severity: "ERROR", code });
+  assertEquals(dbErrorReply(pg("deadlock detected", "40P01")), { error: "deadlock detected", code: "40P01" });
+  assertEquals(dbErrorReply(Object.assign(new Error("x"), { severity: "ERROR", code: "23505" })), { error: "x", code: "23505" });
+  // Driver connection errors: not from the server, even when five letters.
+  assertEquals(dbErrorReply(Object.assign(new Error("write EPIPE"), { code: "EPIPE" })), { error: "write EPIPE" });
   assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: "CONNECTION_CLOSED" })), { error: "x" });
-  assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: "4000" })), { error: "x" });
-  assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: 23505 })), { error: "x" });
+  assertEquals(dbErrorReply(Object.assign(new Error("x"), { code: "23505" })), { error: "x" });
+  assertEquals(dbErrorReply(pg("x", "4000")), { error: "x" });
+  assertEquals(dbErrorReply(pg("x", 23505)), { error: "x" });
   assertEquals(dbErrorReply(new Error("retry shortly")), { error: "retry shortly" });
   assertEquals(dbErrorReply("plain"), { error: "plain" });
   assertEquals(dbErrorReply(null), { error: "null" });

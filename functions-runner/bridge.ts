@@ -85,16 +85,20 @@ export type WorkerToParent =
   | { type: "log"; level: "INFO" | "WARN" | "ERROR"; msg: string; data?: unknown };
 
 // SQLSTATE codes are five digits or upper-case letters (e.g. 23505,
-// 40P01, 42501). The driver also puts its own names in `code` for
-// connection problems (CONNECTION_CLOSED, ECONNREFUSED); those aren't
+// 40P01, 42501). Only errors the database server sent carry one: the
+// driver's PostgresError (name "PostgresError", with a `severity`). Its
+// own connection errors put other names in `code` (CONNECTION_CLOSED,
+// and errno names like EPIPE that are five letters too); those aren't
 // passed on.
 const sqlstateRe = /^[0-9A-Z]{5}$/;
 
 // dbErrorReply is the error part of a db.sql.result: the message, plus
-// the SQLSTATE when err is a database error. The runner's own errors
-// (retryable "… retry shortly", permission checks) carry no code.
+// the SQLSTATE when err is a database server error. The runner's own
+// errors (retryable "… retry shortly", permission checks) carry no code.
 export function dbErrorReply(err: unknown): { error: string; code?: string } {
   const error = err instanceof Error ? err.message : String(err);
-  const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === "string" && sqlstateRe.test(code) ? { error, code } : { error };
+  const e = err as { name?: unknown; severity?: unknown; code?: unknown } | null;
+  const fromServer = e != null && (e.name === "PostgresError" || typeof e.severity === "string");
+  const code = e?.code;
+  return fromServer && typeof code === "string" && sqlstateRe.test(code) ? { error, code } : { error };
 }

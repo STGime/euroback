@@ -83,7 +83,12 @@
       const err = new Error(String(msg.error));
       // A database error's SQLSTATE (ctx.db.sql), like the driver's own
       // errors: err.code === "40P01" etc.
-      if (typeof msg.code === "string") err.code = msg.code;
+      // defineProperty, not assignment: user code may have made `code`
+      // read-only on Error.prototype, and a throw here would leave the
+      // call pending forever.
+      if (typeof msg.code === "string") {
+        Object.defineProperty(err, "code", { value: msg.code, writable: true, enumerable: true, configurable: true });
+      }
       handler.reject(err);
       return;
     }

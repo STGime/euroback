@@ -550,6 +550,7 @@ Deno.test("ctx.db.sql errors carry the SQLSTATE as err.code", async () => {
     userCode: `
       async function handler(req, ctx) {
         const out = [];
+        Object.defineProperty(Error.prototype, "code", { value: undefined, writable: false, configurable: true });
         for (const q of ["dup", "plain", "conn"]) {
           try { await ctx.db.sql(q); } catch (e) { out.push([e.message, e.code ?? null]); }
         }
@@ -557,8 +558,10 @@ Deno.test("ctx.db.sql errors carry the SQLSTATE as err.code", async () => {
       }
     `,
     dbSqlHandler: (query) => {
-      if (query === "dup") throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
-      if (query === "conn") throw Object.assign(new Error("write CONNECTION_CLOSED"), { code: "CONNECTION_CLOSED" });
+      if (query === "dup") {
+        throw Object.assign(new Error("duplicate key value violates unique constraint"), { name: "PostgresError", severity: "ERROR", code: "23505" });
+      }
+      if (query === "conn") throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
       throw new Error("the database is busy for this project; retry shortly");
     },
   });
@@ -566,6 +569,6 @@ Deno.test("ctx.db.sql errors carry the SQLSTATE as err.code", async () => {
   assertEquals(JSON.parse(result.body!), [
     ["duplicate key value violates unique constraint", "23505"],
     ["the database is busy for this project; retry shortly", null],
-    ["write CONNECTION_CLOSED", null],
+    ["write EPIPE", null],
   ]);
 });
