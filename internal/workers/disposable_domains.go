@@ -33,7 +33,9 @@ import (
 //     than disposableMinDomains / more than disposableMaxDomains usable
 //     entries;
 //   - an entry is, or is a parent of, a protected mail provider
-//     (protectedMailDomains), e.g. "gmail.com" or "com";
+//     (protectedMailDomains), e.g. "gmail.com" or "co.uk" for
+//     "hotmail.co.uk" (single-label entries like "com" are skipped as
+//     non-domains before that);
 //   - it would add more than disposableMaxAdded or remove more than
 //     disposableMaxRemovedShare of the list's current rows (a truncated or
 //     rewritten list), except when the list has no rows yet.
@@ -48,7 +50,9 @@ const (
 	disposableMaxBytes        = 8 << 20
 	disposableMinDomains      = 5000
 	disposableMaxDomains      = 200000
-	disposableMaxAdded        = 5000
+	// Normal upstream churn is tens of domains a week; a bigger jump means
+	// a rewritten or tampered list.
+	disposableMaxAdded        = 500
 	disposableMaxRemovedShare = 0.10
 	disposableListReason      = "disposable email (disposable-email-domains list)"
 	disposableLockKey         = "eurobase/disposable-domain-sync"
@@ -57,14 +61,38 @@ const (
 // protectedMailDomains are providers real users sign up with. A list that
 // contains one of them, or a parent of one, is refused as a whole.
 var protectedMailDomains = []string{
-	"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
-	"msn.com", "yahoo.com", "ymail.com", "icloud.com", "me.com", "mac.com",
-	"aol.com", "proton.me", "protonmail.com", "pm.me", "tutanota.com",
-	"tuta.io", "gmx.de", "gmx.net", "gmx.at", "gmx.ch", "web.de",
-	"t-online.de", "freenet.de", "posteo.de", "mailbox.org", "orange.fr",
-	"free.fr", "laposte.net", "sfr.fr", "libero.it", "virgilio.it",
-	"seznam.cz", "wp.pl", "o2.pl", "onet.pl", "interia.pl", "yandex.com",
-	"zoho.com", "fastmail.com", "hey.com", "eurobase.app",
+	// Google, Microsoft, Yahoo, Apple, AOL (incl. country variants)
+	"gmail.com", "googlemail.com",
+	"outlook.com", "outlook.de", "outlook.fr", "outlook.es", "outlook.it",
+	"hotmail.com", "hotmail.co.uk", "hotmail.fr", "hotmail.de", "hotmail.es", "hotmail.it", "hotmail.nl", "hotmail.be", "hotmail.se",
+	"live.com", "live.co.uk", "live.fr", "live.de", "live.nl", "live.se", "live.be", "live.it",
+	"msn.com", "windowslive.com",
+	"yahoo.com", "yahoo.co.uk", "yahoo.fr", "yahoo.de", "yahoo.es", "yahoo.it", "ymail.com", "rocketmail.com",
+	"icloud.com", "me.com", "mac.com", "privaterelay.appleid.com",
+	"aol.com", "aol.de", "aol.fr", "aim.com",
+	// Privacy providers and relays
+	"proton.me", "protonmail.com", "protonmail.ch", "pm.me", "passmail.net", "passinbox.com",
+	"tutanota.com", "tutanota.de", "tuta.io", "tuta.com", "tutamail.com",
+	"duck.com", "mozmail.com", "simplelogin.com", "simplelogin.co", "aleeas.com", "slmail.me",
+	"fastmail.com", "fastmail.fm", "hey.com", "zoho.com", "zohomail.eu",
+	// European providers and ISPs
+	"gmx.de", "gmx.net", "gmx.at", "gmx.ch", "gmx.com", "gmx.fr", "gmx.co.uk", "mail.com",
+	"web.de", "t-online.de", "freenet.de", "posteo.de", "posteo.net", "mailbox.org", "1und1.de", "arcor.de", "vodafone.de",
+	"orange.fr", "wanadoo.fr", "free.fr", "laposte.net", "sfr.fr", "neuf.fr", "bbox.fr",
+	"libero.it", "virgilio.it", "tiscali.it", "alice.it", "tim.it",
+	"telefonica.net", "movistar.es",
+	"ziggo.nl", "kpnmail.nl", "planet.nl", "home.nl", "xs4all.nl",
+	"skynet.be", "telenet.be", "proximus.be",
+	"bluewin.ch", "sunrise.ch",
+	"btinternet.com", "sky.com", "virginmedia.com", "talktalk.net",
+	"telia.com", "comhem.se", "bredband.net", "online.no", "telenor.no", "elisa.fi", "kolumbus.fi",
+	"seznam.cz", "centrum.cz", "email.cz", "wp.pl", "o2.pl", "onet.pl", "interia.pl",
+	"sapo.pt", "abv.bg", "freemail.hu", "citromail.hu", "inbox.lv", "mail.ee",
+	// Large providers elsewhere
+	"comcast.net", "verizon.net", "att.net", "sbcglobal.net",
+	"yandex.com", "yandex.ru", "mail.ru", "qq.com", "163.com", "126.com", "naver.com", "daum.net",
+	// Ourselves
+	"eurobase.app",
 }
 
 var plainDomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -77,7 +105,7 @@ func StartDisposableDomainSync(ctx context.Context, pool *pgxpool.Pool) {
 		slog.Info("disposable domain sync disabled: DISPOSABLE_DOMAINS_URL not set")
 		return
 	}
-	client := &http.Client{Timeout: disposableHTTPTimeout}
+	client := &http.Client{Timeout: disposableHTTPTimeout, CheckRedirect: httpsSameHostRedirect}
 	go func() {
 		ticker := time.NewTicker(disposableCheckEvery)
 		defer ticker.Stop()
@@ -94,6 +122,29 @@ func StartDisposableDomainSync(ctx context.Context, pool *pgxpool.Pool) {
 			}
 		}
 	}()
+}
+
+// httpsSameHostRedirect allows a redirect only to https on the same host.
+func httpsSameHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 3 {
+		return errors.New("too many redirects")
+	}
+	if req.URL.Scheme != "https" || req.URL.Host != via[0].URL.Host {
+		return fmt.Errorf("redirect to %s://%s refused", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func disposableSyncDue(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
@@ -156,7 +207,7 @@ func syncDisposableDomains(ctx context.Context, pool *pgxpool.Pool, client *http
 	if resp.StatusCode != http.StatusOK {
 		return DisposableSyncResult{}, fmt.Errorf("download: HTTP %d", resp.StatusCode)
 	}
-	domains, err := parseDisposableList(io.LimitReader(resp.Body, disposableMaxBytes+1))
+	domains, err := parseDisposableList(resp.Body)
 	if err != nil {
 		return DisposableSyncResult{}, err
 	}
@@ -170,16 +221,16 @@ func syncDisposableDomains(ctx context.Context, pool *pgxpool.Pool, client *http
 func parseDisposableList(r io.Reader) ([]string, error) {
 	seen := map[string]struct{}{}
 	var out []string
-	sc := bufio.NewScanner(r)
+	// Count raw bytes (line endings included) and read one byte past the
+	// limit, so an oversized list is refused rather than cut mid-line.
+	cr := &countingReader{r: io.LimitReader(r, disposableMaxBytes+1)}
+	sc := bufio.NewScanner(cr)
 	sc.Buffer(make([]byte, 0, 64*1024), 64*1024)
-	read := 0
 	for sc.Scan() {
-		line := sc.Text()
-		read += len(line) + 1
-		if read > disposableMaxBytes {
+		if cr.n > disposableMaxBytes {
 			return nil, fmt.Errorf("list larger than %d bytes", disposableMaxBytes)
 		}
-		d := strings.ToLower(strings.TrimSpace(line))
+		d := strings.ToLower(strings.TrimSpace(sc.Text()))
 		if d == "" || strings.HasPrefix(d, "#") {
 			continue
 		}
@@ -201,6 +252,9 @@ func parseDisposableList(r io.Reader) ([]string, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("reading list: %w", err)
+	}
+	if cr.n > disposableMaxBytes {
+		return nil, fmt.Errorf("list larger than %d bytes", disposableMaxBytes)
 	}
 	if len(out) < disposableMinDomains {
 		return nil, fmt.Errorf("list has %d usable domains, fewer than %d", len(out), disposableMinDomains)

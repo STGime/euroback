@@ -28,7 +28,7 @@ func listOf(n int, extra ...string) string {
 
 func TestParseDisposableList(t *testing.T) {
 	got, err := parseDisposableList(strings.NewReader(listOf(disposableMinDomains,
-		"MixedCase.Example", "trailing-dot.example.", "co.uk", "com.de", "not a domain", "x_y.example",
+		"MixedCase.Example", "trailing-dot.example.", "github.io", "not a domain", "x_y.example",
 		"zz-disp-00001.example")))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -40,7 +40,7 @@ func TestParseDisposableList(t *testing.T) {
 	if !set["mixedcase.example"] || !set["trailing-dot.example"] {
 		t.Errorf("normalisation: lowercase / trailing dot not applied")
 	}
-	for _, bad := range []string{"co.uk", "not a domain", "x_y.example"} {
+	for _, bad := range []string{"github.io", "not a domain", "x_y.example"} {
 		if set[bad] {
 			t.Errorf("%q should be skipped", bad)
 		}
@@ -53,7 +53,7 @@ func TestParseDisposableList(t *testing.T) {
 func TestParseDisposableList_Refusals(t *testing.T) {
 	cases := map[string]string{
 		"protected provider":           listOf(disposableMinDomains, "gmail.com"),
-		"parent of a protected domain": listOf(disposableMinDomains, "proton.me", "me"),
+		"parent of a protected domain": listOf(disposableMinDomains, "co.uk"),
 		"too few":                      listOf(disposableMinDomains - 1),
 	}
 	for name, body := range cases {
@@ -63,8 +63,8 @@ func TestParseDisposableList_Refusals(t *testing.T) {
 	}
 	// Single-label entries ("me", "de") never get that far (no dot), but
 	// the parent check covers them anyway.
-	if p := protectedParentOf("mail.com"); p != "" {
-		t.Errorf("mail.com is not a parent of a protected domain, got %q", p)
+	if p := protectedParentOf("example-mail.com"); p != "" {
+		t.Errorf("example-mail.com is not a parent of a protected domain, got %q", p)
 	}
 	if p := protectedParentOf("de"); p == "" {
 		t.Errorf("de is a parent of gmx.de")
@@ -194,5 +194,31 @@ func TestDisposableDomainSync(t *testing.T) {
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
 	if _, err := syncDisposableDomains(ctx, pool, srv.Client(), srv.URL); err == nil {
 		t.Fatal("404 accepted")
+	}
+}
+
+func TestParseDisposableList_CRLFAndExactLimit(t *testing.T) {
+	crlf := strings.ReplaceAll(listOf(disposableMinDomains), "\n", "\r\n")
+	if _, err := parseDisposableList(strings.NewReader(crlf)); err != nil {
+		t.Fatalf("CRLF list refused: %v", err)
+	}
+	// Over the limit only through the CRLF bytes: still refused.
+	line := strings.Repeat("a", 60) + ".example\r\n"
+	big := strings.Repeat(line, disposableMaxBytes/len(line)+1)
+	if _, err := parseDisposableList(strings.NewReader(big)); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversized CRLF list: err %v, want 'larger than'", err)
+	}
+}
+
+func TestHTTPSSameHostRedirect(t *testing.T) {
+	mk := func(u string) *http.Request { r, _ := http.NewRequest(http.MethodGet, u, nil); return r }
+	via := []*http.Request{mk("https://raw.example.org/list.conf")}
+	if err := httpsSameHostRedirect(mk("https://raw.example.org/other.conf"), via); err != nil {
+		t.Errorf("same-host https redirect refused: %v", err)
+	}
+	for _, u := range []string{"http://raw.example.org/list.conf", "https://evil.example/list.conf"} {
+		if err := httpsSameHostRedirect(mk(u), via); err == nil {
+			t.Errorf("redirect to %s allowed", u)
+		}
 	}
 }

@@ -207,26 +207,21 @@ func AdminRemoveBlockedDomain(pool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, `{"error":"a valid domain is required"}`, http.StatusBadRequest)
 			return
 		}
-		// Unblocking a domain that came from the disposable list records an
-		// exclusion, so the weekly sync doesn't add it back.
+		// Unblocking records an exclusion, so the weekly list sync doesn't
+		// add the domain back (whether it came from the list or was added
+		// by hand and is on the list too). Blocking it again by hand clears
+		// the exclusion.
 		found := false
 		if err := pgx.BeginFunc(r.Context(), pool, func(tx pgx.Tx) error {
-			var source string
-			err := tx.QueryRow(r.Context(),
-				`DELETE FROM public.platform_blocked_signup_domains WHERE domain = $1 RETURNING source`,
-				domain).Scan(&source)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			if err != nil {
+			tag, err := tx.Exec(r.Context(),
+				`DELETE FROM public.platform_blocked_signup_domains WHERE domain = $1`, domain)
+			if err != nil || tag.RowsAffected() == 0 {
 				return err
 			}
 			found = true
-			if source == "disposable_list" {
-				_, err = tx.Exec(r.Context(),
-					`INSERT INTO public.platform_blocked_domain_exclusions (domain) VALUES ($1)
-					 ON CONFLICT (domain) DO NOTHING`, domain)
-			}
+			_, err = tx.Exec(r.Context(),
+				`INSERT INTO public.platform_blocked_domain_exclusions (domain) VALUES ($1)
+				 ON CONFLICT (domain) DO NOTHING`, domain)
 			return err
 		}); err != nil {
 			http.Error(w, `{"error":"delete failed"}`, http.StatusInternalServerError)

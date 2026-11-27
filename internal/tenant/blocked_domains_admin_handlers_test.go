@@ -128,10 +128,9 @@ func TestAdminListBlockedDomains_PaginatesAndFilters(t *testing.T) {
 	}
 }
 
-// TestBlockedDomains_UnblockListDomainExcludes: unblocking a domain that
-// came from the disposable list records an exclusion (the weekly sync
-// won't re-add it); blocking it by hand again clears the exclusion and
-// makes the row manual.
+// TestBlockedDomains_UnblockListDomainExcludes: unblocking a domain
+// records an exclusion (the weekly sync won't re-add it); blocking it by
+// hand again clears the exclusion and makes the row manual.
 func TestBlockedDomains_UnblockListDomainExcludes(t *testing.T) {
 	pool := setupTestDB(t)
 	ctx := context.Background()
@@ -179,11 +178,12 @@ func TestBlockedDomains_UnblockListDomainExcludes(t *testing.T) {
 		t.Fatalf("after manual block: source %q, excluded %v; want manual, false", source, excluded)
 	}
 
-	// Unblocking a manual row records no exclusion.
+	// Unblocking a manual row records an exclusion too (it may also be on
+	// the list, and the sync must not add it back).
 	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/blocked-domains/"+d, nil))
 	_ = pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.platform_blocked_domain_exclusions WHERE domain = $1)`, d).Scan(&excluded)
-	if rec.Code != http.StatusNoContent || excluded {
-		t.Fatalf("unblock manual: status %d, excluded %v", rec.Code, excluded)
+	if rec.Code != http.StatusNoContent || !excluded {
+		t.Fatalf("unblock manual: status %d, excluded %v; want 204, true", rec.Code, excluded)
 	}
 }
