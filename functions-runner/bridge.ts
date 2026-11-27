@@ -53,7 +53,9 @@ export type ParentToWorker =
     }
   // RPC result for `db.sql`. Mirrors the call's `id` so async handlers
   // route to the right Promise.
-  | { type: "db.sql.result"; id: string; rows?: unknown; error?: string }
+  // `code` is the database's SQLSTATE when the error came from Postgres
+  // (dbErrorReply), so the function can tell e.g. 40P01 from 23505.
+  | { type: "db.sql.result"; id: string; rows?: unknown; error?: string; code?: string }
   // RPC result for `vault.get`. `error` is set for platform-side
   // failures (key unconfigured, lookup/decrypt failure, #201) and makes
   // the worker's RPC layer throw; a missing secret is value: null with
@@ -81,3 +83,22 @@ export type WorkerToParent =
   | { type: "storage.signed_url.call"; id: string; key: string; operation: "upload" | "download"; expiresIn?: number; contentType?: string }
   | { type: "storage.delete.call"; id: string; key: string }
   | { type: "log"; level: "INFO" | "WARN" | "ERROR"; msg: string; data?: unknown };
+
+// SQLSTATE codes are five digits or upper-case letters (e.g. 23505,
+// 40P01, 42501). Only errors the database server sent carry one: the
+// driver's PostgresError (name "PostgresError", with a `severity`). Its
+// own connection errors put other names in `code` (CONNECTION_CLOSED,
+// and errno names like EPIPE that are five letters too); those aren't
+// passed on.
+const sqlstateRe = /^[0-9A-Z]{5}$/;
+
+// dbErrorReply is the error part of a db.sql.result: the message, plus
+// the SQLSTATE when err is a database server error. The runner's own
+// errors (retryable "… retry shortly", permission checks) carry no code.
+export function dbErrorReply(err: unknown): { error: string; code?: string } {
+  const error = err instanceof Error ? err.message : String(err);
+  const e = err as { name?: unknown; severity?: unknown; code?: unknown } | null;
+  const fromServer = e != null && (e.name === "PostgresError" || typeof e.severity === "string");
+  const code = e?.code;
+  return fromServer && typeof code === "string" && sqlstateRe.test(code) ? { error, code } : { error };
+}

@@ -19,6 +19,7 @@
 // CI runs these via the test-functions-runner job (.github/workflows/ci.yml).
 
 import { assert, assertEquals, assertStrictEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { dbErrorReply } from "./bridge.ts";
 import type { ParentToWorker, WorkerToParent } from "./bridge.ts";
 
 const BOOTSTRAP_PATH = new URL("./worker_bootstrap.js", import.meta.url);
@@ -133,11 +134,7 @@ function spawnAndInvoke(opts: {
             const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, rows };
             worker.postMessage(reply);
           } catch (err) {
-            const reply: ParentToWorker = {
-              type: "db.sql.result",
-              id: msg.id,
-              error: err instanceof Error ? err.message : String(err),
-            };
+            const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, ...dbErrorReply(err) };
             worker.postMessage(reply);
           }
           break;
@@ -546,4 +543,32 @@ Deno.test("fetch to look-alike hosts is not refused by the platform check", asyn
   });
   assert(result.ok, result.error);
   assertEquals(JSON.parse(result.body!), ["other", "other", "other"]);
+});
+
+Deno.test("ctx.db.sql errors carry the SQLSTATE as err.code", async () => {
+  const result = await spawnAndInvoke({
+    userCode: `
+      async function handler(req, ctx) {
+        const out = [];
+        Object.defineProperty(Error.prototype, "code", { value: undefined, writable: false, configurable: true });
+        for (const q of ["dup", "plain", "conn"]) {
+          try { await ctx.db.sql(q); } catch (e) { out.push([e.message, e.code ?? null]); }
+        }
+        return new Response(JSON.stringify(out));
+      }
+    `,
+    dbSqlHandler: (query) => {
+      if (query === "dup") {
+        throw Object.assign(new Error("duplicate key value violates unique constraint"), { name: "PostgresError", severity: "ERROR", code: "23505" });
+      }
+      if (query === "conn") throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+      throw new Error("the database is busy for this project; retry shortly");
+    },
+  });
+  assert(result.ok, result.error);
+  assertEquals(JSON.parse(result.body!), [
+    ["duplicate key value violates unique constraint", "23505"],
+    ["the database is busy for this project; retry shortly", null],
+    ["write EPIPE", null],
+  ]);
 });

@@ -12,6 +12,7 @@ import { asServiceError, quoteIdent, rlsContextStatements, tenantFuncRole, valid
 import { privilegeStatementError, uuidRe } from "./sql_guard.ts";
 import { isConnectionDrop, isLoginError, isPoolerBusyError, TenantDBPool } from "./tenant_db.ts";
 import { functionCacheKey } from "./cache_key.ts";
+import { dbErrorReply } from "./bridge.ts";
 import type {
   ParentToWorker,
   SerializedRequest,
@@ -705,8 +706,7 @@ async function runUserHandlerInWorker(opts: {
               })
               .catch((err) => {
                 if (settled) return;
-                const text = err instanceof Error ? err.message : String(err);
-                const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, error: text };
+                const reply: ParentToWorker = { type: "db.sql.result", id: msg.id, ...dbErrorReply(err) };
                 worker.postMessage(reply);
               });
             break;
