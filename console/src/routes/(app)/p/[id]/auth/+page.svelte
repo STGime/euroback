@@ -2144,7 +2144,8 @@
 							<label for="smtp-encryption" class="block text-xs font-medium text-gray-700 mb-1">Encryption</label>
 							<select id="smtp-encryption" bind:value={smtpEncryption}
 								class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600">
-								<option value="starttls">STARTTLS (port 587, recommended)</option>
+								<!-- While 465/587 are blocked, the open port (2525) comes first. -->
+								<option value="starttls">STARTTLS (port {smtpOpenPort ? `${smtpOpenPort} or 587` : '587 or 2525'}, recommended)</option>
 								<option value="tls">TLS / SMTPS (port 465)</option>
 							</select>
 						</div>
