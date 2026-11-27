@@ -78,6 +78,15 @@ func SMTPPortBlocked(port int) bool {
 	return port == 25 || slices.Contains(BlockedSMTPPorts, port)
 }
 
+// portAdvice is the usual port / encryption pairs, or while the block is
+// in place, the one that works.
+func portAdvice() string {
+	if SMTPEgressBlocked() {
+		return fmt.Sprintf("use %d with STARTTLS while ports 465 and 587 are blocked", OpenSMTPPort)
+	}
+	return "usually 587 with STARTTLS, or 465 with TLS"
+}
+
 // EgressBlockedNotice is shown wherever custom SMTP is configured while
 // the block is in place.
 const EgressBlockedNotice = "Eurobase's hosting provider currently blocks outgoing SMTP connections on ports 465 and 587, so a sender on those ports can't be reached. Port 2525 works: if your mail provider offers it (Brevo does, for example), use port 2525 with STARTTLS. We're working on lifting the block. A verified sender on 465 or 587 is still used and its emails fail, so switch it to 2525 or disconnect it; without a custom sender, auth emails go out through Eurobase's default sender."
@@ -134,9 +143,9 @@ func ExplainSMTPError(err error) string {
 			}
 			return fmt.Sprintf("No answer from %s within the time limit. Check the host and port, and that the server accepts connections from outside your own network.", se.Addr)
 		case errors.Is(se.Err, syscall.ECONNREFUSED) || strings.Contains(msg, "connection refused"):
-			return fmt.Sprintf("The server refused the connection on port %s. Check the port — usually 587 with STARTTLS, or 465 with TLS.", port)
+			return fmt.Sprintf("The server refused the connection on port %s. Check the port — %s.", port, portAdvice())
 		case errors.As(se.Err, &recErr) || strings.Contains(msg, "first record does not look like a tls handshake"):
-			return fmt.Sprintf("Port %s doesn't use TLS from the start. Choose STARTTLS (usually port 587), or port 465 with TLS.", port)
+			return fmt.Sprintf("Port %s doesn't use TLS from the start. Choose STARTTLS — %s.", port, portAdvice())
 		case certProblem:
 			return "The server's certificate isn't valid for this host name. Use the exact SMTP host name from your mail provider (not an IP address or an alias)."
 		}

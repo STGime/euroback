@@ -76,9 +76,9 @@ spec:
             - name: METRICS_PORT
               value: "9100"
             # Scaleway's default security group on the Kapsule nodes blocks
-            # outbound SMTP (25/465/587), so custom SMTP can't connect.
-            # Explains connect timeouts as the block and shows a notice in
-            # the console. Remove once Scaleway has lifted the block.
+            # outbound SMTP on 25/465/587; 2525 is open. Explains connect
+            # timeouts on a blocked port as the block, and the console
+            # suggests 2525. Remove once Scaleway has lifted the block.
             - name: CUSTOM_SMTP_EGRESS_BLOCKED
               value: "true"
             - name: BUILD_VERSION

@@ -59,7 +59,7 @@
 				</p>
 				<ul class="list-disc pl-5 text-sm text-gray-700 space-y-1 mt-2">
 					<li><strong>No answer / timeout</strong> &mdash; wrong host or port, or the server only accepts connections from its own network. If Eurobase itself can't make outgoing SMTP connections at the moment, the SMTP tab shows a notice saying so.</li>
-					<li><strong>Connection refused</strong> &mdash; wrong port. Most providers use 587 with STARTTLS, or 465 with TLS.</li>
+					<li><strong>Connection refused</strong> &mdash; wrong port. Most providers use 587 with STARTTLS, or 465 with TLS; while those are blocked (see Port above), use 2525 with STARTTLS.</li>
 					<li><strong>“Doesn't use TLS from the start” / no greeting</strong> &mdash; the encryption doesn't match the port: 465 needs TLS, 587 needs STARTTLS.</li>
 					<li><strong>Login rejected</strong> &mdash; wrong username or password; some providers need an app-specific password for SMTP.</li>
 					<li><strong>From address refused</strong> &mdash; the From address must be one your SMTP account may send as.</li>
