@@ -239,11 +239,21 @@ func (s *EmailService) sendProjectScoped(ctx context.Context, projectID, project
 	if reason, detail := s.platformSendSkip(ctx, to); reason != "" {
 		return Delivery{SkipReason: reason, SkipDetail: detail}, nil
 	}
-	client := s.client
-	if name := ProjectSenderName(projectName, client.FromName()); name != "" {
-		client = client.WithFrom("", name)
+	name := ProjectSenderName(projectName, s.client.FromName())
+	if name == "" {
+		id, err := s.client.SendWithID(ctx, to, subject, htmlBody)
+		return Delivery{Via: ViaPlatform, MessageID: id}, err
 	}
-	id, err := client.SendWithID(ctx, to, subject, htmlBody)
+	id, err := s.client.WithFrom("", name).SendWithID(ctx, to, subject, htmlBody)
+	if rejectedSenderName(err) {
+		// The provider refused the request, and the only part a project
+		// controls in it besides the text is the sender name: send again
+		// under the platform's own name rather than fail the user's
+		// sign-in email.
+		slog.Warn("email: provider refused the project sender name, sent under the platform name",
+			"project_id", projectID, "error", err)
+		id, err = s.client.SendWithID(ctx, to, subject, htmlBody)
+	}
 	return Delivery{Via: ViaPlatform, MessageID: id}, err
 }
 

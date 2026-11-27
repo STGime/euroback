@@ -1,9 +1,13 @@
 package email
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // maxProjectSenderName caps the project part of the sender name, so the
@@ -20,16 +24,20 @@ const maxProjectSenderName = 40
 // project name has nothing printable left.
 //
 // The project part is reduced to printable characters on one line:
-// line breaks and tabs become spaces, other control and format
-// characters (incl. bidi overrides) are dropped, characters with a meaning in an address header (" < > \ , ; : @ ( ) [ ])
-// become spaces, runs of spaces collapse, and it is cut at
-// maxProjectSenderName characters.
+// it is first folded with NFKC (so fullwidth "＠" / "＜" become the
+// characters they look like and are filtered below); line breaks and
+// tabs become spaces, other control and format characters (incl. bidi
+// overrides) are dropped, characters with a meaning in an address header
+// (" < > \ , ; : @ ( ) [ ]) and "=" (no RFC 2047 encoded word "=?…?=",
+// which a mail client would decode into those characters) become spaces,
+// runs of spaces collapse, and it is cut at maxProjectSenderName
+// characters.
 func ProjectSenderName(project, platform string) string {
 	var b strings.Builder
 	space := false
-	for _, r := range project {
+	for _, r := range norm.NFKC.String(project) {
 		switch {
-		case unicode.IsSpace(r), strings.ContainsRune(`"<>\,;:@()[]`, r):
+		case unicode.IsSpace(r), strings.ContainsRune(`"<>\,;:@()[]=`, r):
 			space = true
 			continue
 		case r == utf8.RuneError,
@@ -57,4 +65,13 @@ func ProjectSenderName(project, platform string) string {
 		platform = "Eurobase"
 	}
 	return name + " via " + platform
+}
+
+// rejectedSenderName reports whether a send failed because the provider
+// refused the request as invalid (400 / 422) — the case a sender name it
+// doesn't accept would cause. Auth, rate-limit and server errors are not
+// retried.
+func rejectedSenderName(err error) bool {
+	var te *TEMError
+	return errors.As(err, &te) && (te.Status == http.StatusBadRequest || te.Status == http.StatusUnprocessableEntity)
 }

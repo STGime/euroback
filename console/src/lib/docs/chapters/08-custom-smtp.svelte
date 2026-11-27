@@ -18,7 +18,7 @@
 				</p>
 
 				<p class="text-sm text-gray-700 leading-relaxed">
-					Without custom SMTP, auth emails come from <code class="bg-gray-100 border border-gray-200 rounded px-1">noreply@eurobase.app</code> with your app's name in the sender name, e.g. <strong>Acme via Eurobase</strong> (the app name from Auth settings, else the project name; up to 40 characters). Your users see an app they signed up to, not only "Eurobase". With custom SMTP, the from address and name are the ones you set.
+					Without custom SMTP, auth emails come from <code class="bg-gray-100 border border-gray-200 rounded px-1">noreply@eurobase.app</code> with your app's name in the sender name, e.g. <strong>Acme via Eurobase</strong> (the app name from Auth settings, else the project name; longer than 40 characters, it is shortened). Your users see an app they signed up to, not only "Eurobase". With custom SMTP, the from address and name are the ones you set.
 				</p>
 
 				<h3 class="text-lg font-semibold text-gray-900">Where to find it</h3>

@@ -246,7 +246,12 @@ func (h *TemplateHandler) HandleTest() http.HandlerFunc {
 			return
 		}
 
-		if err := h.service.client.Send(r.Context(), claims.Email, "[TEST] "+subject, body); err != nil {
+		// Same sender name as the real emails ("<app> via Eurobase").
+		client := h.service.client
+		if name := ProjectSenderName(projectName, client.FromName()); name != "" {
+			client = client.WithFrom("", name)
+		}
+		if err := client.Send(r.Context(), claims.Email, "[TEST] "+subject, body); err != nil {
 			writeJSONError(w, "failed to send test email: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

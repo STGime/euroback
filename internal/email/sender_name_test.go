@@ -1,6 +1,8 @@
 package email
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -25,6 +27,36 @@ func TestProjectSenderName(t *testing.T) {
 	for _, c := range cases {
 		if got := ProjectSenderName(c.project, c.platform); got != c.want {
 			t.Errorf("ProjectSenderName(%q, %q) = %q, want %q", c.project, c.platform, got, c.want)
+		}
+	}
+}
+
+func TestProjectSenderName_Boundary(t *testing.T) {
+	at := strings.Repeat("a", maxProjectSenderName)
+	if got := ProjectSenderName(at, "Eurobase"); got != at+" via Eurobase" {
+		t.Errorf("%d characters: got %q, want it uncut", maxProjectSenderName, got)
+	}
+	if got := ProjectSenderName(at+"b", "Eurobase"); got != at+"… via Eurobase" {
+		t.Errorf("%d characters: got %q, want it cut", maxProjectSenderName+1, got)
+	}
+}
+
+func TestRejectedSenderName(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{&TEMError{Status: 400}, true},
+		{&TEMError{Status: 422}, true},
+		{fmt.Errorf("wrapped: %w", &TEMError{Status: 400}), true},
+		{&TEMError{Status: 401}, false},
+		{&TEMError{Status: 429}, false},
+		{&TEMError{Status: 500}, false},
+		{errors.New("TEM API request: timeout"), false},
+		{nil, false},
+	} {
+		if got := rejectedSenderName(c.err); got != c.want {
+			t.Errorf("rejectedSenderName(%v) = %v, want %v", c.err, got, c.want)
 		}
 	}
 }
