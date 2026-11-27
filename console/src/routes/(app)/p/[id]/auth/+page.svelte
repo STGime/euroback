@@ -259,6 +259,10 @@
 
 	// Platform-side notice for custom SMTP (outbound SMTP blocked).
 	let smtpNotice = $state('');
+	// Ports the hosting provider blocks right now, and the one that works.
+	let smtpBlockedPorts = $state<number[]>([]);
+	let smtpOpenPort = $state<number | null>(null);
+	const smtpPortBlocked = $derived(smtpBlockedPorts.includes(parseInt(smtpPort, 10)));
 
 	async function loadSmtp() {
 		smtpLoading = true;
@@ -269,8 +273,16 @@
 		smtpSaveError = '';
 		smtpTestError = '';
 		api.getEmailSenderStatus(projectCtx.id)
-			.then((st) => (smtpNotice = st.egress_blocked ? (st.notice ?? '') : ''))
-			.catch(() => (smtpNotice = ''));
+			.then((st) => {
+				smtpNotice = st.egress_blocked ? (st.notice ?? '') : '';
+				smtpBlockedPorts = st.egress_blocked ? (st.blocked_ports ?? []) : [];
+				smtpOpenPort = st.egress_blocked ? (st.open_port ?? null) : null;
+			})
+			.catch(() => {
+				smtpNotice = '';
+				smtpBlockedPorts = [];
+				smtpOpenPort = null;
+			});
 		try {
 			const s = await api.getProjectEmailSender(projectCtx.id);
 			hydrateSmtp(s);
@@ -2117,6 +2129,11 @@
 								<label for="smtp-port" class="block text-xs font-medium text-gray-700 mb-1">Port</label>
 								<input id="smtp-port" type="number" bind:value={smtpPort} placeholder="587" title="587, 465 or 2525"
 									class="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-eurobase-600 focus:outline-none focus:ring-1 focus:ring-eurobase-600" />
+								{#if smtpPortBlocked}
+									<p class="mt-1 text-xs text-amber-700">
+										Port {smtpPort} is blocked by our hosting provider right now.{#if smtpOpenPort} Use {smtpOpenPort} with STARTTLS if your provider offers it.{/if}
+									</p>
+								{/if}
 							</div>
 						</div>
 						<div>

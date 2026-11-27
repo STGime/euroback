@@ -1368,8 +1368,12 @@ export class EurobaseAPI {
 	}
 
 	/** Platform conditions for custom SMTP (outbound SMTP blocked, …). */
-	async getEmailSenderStatus(projectId: string): Promise<{ egress_blocked: boolean; notice?: string }> {
-		return this.fetch<{ egress_blocked: boolean; notice?: string }>(`/platform/projects/${projectId}/email-sender/status`);
+	async getEmailSenderStatus(
+		projectId: string
+	): Promise<{ egress_blocked: boolean; notice?: string; blocked_ports?: number[]; open_port?: number }> {
+		return this.fetch<{ egress_blocked: boolean; notice?: string; blocked_ports?: number[]; open_port?: number }>(
+			`/platform/projects/${projectId}/email-sender/status`
+		);
 	}
 
 	/** The project's auth email log, newest first. */

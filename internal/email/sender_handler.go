@@ -131,6 +131,8 @@ func HandleSenderStatus() http.HandlerFunc {
 		out := map[string]any{"egress_blocked": SMTPEgressBlocked()}
 		if SMTPEgressBlocked() {
 			out["notice"] = EgressBlockedNotice
+			out["blocked_ports"] = BlockedSMTPPorts
+			out["open_port"] = OpenSMTPPort
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
