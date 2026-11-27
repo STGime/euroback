@@ -6,7 +6,7 @@
 // only the fallback (the SDK and CLI release checklists in CLAUDE.md say so).
 import { PUBLIC_API_URL } from '$env/static/public';
 
-export const FALLBACK_SDK_VERSION = '0.13.1';
+export const FALLBACK_SDK_VERSION = '0.14.0';
 export const FALLBACK_CLI_VERSION = '0.7.2';
 
 export interface LatestReleases {
