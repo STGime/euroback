@@ -1,0 +1,288 @@
+##############################################################################
+# Grafana Alloy: service logs → Scaleway Cockpit (Loki, fr-par)
+#
+# Pod logs only live on the node while the pod exists, so every deploy loses
+# them. This collector reads the logs of the pods in `eurobase` and
+# `ingress-nginx` through the Kubernetes API (no hostPath mount), masks email
+# addresses and credentials, and pushes the lines to a Cockpit custom logs
+# data source. Retention is set on that data source (7 days, the free
+# default).
+#
+# Separate from alloy.yaml (metrics): logs can run without the metrics
+# pipeline, and each has its own push token.
+#
+# Required secret (create once, out of band; see README.md):
+#
+#   kubectl create secret generic cockpit-logs-credentials -n eurobase \
+#     --from-literal=url='<logs data source API URL>/loki/api/v1/push' \
+#     --from-literal=token='<cockpit token, push logs only>'
+#
+# Not deployed by CI: apply by hand (README.md, "Service logs").
+##############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-logs-config
+  namespace: eurobase
+data:
+  config.alloy: |
+    // Every running pod in the two namespaces. Pod discovery yields one
+    // target per container port; loki.source.kubernetes tails each
+    // namespace/pod/container once.
+    discovery.kubernetes "pods" {
+      role = "pod"
+      namespaces {
+        names = ["eurobase", "ingress-nginx"]
+      }
+    }
+
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      // Don't ship the collector's own logs.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app"]
+        regex         = "alloy-logs"
+        action        = "drop"
+      }
+
+      // Labels stay low-cardinality: namespace, app, container (+ level
+      // below). Project ids, user ids and emails stay in the line, never a
+      // label.
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        target_label  = "app"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app"]
+        regex         = "(.+)"
+        target_label  = "app"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.process.redact.receiver]
+    }
+
+    loki.process "redact" {
+      // slog JSON lines carry "level"; other lines (ingress, runner) don't.
+      stage.json {
+        expressions = { level = "level" }
+      }
+      stage.labels {
+        values = { level = "" }
+      }
+
+      // Email addresses: keep the first character and the domain, like
+      // email.MaskEmail ("a****@example.com").
+      stage.replace {
+        expression = "[A-Za-z0-9._%+-]([A-Za-z0-9._%+-]*)@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}"
+        replace    = "****"
+      }
+
+      // Credentials, should one ever reach a log line: JWTs, Eurobase API
+      // keys and access tokens, bearer tokens, and "key":"value" (JSON) or
+      // key=value (query string, logfmt) pairs named like a credential.
+      // Plain "token: …" in prose (error messages) is left alone, and so is
+      // a bare "secret" field: the worker logs the k8s Secret's *name* there.
+      stage.replace {
+        expression = "eyJ[A-Za-z0-9_-]{8,}\\.([A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+)"
+        replace    = "[redacted]"
+      }
+      stage.replace {
+        expression = "eb_(?:pk|sk|pat|ptk)_([A-Za-z0-9_-]+)"
+        replace    = "[redacted]"
+      }
+      stage.replace {
+        expression = "(?i)bearer\\s+([A-Za-z0-9._~+/=-]+)"
+        replace    = "[redacted]"
+      }
+      stage.replace {
+        expression = "(?i)\"(?:apikey|api_key|token|access_token|refresh_token|password|client_secret|jwt_secret)\"\\s*:\\s*\"([^\"]+)\""
+        replace    = "[redacted]"
+      }
+      stage.replace {
+        expression = "(?i)\\b(?:apikey|api_key|token|access_token|refresh_token|password|client_secret|jwt_secret)=([^&\\s,\"]+)"
+        replace    = "[redacted]"
+      }
+
+      forward_to = [loki.write.cockpit.receiver]
+    }
+
+    loki.write "cockpit" {
+      endpoint {
+        url = sys.env("COCKPIT_LOGS_PUSH_URL")
+        // Cockpit authenticates log pushes with the token as the tenant id
+        // (X-Scope-OrgID), as in Scaleway's Kubernetes logs guide.
+        tenant_id = sys.env("COCKPIT_LOGS_PUSH_TOKEN")
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy-logs
+  namespace: eurobase
+  labels:
+    app: alloy-logs
+    component: monitoring
+spec:
+  # One replica: two would ship every line twice. While the collector itself
+  # restarts, a few lines can be missed or sent twice.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: alloy-logs
+  template:
+    metadata:
+      labels:
+        app: alloy-logs
+    spec:
+      serviceAccountName: alloy-logs
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 473
+        runAsGroup: 473
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
+          args:
+            - "run"
+            - "/etc/alloy/config.alloy"
+            - "--server.http.listen-addr=127.0.0.1:12345"
+            - "--storage.path=/tmp/alloy"
+            - "--disable-reporting"
+          env:
+            - name: COCKPIT_LOGS_PUSH_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cockpit-logs-credentials
+                  key: url
+            - name: COCKPIT_LOGS_PUSH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cockpit-logs-credentials
+                  key: token
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "20m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-logs-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy-logs
+  namespace: eurobase
+---
+# Read pods and their logs in the two namespaces only (Roles, not a
+# ClusterRole).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy-logs
+  namespace: eurobase
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy-logs
+  namespace: eurobase
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy-logs
+subjects:
+  - kind: ServiceAccount
+    name: alloy-logs
+    namespace: eurobase
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy-logs
+  namespace: ingress-nginx
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy-logs
+  namespace: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy-logs
+subjects:
+  - kind: ServiceAccount
+    name: alloy-logs
+    namespace: eurobase
+---
+# No ingress; egress only to DNS, the Kubernetes API server (6443) and
+# HTTPS (the Cockpit push endpoint).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alloy-logs
+  namespace: eurobase
+spec:
+  podSelector:
+    matchLabels:
+      app: alloy-logs
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 6443
+        - protocol: TCP
+          port: 443
