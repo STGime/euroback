@@ -740,6 +740,13 @@ func main() {
 	// series skip them.
 	workers.StartEmailBounceSync(ctx, pool, emailClient)
 
+	// ── Disposable email domains (000163) ──
+	// Weekly: adds new domains from a public list of disposable email
+	// providers to the signup blocklist and drops ones the list removed
+	// (DISPOSABLE_DOMAINS_URL; unset = off). Manual entries and domains an
+	// admin unblocked are left alone; a suspicious list is refused.
+	workers.StartDisposableDomainSync(ctx, pool)
+
 	// ── Team beta window (000159) ──
 	// Hourly: reminds owners 4 days before their Team beta ends and
 	// suspends the project when it has ended (data kept; an admin
