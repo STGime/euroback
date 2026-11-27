@@ -72,6 +72,10 @@ type PlatformAuthService struct {
 	auditor        auditLogger
 	lookupIdentity func(ctx context.Context, userID string) (*passkeyIdentity, error)
 	checkPassword  func(ctx context.Context, userID, password string) (bool, error)
+
+	// mailDomains, when set (EnableMailDomainCheck), refuses signups
+	// whose email domain can't receive mail. See signup_maildomain.go.
+	mailDomains mailDomainResolver
 }
 
 // WaitlistError is returned when a signup attempt is blocked by the allowlist.
@@ -295,6 +299,11 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 		return nil, err
 	}
 	if err := validateRequiredAcceptances(accepted); err != nil {
+		return nil, err
+	}
+	// Last before creating the account (it's a DNS lookup): the domain
+	// must be able to receive the verification email (SIGNUP_MX_CHECK).
+	if err := s.refuseUndeliverableDomain(ctx, email); err != nil {
 		return nil, err
 	}
 

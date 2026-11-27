@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -244,6 +245,11 @@ func main() {
 		platformAuthSvc.SetDeveloperPool(developerPool)
 	}
 	platformAuthSvc.AllowPublicSignup = os.Getenv("ALLOW_PUBLIC_SIGNUP") == "true"
+	if os.Getenv("SIGNUP_MX_CHECK") == "true" {
+		// Refuse platform signups whose email domain can't receive mail
+		// (no MX / A records); a failed lookup is logged and allowed.
+		platformAuthSvc.EnableMailDomainCheck(net.DefaultResolver)
+	}
 	// Every IP-keyed limiter and audit-IP capture (platform auth routes,
 	// contact/support/sovereignty forms) resolves the client from the
 	// TRUSTED side of X-Forwarded-For — PLATFORM_TRUST_PROXY /
