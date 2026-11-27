@@ -50,9 +50,13 @@ const (
 // ?offset= for the blocked-domains list, clamped to sane values.
 func blockedDomainsQuery(r *http.Request) (q string, limit, offset int) {
 	v := r.URL.Query()
-	q = strings.ToLower(strings.TrimSpace(v.Get("q")))
-	if len(q) > 253 {
-		q = q[:253]
+	// Postgres refuses invalid UTF-8 and NUL in a text parameter (a 500);
+	// drop both and cut on a rune boundary.
+	q = strings.ToValidUTF8(v.Get("q"), "")
+	q = strings.ReplaceAll(q, "\x00", "")
+	q = strings.ToLower(strings.TrimSpace(q))
+	if r := []rune(q); len(r) > 253 {
+		q = string(r[:253])
 	}
 	limit = blockedDomainsDefaultLimit
 	if n, err := strconv.Atoi(v.Get("limit")); err == nil && n > 0 {

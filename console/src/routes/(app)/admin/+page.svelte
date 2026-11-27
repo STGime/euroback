@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { api, type AdminProject, type BlockedDomainEntry, type TeamBetaEntry, type SignupUserEntry, type BroadcastRecipient } from '$lib/api.js';
 
 	let projects = $state<AdminProject[]>([]);
@@ -47,6 +47,8 @@
 			loadBlockedDomains();
 		}, 250);
 	}
+
+	onDestroy(() => clearTimeout(blockedSearchTimer));
 
 	function blockedPage(delta: number) {
 		blockedOffset = Math.max(0, blockedOffset + delta * BLOCKED_PAGE_SIZE);
@@ -420,6 +422,8 @@
 			await api.adminAddBlockedDomain(newBlockedDomain.trim(), newBlockedReason.trim() || undefined);
 			newBlockedDomain = '';
 			newBlockedReason = '';
+			// Show the new entry: it's newest, so first on an unfiltered page 1.
+			blockedQuery = '';
 			blockedOffset = 0;
 			await loadBlockedDomains();
 		} catch (e: any) {
@@ -659,13 +663,13 @@
 				aria-label="Search blocked domains"
 				class="w-full max-w-xs rounded-md border border-gray-300 px-3 py-1.5 text-sm"
 			/>
-			<span class="text-xs text-gray-500 whitespace-nowrap">
-				{blockedTotal.toLocaleString()} {blockedQuery.trim() ? 'matching' : 'blocked'}
+			<span class="text-xs text-gray-500 whitespace-nowrap" aria-live="polite">
+				{#if blockedLoading}Loading…{:else}{blockedTotal.toLocaleString()} {blockedQuery.trim() ? 'matching' : 'blocked'}{/if}
 			</span>
 		</div>
 
-		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto">
-			<table class="w-full text-sm">
+		<div class="rounded-md border border-gray-200 bg-white overflow-x-auto" class:opacity-60={blockedLoading}>
+			<table class="w-full text-sm" aria-busy={blockedLoading}>
 				<thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
 					<tr>
 						<th class="px-4 py-2">Domain</th>

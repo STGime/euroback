@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBlockedDomainsQuery_Clamps(t *testing.T) {
@@ -21,6 +24,7 @@ func TestBlockedDomainsQuery_Clamps(t *testing.T) {
 		{"/x?limit=-5&offset=-3", "", blockedDomainsDefaultLimit, 0},
 		{"/x?limit=abc&offset=xyz", "", blockedDomainsDefaultLimit, 0},
 		{"/x?q=%20MailBox.ORG%20", "mailbox.org", blockedDomainsDefaultLimit, 0},
+		{"/x?q=a%FFb%00c", "abc", blockedDomainsDefaultLimit, 0},
 	}
 	for _, c := range cases {
 		r := httptest.NewRequest(http.MethodGet, c.url, nil)
@@ -28,6 +32,15 @@ func TestBlockedDomainsQuery_Clamps(t *testing.T) {
 		if q != c.q || limit != c.limit || offset != c.offset {
 			t.Errorf("%s: got (%q, %d, %d), want (%q, %d, %d)", c.url, q, limit, offset, c.q, c.limit, c.offset)
 		}
+	}
+}
+
+func TestBlockedDomainsQuery_CutsOnRuneBoundary(t *testing.T) {
+	long := strings.Repeat("a", 252) + "é" + "x"
+	r := httptest.NewRequest(http.MethodGet, "/x?q="+url.QueryEscape(long), nil)
+	q, _, _ := blockedDomainsQuery(r)
+	if !utf8.ValidString(q) || utf8.RuneCountInString(q) != 253 {
+		t.Fatalf("q not cut on a rune boundary: valid=%v runes=%d", utf8.ValidString(q), utf8.RuneCountInString(q))
 	}
 }
 
