@@ -47,8 +47,9 @@ data:
       }
 
       // Labels stay low-cardinality: namespace, app, container (+ level
-      // below). Project ids, user ids and emails stay in the line, never a
-      // label.
+      // below; loki.source.kubernetes adds job and instance =
+      // namespace/pod:container). Project ids, user ids and emails stay in
+      // the line, never a label.
       rule {
         source_labels = ["__meta_kubernetes_namespace"]
         target_label  = "namespace"
@@ -74,44 +75,72 @@ data:
     }
 
     loki.process "redact" {
+      // Customer function output stays out. The runner's stdout also carries
+      // what tenant code prints (console.log in the Worker, and the ctx.log
+      // mirror "[fn:<project>] LEVEL: …"); that is customer data, kept in
+      // edge_function_logs only. Keep the runner's own lines, the
+      // runner-written "[fn:<project>] Worker error" / "vault.get failed"
+      // lines (the failure reason for an invocation), and stack-trace
+      // continuation lines.
+      stage.match {
+        selector            = `{app="functions"} !~ "^(\\[(runner|tenant-db|vault)\\]|\\[fn:[^\\]]+\\] (Worker error|vault\\.get failed)|Eurobase Function Runner|rejecting request|HMAC_SECRET|accepting unsigned|Failed to load function|\\s+at )"`
+        action              = "drop"
+        drop_counter_reason = "customer_function_output"
+      }
+
       // slog JSON lines carry "level"; other lines (ingress, runner) don't.
+      // Only the four slog levels become a label, so a line can't create
+      // streams with arbitrary label values.
       stage.json {
-        expressions = { level = "level" }
+        expressions = { level_raw = "level" }
+      }
+      stage.regex {
+        source     = "level_raw"
+        expression = `^(?P<level>DEBUG|INFO|WARN|ERROR)$`
       }
       stage.labels {
         values = { level = "" }
       }
 
       // Email addresses: keep the first character and the domain, like
-      // email.MaskEmail ("a****@example.com").
+      // email.MaskEmail ("a****@example.com"); also URL-encoded (%40).
       stage.replace {
-        expression = "[A-Za-z0-9._%+-]([A-Za-z0-9._%+-]*)@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}"
+        expression = `[A-Za-z0-9._%+-]([A-Za-z0-9._%+-]*)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`
+        replace    = "****"
+      }
+      stage.replace {
+        expression = `[A-Za-z0-9._+-]([A-Za-z0-9._+-]*)%40[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`
         replace    = "****"
       }
 
       // Credentials, should one ever reach a log line: JWTs, Eurobase API
-      // keys and access tokens, bearer tokens, and "key":"value" (JSON) or
-      // key=value (query string, logfmt) pairs named like a credential.
-      // Plain "token: …" in prose (error messages) is left alone, and so is
-      // a bare "secret" field: the worker logs the k8s Secret's *name* there.
+      // keys, webhook signing secrets, bearer / basic auth, X-Api-Key, and
+      // "key":"value" (JSON, also escaped inside a JSON string) or key=value
+      // (query string, logfmt) pairs named like a credential. Plain
+      // "token: …" in prose (error messages) is left alone, and so is a bare
+      // "secret" field: the worker logs the k8s Secret's *name* there.
       stage.replace {
-        expression = "eyJ[A-Za-z0-9_-]{8,}\\.([A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+)"
+        expression = `eyJ[A-Za-z0-9_-]{8,}\.([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+)`
         replace    = "[redacted]"
       }
       stage.replace {
-        expression = "eb_(?:pk|sk|pat|ptk)_([A-Za-z0-9_-]+)"
+        expression = `(?:eb_(?:pk|sk|pat|ptk)|whsec)_([A-Za-z0-9_-]+)`
         replace    = "[redacted]"
       }
       stage.replace {
-        expression = "(?i)bearer\\s+([A-Za-z0-9._~+/=-]+)"
+        expression = `(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{6,})`
         replace    = "[redacted]"
       }
       stage.replace {
-        expression = "(?i)\"(?:apikey|api_key|token|access_token|refresh_token|password|client_secret|jwt_secret)\"\\s*:\\s*\"([^\"]+)\""
+        expression = `(?i)x-api-key\\?["']?\s*[:=]\s*\\?["']?([^"'\\\s,&}]+)`
         replace    = "[redacted]"
       }
       stage.replace {
-        expression = "(?i)\\b(?:apikey|api_key|token|access_token|refresh_token|password|client_secret|jwt_secret)=([^&\\s,\"]+)"
+        expression = `(?i)\\?"(?:apikey|api_key|token|access_token|refresh_token|id_token|token_hash|code_verifier|password|client_secret|jwt_secret|webhook_secret|signing_secret)\\?"\s*:\s*\\?"([^"\\]+)`
+        replace    = "[redacted]"
+      }
+      stage.replace {
+        expression = `(?i)(?:^|[^A-Za-z0-9_])(?:apikey|api_key|token|access_token|refresh_token|id_token|token_hash|code_verifier|password|client_secret|jwt_secret|webhook_secret|signing_secret)=([^&\s,"\\]+)`
         replace    = "[redacted]"
       }
 
@@ -122,7 +151,9 @@ data:
       endpoint {
         url = sys.env("COCKPIT_LOGS_PUSH_URL")
         // Cockpit authenticates log pushes with the token as the tenant id
-        // (X-Scope-OrgID), as in Scaleway's Kubernetes logs guide.
+        // (X-Scope-OrgID), as in Scaleway's Kubernetes logs guide. If pushes
+        // get 401/403, use `bearer_token = sys.env("COCKPIT_LOGS_PUSH_TOKEN")`
+        // instead.
         tenant_id = sys.env("COCKPIT_LOGS_PUSH_TOKEN")
       }
     }
@@ -136,8 +167,12 @@ metadata:
     app: alloy-logs
     component: monitoring
 spec:
-  # One replica: two would ship every line twice. While the collector itself
-  # restarts, a few lines can be missed or sent twice.
+  # One replica: two would ship every line twice. Read positions live in an
+  # emptyDir: they survive a container restart, but when this pod is
+  # recreated (first apply, config change, node drain) it re-reads every
+  # container's retained log (kubelet keeps ~10Mi per container) and sends
+  # it again. Accepted: at our volume that is a one-off duplicate, not a
+  # cost. App deploys don't cause it (new pods are new streams).
   replicas: 1
   strategy:
     type: Recreate
@@ -258,8 +293,9 @@ subjects:
     name: alloy-logs
     namespace: eurobase
 ---
-# No ingress; egress only to DNS, the Kubernetes API server (6443) and
-# HTTPS (the Cockpit push endpoint).
+# No ingress. Egress: DNS, plus TCP 6443 (the API server, after service
+# translation) and 443 (the Cockpit push endpoint) to any address; the
+# collector runs no tenant code.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

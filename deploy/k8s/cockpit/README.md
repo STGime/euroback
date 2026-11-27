@@ -106,13 +106,30 @@ pods in eurobase + ingress-nginx      alloy-logs pod                       Scale
 └──────────────────────┘
 ```
 
-- **What:** every container's stdout/stderr in `eurobase` and `ingress-nginx`.
-- **Labels:** `namespace`, `app`, `container`, `level` (from slog's JSON
-  `level`). Project ids, user ids and emails stay in the line, never a label.
-- **Masked before sending:** email addresses (`a****@example.com`, like
-  `email.MaskEmail`); JWTs; `eb_pk_` / `eb_sk_` / `eb_pat_` / `eb_ptk_` keys;
-  `Bearer …`; values of `apikey`, `token`, `access_token`, `refresh_token`,
-  `password`, `client_secret`, `jwt_secret` as JSON fields or `key=value`.
+- **What:** every container's stdout/stderr in `eurobase` and `ingress-nginx`
+  (ingress access lines include client IPs), **except customer function
+  output**: in the functions runner only its own lines (`[runner]`,
+  `[tenant-db]`, `[vault]`, startup / request-rejection lines, the
+  runner-written `[fn:<project>] Worker error` / `vault.get failed` lines and
+  stack-trace continuations) are sent. What tenant code prints
+  (`console.log`, the `[fn:<project>] LEVEL:` mirror of `ctx.log`) stays in
+  `edge_function_logs`.
+- **Labels:** `namespace`, `app`, `container`, `level` (only `DEBUG` / `INFO`
+  / `WARN` / `ERROR` from slog's JSON `level`), plus `job` and `instance`
+  (`namespace/pod:container`) added by `loki.source.kubernetes`. Project ids,
+  user ids and emails stay in the line, never a label.
+- **Masked before sending:** email addresses, also URL-encoded
+  (`a****@example.com`, like `email.MaskEmail`); JWTs; `eb_pk_` / `eb_sk_` /
+  `eb_pat_` / `eb_ptk_` keys and `whsec_` secrets; `Bearer …` / `Basic …`;
+  `X-Api-Key`; values of `apikey`, `token`, `access_token`, `refresh_token`,
+  `id_token`, `token_hash`, `code_verifier`, `password`, `client_secret`,
+  `jwt_secret`, `webhook_secret`, `signing_secret` as JSON fields (also
+  escaped inside a JSON string) or `key=value`. A value containing an
+  escaped quote is only masked up to that quote.
+- **Restarts:** read positions are kept in an emptyDir. When the collector
+  pod is recreated (first apply, config change, node drain) it re-sends every
+  container's retained log once (kubelet keeps ~10Mi per container), so
+  expect duplicates around that time. App deploys don't cause this.
 - **Access:** read pods and `pods/log` in the two namespaces (Roles, no
   ClusterRole); egress only to DNS, the API server and HTTPS; no ingress.
 - **Cost:** custom logs are billed per GB ingested (we produce well under
@@ -136,6 +153,8 @@ pods in eurobase + ingress-nginx      alloy-logs pod                       Scale
    kubectl -n eurobase rollout status deploy/alloy-logs
    kubectl -n eurobase logs deploy/alloy-logs --tail=50   # no push errors (401/403)
    ```
+   On 401/403, switch `tenant_id` to `bearer_token` in the `loki.write`
+   block (comment in the config) and re-apply.
 5. In Cockpit's Grafana, **Explore → the logs data source**:
    `{namespace="eurobase", app="gateway"}` shows the gateway's lines within a
    minute. Check that emails appear masked, then roll the gateway
