@@ -126,11 +126,15 @@ func ValidateTenantMigrationSQL(sql string) error {
 	if uuidGenerateV4Re.MatchString(stripped) {
 		return errors.New("uuid_generate_v4() is not available to tenant migrations — use the built-in gen_random_uuid() instead")
 	}
-	// Blank the allowlisted public helpers, then scan for any remaining
-	// qualified reference to a forbidden schema.
-	scanned := publicHelperAllowRe.ReplaceAllString(stripped, "ALLOWED_HELPER")
-	if loc := forbiddenMigSchemaRe.FindString(scanned); loc != "" {
-		return fmt.Errorf("migration references a forbidden schema (%s...): only unqualified names in your project schema are allowed (RLS helpers like public.is_service_role() are exempt)", strings.TrimSpace(loc))
+	// Blank the allowlisted public helpers (same length, so offsets still
+	// match the original text), then scan for any remaining qualified
+	// reference to a forbidden schema.
+	scanned := publicHelperAllowRe.ReplaceAllStringFunc(stripped, func(m string) string {
+		return strings.Repeat(" ", len(m))
+	})
+	if loc := forbiddenMigSchemaRe.FindStringIndex(scanned); loc != nil {
+		return fmt.Errorf("migration references a forbidden schema (%s): only unqualified names in your project schema are allowed (RLS helpers like public.is_service_role() are exempt)",
+			forbiddenReference(trimmed, scanned, loc))
 	}
 	for _, f := range forbiddenMigStatementRes {
 		if f.re.MatchString(scanned) {
@@ -147,6 +151,30 @@ func ValidateTenantMigrationSQL(sql string) error {
 	// ALTER DEFAULT PRIVILEGES, OWNER TO, …), which the patterns above
 	// only partly cover.
 	return ValidateNoPrivilegeStatements(trimmed)
+}
+
+// forbiddenRefNameRe reads the object name after a schema qualifier: a
+// plain identifier or a double-quoted one.
+var forbiddenRefNameRe = regexp.MustCompile(`^\s*("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)`)
+
+// forbiddenReference returns the forbidden qualified reference the scan
+// found at loc (in scanned, which has the same length as original), with
+// the object name read from the original text, e.g. `public.auth_uid`, so
+// the error says what to change. Capped at 80 characters.
+func forbiddenReference(original, scanned string, loc []int) string {
+	qual := strings.Join(strings.Fields(scanned[loc[0]:loc[1]]), "")
+	if len(original) != len(scanned) {
+		return qual + "..."
+	}
+	name := forbiddenRefNameRe.FindStringSubmatch(original[loc[1]:])
+	if name == nil {
+		return qual + "..."
+	}
+	ref := qual + name[1]
+	if r := []rune(ref); len(r) > 80 {
+		ref = string(r[:80]) + "..."
+	}
+	return ref
 }
 
 // MigrationChecksum is the canonical checksum of a migration body —
