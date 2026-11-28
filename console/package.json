@@ -28,6 +28,7 @@
 		"@codemirror/lang-javascript": "^6.2.5",
 		"@codemirror/lang-sql": "^6.10.0",
 		"@codemirror/theme-one-dark": "^6.1.3",
+		"altcha": "3.6.0",
 		"codemirror": "^6.0.2",
 		"elkjs": "^0.11.1",
 		"marked": "^18.0.9"

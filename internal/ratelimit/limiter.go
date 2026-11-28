@@ -151,6 +151,16 @@ func (rl *RateLimiter) Release(ctx context.Context, key string) error {
 	return nil
 }
 
+// ClaimOnce records key for ttl and reports whether this call was the first
+// to claim it (SET NX). Used for single-use tokens such as signup challenges.
+func (rl *RateLimiter) ClaimOnce(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	ok, err := rl.client.SetNX(ctx, "once:"+key, 1, ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("claim %s: %w", key, err)
+	}
+	return ok, nil
+}
+
 // Close closes the underlying Redis client.
 func (rl *RateLimiter) Close() error {
 	return rl.client.Close()

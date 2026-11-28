@@ -679,6 +679,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				return ratelimit.CheckAuthRate(limiter, w, r.Context(), action, identifier, cfg.limit, cfg.window)
 			}
 		}
+		r.Get("/auth/signup/challenge", auth.HandlePlatformSignupChallenge(platformAuthSvc))
 		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc, platformRateCheck))

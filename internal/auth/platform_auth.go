@@ -76,6 +76,9 @@ type PlatformAuthService struct {
 	// mailDomains, when set (EnableMailDomainCheck), refuses signups
 	// whose email domain can't receive mail. See signup_maildomain.go.
 	mailDomains mailDomainResolver
+	// signupChallenge, when set (EnableSignupChallenge), makes signup
+	// require a solved proof-of-work challenge (signup_challenge.go).
+	signupChallenge *SignupChallenge
 }
 
 // WaitlistError is returned when a signup attempt is blocked by the allowlist.

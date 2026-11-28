@@ -327,6 +327,34 @@ func main() {
 		slog.Warn("REDIS_URL not set, rate limiting disabled")
 	}
 
+	// Signup proof-of-work check (ALTCHA, self-hosted): SIGNUP_CHALLENGE=
+	// required makes POST /platform/auth/signup need a solved challenge
+	// from GET /platform/auth/signup/challenge. The key is
+	// SIGNUP_CHALLENGE_SECRET (≥32 bytes); without it in production the
+	// gateway refuses to start rather than silently leave signup open.
+	switch mode := os.Getenv("SIGNUP_CHALLENGE"); mode {
+	case "required":
+		sc, err := auth.NewSignupChallenge(os.Getenv("SIGNUP_CHALLENGE_SECRET"))
+		if err != nil {
+			env, suffix := os.Getenv("ENV"), os.Getenv("DOMAIN_SUFFIX")
+			if env == "production" || env == "prod" || strings.HasSuffix(suffix, "eurobase.app") {
+				log.Fatalf("FATAL: SIGNUP_CHALLENGE=required but %v", err)
+			}
+			slog.Warn("SIGNUP_CHALLENGE=required ignored", "error", err)
+			break
+		}
+		if limiter != nil {
+			sc.SetClaimer(limiter.ClaimOnce)
+		} else {
+			slog.Warn("signup challenge without Redis: a solved challenge can be reused until it expires")
+		}
+		platformAuthSvc.EnableSignupChallenge(sc)
+		slog.Info("signup challenge required")
+	case "", "off":
+	default:
+		slog.Warn("unknown SIGNUP_CHALLENGE value, check off", "value", mode)
+	}
+
 	// ── Set up S3 client for Scaleway Object Storage (optional — degrades gracefully) ──
 	var s3Client *storage.S3Client
 	scwAccessKey := os.Getenv("SCW_ACCESS_KEY")

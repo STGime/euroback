@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.3.5
+	github.com/altcha-org/altcha-lib-go/v2 v2.4.1
 	github.com/aws/aws-sdk-go-v2 v1.41.4
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.12

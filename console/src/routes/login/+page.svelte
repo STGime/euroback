@@ -6,6 +6,7 @@
 	import { api, APIError } from '$lib/api.js';
 	import { env } from '$env/dynamic/public';
 	import DiscordIcon from '$lib/DiscordIcon.svelte';
+	import SignupChallenge from '$lib/SignupChallenge.svelte';
 	import ContactWidget from '$lib/ContactWidget.svelte';
 	import { DISCORD_DISCLOSURE } from '$lib/discord';
 	import { passkeysSupported, getPasskeyAssertion, passkeyErrorMessage } from '$lib/webauthn';
@@ -74,6 +75,19 @@
 	let acceptedTerms = $state(false);
 	let acceptedDPA = $state(false);
 	const LEGAL_VERSION = '2.0';
+
+	// Signup proof-of-work check: on when the gateway serves a challenge
+	// (404 = off). The widget solves it while the form is filled in.
+	let challengeRequired = $state(false);
+	let challengePayload = $state<string | null>(null);
+	let challengeWidget = $state<SignupChallenge | null>(null);
+	let challengeChecked = false;
+	$effect(() => {
+		if (!isSignUp || challengeChecked) return;
+		challengeChecked = true;
+		api.signupChallengeRequired().then((on) => (challengeRequired = on));
+	});
+	let challengePending = $derived(isSignUp && challengeRequired && !challengePayload);
 
 	function parseError(raw: string): string {
 		const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
@@ -270,6 +284,31 @@
 		}
 	}
 
+	// Sign up with the solved challenge. If the gateway refuses it
+	// (expired, already used), solve a fresh one and try once more.
+	async function signUpWithChallenge() {
+		const docs = [
+			{ type: 'terms', version: LEGAL_VERSION },
+			{ type: 'dpa', version: LEGAL_VERSION },
+		];
+		try {
+			return await api.signUp(email, password, docs, challengePayload ?? undefined);
+		} catch (err) {
+			if (!(err instanceof APIError && err.code === 'challenge_failed')) throw err;
+			// Shows the widget if the check was switched on after this
+			// page loaded; the next submit then carries a solution.
+			challengeRequired = true;
+			if (!challengeWidget) throw err;
+			const fresh = await challengeWidget.refresh();
+			if (!fresh) throw err;
+			return await api.signUp(email, password, docs, fresh);
+		} finally {
+			// A payload is single use.
+			challengePayload = null;
+			challengeWidget?.refresh();
+		}
+	}
+
 	async function handleSubmit(e: Event) {
 		e.preventDefault();
 		error = '';
@@ -281,6 +320,10 @@
 			error = 'You must accept the Terms of Service and the Data Processing Agreement to sign up';
 			return;
 		}
+		if (challengePending) {
+			error = 'Please wait a moment: your browser is still running the signup check.';
+			return;
+		}
 		submitting = true;
 		try {
 			if (isForgotPassword) {
@@ -288,10 +331,7 @@
 				forgotPasswordSent = true;
 			} else {
 				const result = isSignUp
-					? await api.signUp(email, password, [
-						{ type: 'terms', version: LEGAL_VERSION },
-						{ type: 'dpa', version: LEGAL_VERSION },
-					])
+					? await signUpWithChallenge()
 					: await api.signIn(email, password);
 				// Signup that requires email verification issues no token —
 				// show the "check your inbox" state instead of logging in.
@@ -652,6 +692,9 @@
 										</span>
 									</label>
 								</div>
+								{#if challengeRequired}
+									<SignupChallenge bind:this={challengeWidget} bind:payload={challengePayload} />
+								{/if}
 							{/if}
 						{/if}
 
