@@ -74,7 +74,9 @@
 
 	let acceptedTerms = $state(false);
 	let acceptedDPA = $state(false);
-	const LEGAL_VERSION = '2.0';
+	// Mirrors $lib/legal (not imported: it would bundle the .md sources).
+	const TERMS_VERSION = '2.2';
+	const DPA_VERSION = '2.0';
 
 	// Signup proof-of-work check: on when the gateway serves a challenge
 	// (404 = off). The widget solves it while the form is filled in.
@@ -288,8 +290,8 @@
 	// (expired, already used), solve a fresh one and try once more.
 	async function signUpWithChallenge() {
 		const docs = [
-			{ type: 'terms', version: LEGAL_VERSION },
-			{ type: 'dpa', version: LEGAL_VERSION },
+			{ type: 'terms', version: TERMS_VERSION },
+			{ type: 'dpa', version: DPA_VERSION },
 		];
 		let failed = false;
 		try {
@@ -682,7 +684,7 @@
 										<span>
 											I accept the
 											<a href="/legal/terms" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Terms of Service</a>
-											(v{LEGAL_VERSION}).
+											(v{TERMS_VERSION}).
 										</span>
 									</label>
 									<label class="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
@@ -695,7 +697,7 @@
 										<span>
 											I accept the
 											<a href="/legal/dpa" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Data Processing Agreement</a>
-											(v{LEGAL_VERSION}) and have read the
+											(v{DPA_VERSION}) and have read the
 											<a href="/legal/privacy" target="_blank" rel="noopener noreferrer" class="text-eurobase-600 hover:text-eurobase-700 underline">Privacy Policy</a>.
 										</span>
 									</label>

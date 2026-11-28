@@ -16,11 +16,15 @@ REVIEWER NOTES — read before publication (v2)
      national reporters). Do NOT remove without lawyer review.
   5. Entity strings (Eurobase OÜ) still placeholders until
      formation completes.
+  6. v2.2 (ships with Terms v2.2, same dates): open proxies / relays and
+     credential harvesting named in §2; §7 points to /abuse and matches
+     its process (reporter identity, human review, redress); §8 adds the
+     statement of reasons. Served in the console at /legal/aup.
 -->
 
 # Acceptable Use Policy
 
-**Version 2.1 — effective 2 October 2026**
+**Version 2.2 — published 30 November 2026.** If you accept the Terms of Service 2.2 when you sign up, this version applies to you from that moment. For all other accounts it takes effect on **1 January 2027**; until that date, [version 2.1](/legal/aup-2.1) applies to them.
 
 This Acceptable Use Policy ("**AUP**") sets out what you may not do with the Eurobase service. It is incorporated into the **Terms of Service** at /legal/terms. Breach of this AUP is breach of those Terms, and may lead to suspension, termination, and reporting to law enforcement.
 
@@ -39,9 +43,10 @@ You are responsible for everything that happens under your account, including co
 ## 2. You must not use the platform to
 
 - **Send spam.** Bulk, unsolicited, or non-transactional email and SMS, including fake-confirmation flows, mailing-list scraping, and address-harvesting. Eurobase transactional email is for your own users who asked for it.
-- **Phish or mislead.** Set up sites that impersonate other organisations to extract credentials, payment data, or personal information.
+- **Phish or mislead.** Set up sites that impersonate other organisations to extract credentials, payment data, or personal information, or collect other people's login credentials in any other way.
 - **Run malware** — host, distribute, command, control, or stage malicious code (viruses, worms, ransomware, RATs, info-stealers, etc.).
 - **Attack other systems** — port scanning, brute force, credential stuffing, exploitation, DDoS staging, or any other unauthorised access attempt against systems you do not own.
+- **Run open proxies or tunnels.** Operate open proxies, VPN or tunnel endpoints, or other services that relay traffic to destinations chosen by whoever uses them, including with Edge Functions. Calling other services as part of your own application's features (for example, an API or image proxy for your app) is fine.
 - **Mine cryptocurrencies** in any form (CPU, GPU, Edge Function, browser cryptojacking).
 - **Circumvent rate limits, plan limits, billing controls, or abuse detection** through multiple accounts, proxies, or technical workarounds.
 - **Run gambling, gaming for stakes, or financial services** unless you hold the licence the activity requires in every jurisdiction it touches, and have shown that licence to us on request.
@@ -70,9 +75,9 @@ You may not use Eurobase from, or to provide services to, any individual or enti
 
 ## 7. Reporting abuse
 
-If you see content or behaviour on Eurobase that violates this AUP, please email **abuse@eurobase.app** with: a description, the URL or Project reference, and any evidence (screenshots, log excerpts). We act on reports within **2 business days** for routine matters and immediately for CSAM, active malware distribution, or imminent harm.
+If you see content or behaviour on Eurobase that violates the law or this AUP, please email **abuse@eurobase.app**. What a report should include and how we handle it is described at **eurobase.app/abuse**. We act on reports within **2 business days** for routine matters and immediately for CSAM, active malware distribution, or imminent harm. A person reviews every report.
 
-We may publish anonymised statistics about reports and actions. We do not disclose the identity of reporters except as required by law.
+When we forward a report to the customer concerned, we leave out the reporter's name and contact details unless they agree or the case needs them (for example, a copyright claim), or the law requires otherwise. We may publish anonymised statistics about reports and actions.
 
 ## 8. Enforcement
 
@@ -84,7 +89,7 @@ Where this AUP is breached, we may, depending on the severity:
 - Terminate the contract under the Terms of Service;
 - Report to law enforcement and preserve relevant data under legal hold.
 
-We give notice where reasonably practical. We do not give notice where doing so would frustrate the action (for example, in active CSAM, fraud, or attack scenarios).
+We give advance notice where reasonably practical. We may act without advance notice where it would frustrate the action (for example, in active CSAM, fraud, or attack scenarios). Either way, when we restrict content, a feature, a Project or an account, we tell you at the latest when we act which restriction we applied, for how long and why, unless the law or an order of an authority prevents us. You can contest the decision by replying to our message; we look at it again and answer you without undue delay. You may also complain to the Digital Services Coordinator of your EU country (in Estonia: TTJA) or go to court.
 
 ## 9. Changes
 
