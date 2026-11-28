@@ -310,7 +310,9 @@
 			if (!challengeWidget) throw err;
 			const fresh = await challengeWidget.refresh();
 			if (!fresh) throw err;
-			return await api.signUp(email, password, docs, fresh);
+			const result = await api.signUp(email, password, docs, fresh);
+			failed = false;
+			return result;
 		} finally {
 			// A payload is single use: after a failed signup, solve a new
 			// one for the next attempt (a successful one leaves the form).

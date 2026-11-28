@@ -36,13 +36,12 @@ const (
 	// signupChallengeTTL covers solving plus filling in the form.
 	signupChallengeTTL = 10 * time.Minute
 
-	// The server picks the counter at random in [min, max): the client
-	// tries counters from 0, so the range sets the expected work. Under
-	// load (many signups in a short time) challenges get 5x harder.
-	signupCounterMin     = 500
-	signupCounterMax     = 1500
-	signupCounterBusyMin = 2500
-	signupCounterBusyMax = 7500
+	// The server picks the counter at random in [0, max): the client tries
+	// counters from 0, so on average it does max/2 derivations, and a
+	// script knowing the range can't skip any of them. Under load (many
+	// signups in a short time) challenges get 5x harder.
+	signupCounterMax     = 2000
+	signupCounterBusyMax = 10000
 
 	// signupBusyThreshold accounts created (with a solved challenge) within
 	// signupBusyWindow switch new challenges to the busy range.
@@ -68,6 +67,34 @@ type SignupChallenge struct {
 
 	mu     sync.Mutex
 	recent []time.Time // accounts created within signupBusyWindow
+
+	// Refusal log sampling: a flood of bad payloads gets a summary line
+	// every refusalLogEvery instead of one line per request.
+	logMu      sync.Mutex
+	lastLog    time.Time
+	suppressed map[string]int
+}
+
+const refusalLogEvery = 10 * time.Second
+
+// LogRefusal logs a refused signup (reason, email domain), at most one line
+// per refusalLogEvery; the line carries how many were left out since.
+func (c *SignupChallenge) LogRefusal(reason, domain string) {
+	c.logMu.Lock()
+	now := c.now()
+	if now.Sub(c.lastLog) < refusalLogEvery {
+		if c.suppressed == nil {
+			c.suppressed = map[string]int{}
+		}
+		c.suppressed[reason]++
+		c.logMu.Unlock()
+		return
+	}
+	skipped := c.suppressed
+	c.suppressed = nil
+	c.lastLog = now
+	c.logMu.Unlock()
+	slog.Info("signup refused: challenge", "reason", reason, "domain", domain, "not_logged_since_last", skipped)
 }
 
 // NewSignupChallenge builds the check from SIGNUP_CHALLENGE_SECRET. The two
@@ -121,13 +148,18 @@ func (c *SignupChallenge) RecordSignup() {
 	c.recent = append(c.recent, c.now())
 }
 
+// counterMax is the exclusive upper bound of the counter for a new
+// challenge: the busy range while signups are frequent.
+func (c *SignupChallenge) counterMax() int {
+	if c.busy() {
+		return signupCounterBusyMax
+	}
+	return signupCounterMax
+}
+
 // Create returns a new challenge for the widget.
 func (c *SignupChallenge) Create() (altcha.Challenge, error) {
-	lo, hi := signupCounterMin, signupCounterMax
-	if c.busy() {
-		lo, hi = signupCounterBusyMin, signupCounterBusyMax
-	}
-	counter := lo + rand.IntN(hi-lo)
+	counter := rand.IntN(c.counterMax())
 	expires := c.now().Add(signupChallengeTTL)
 	return altcha.CreateChallenge(altcha.CreateChallengeOptions{
 		Algorithm:              signupChallengeAlgorithm,

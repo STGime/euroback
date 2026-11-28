@@ -49,7 +49,7 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 		// the load balancer's address) or a mailbox's slots.
 		if c := svc.signupChallenge; c != nil {
 			if reason := c.Verify(r.Context(), req.Altcha); reason != "" {
-				slog.Info("signup refused: challenge", "reason", reason, "domain", signupEmailDomain(req.Email))
+				c.LogRefusal(reason, signupEmailDomain(req.Email))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(map[string]string{

@@ -156,7 +156,7 @@ func TestSignupChallenge_ClaimerError(t *testing.T) {
 
 func TestSignupChallenge_BusyRaisesDifficulty(t *testing.T) {
 	c := newTestChallenge(t)
-	if c.busy() {
+	if c.busy() || c.counterMax() != signupCounterMax {
 		t.Fatal("busy at start")
 	}
 	for i := 0; i < signupBusyThreshold; i++ {
@@ -165,11 +165,8 @@ func TestSignupChallenge_BusyRaisesDifficulty(t *testing.T) {
 	if !c.busy() {
 		t.Fatal("not busy after the threshold")
 	}
-	// The counter isn't in the challenge, so check the work the solver needs.
-	ch, _ := c.Create()
-	sol, err := altcha.SolveChallenge(altcha.SolveChallengeOptions{Challenge: ch, DeriveKey: altcha.DeriveKeyPBKDF2()})
-	if err != nil || sol == nil || sol.Counter < signupCounterBusyMin {
-		t.Fatalf("busy challenge solved at counter %v, want ≥ %d", sol, signupCounterBusyMin)
+	if got := c.counterMax(); got != signupCounterBusyMax {
+		t.Fatalf("busy counter max %d, want %d", got, signupCounterBusyMax)
 	}
 	// The window passes: back to normal.
 	c.now = func() time.Time { return time.Now().Add(signupBusyWindow + time.Minute) }
@@ -238,12 +235,18 @@ func TestSignupChallenge_WidgetInterop(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
+	// CI's console job sets SIGNUP_INTEROP_REQUIRED=1, so the check can't
+	// silently skip there.
+	skip := t.Skipf
+	if os.Getenv("SIGNUP_INTEROP_REQUIRED") == "1" {
+		skip = t.Fatalf
+	}
 	if _, err := os.Stat(lib); err != nil {
-		t.Skip("console node_modules not installed")
+		skip("console node_modules not installed: %v", err)
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node not installed")
+		skip("node not installed: %v", err)
 	}
 	c := newTestChallenge(t)
 	c.SetClaimer(memClaimer())
@@ -328,5 +331,22 @@ func TestHandlePlatformSignupChallenge_ProbeAndRateLimit(t *testing.T) {
 	h(rec, httptest.NewRequest(http.MethodGet, "/platform/auth/signup/challenge", nil))
 	if rec.Code != http.StatusTooManyRequests || len(limited) != 1 || limited[0] != "platform_signup_challenge" {
 		t.Fatalf("create: %d, limits %v; want 429 from platform_signup_challenge", rec.Code, limited)
+	}
+}
+
+func TestSignupChallenge_RefusalLogSampled(t *testing.T) {
+	c := newTestChallenge(t)
+	t0 := time.Now()
+	c.now = func() time.Time { return t0 }
+	c.LogRefusal("missing", "a.example")
+	c.LogRefusal("missing", "a.example")
+	c.LogRefusal("invalid", "a.example")
+	if c.suppressed["missing"] != 1 || c.suppressed["invalid"] != 1 {
+		t.Fatalf("suppressed %v, want missing:1 invalid:1", c.suppressed)
+	}
+	c.now = func() time.Time { return t0.Add(refusalLogEvery) }
+	c.LogRefusal("missing", "a.example")
+	if c.suppressed != nil {
+		t.Fatalf("summary line not written: %v", c.suppressed)
 	}
 }

@@ -147,3 +147,21 @@ func TestDifferentKeys(t *testing.T) {
 		t.Error("keyB should still be allowed (different key from keyA)")
 	}
 }
+
+func TestClaimOnce(t *testing.T) {
+	limiter := setupTestLimiter(t)
+	ctx := context.Background()
+	key := "test-claim-once-" + time.Now().Format(time.RFC3339Nano)
+	first, err := limiter.ClaimOnce(ctx, key, 2*time.Second)
+	if err != nil || !first {
+		t.Fatalf("first claim: %v %v, want true", first, err)
+	}
+	again, err := limiter.ClaimOnce(ctx, key, 2*time.Second)
+	if err != nil || again {
+		t.Fatalf("second claim: %v %v, want false", again, err)
+	}
+	ttl, err := limiter.client.TTL(ctx, "once:"+key).Result()
+	if err != nil || ttl <= 0 || ttl > 2*time.Second {
+		t.Fatalf("ttl %v (%v), want (0, 2s]", ttl, err)
+	}
+}
