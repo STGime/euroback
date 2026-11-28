@@ -27,7 +27,7 @@ import (
 // party, no cookie.
 
 // ErrSignupChallenge refuses a signup without a valid, unused solution.
-var ErrSignupChallenge = errors.New("the browser check didn't complete — please try again")
+var ErrSignupChallenge = errors.New("the browser check didn't complete — please reload the page and try again")
 
 const (
 	signupChallengeAlgorithm = "PBKDF2/SHA-256"
