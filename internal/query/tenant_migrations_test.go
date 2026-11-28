@@ -165,6 +165,30 @@ func TestStripSQLLiterals_FollowsSharedTokenizer(t *testing.T) {
 	}
 }
 
+// The forbidden-schema refusal names the exact reference to change.
+func TestValidateTenantMigrationSQL_NamesForbiddenReference(t *testing.T) {
+	cases := []struct{ sql, want string }{
+		{`CREATE POLICY p ON t USING (owner = public.auth_uid());`, "(public.auth_uid)"},
+		{`INSERT INTO t (id) VALUES (public.gen_random_uuid());`, "(public.gen_random_uuid)"},
+		{`SELECT * FROM PUBLIC . users;`, "(PUBLIC.users)"},
+		{`SELECT * FROM public."My Table";`, `(public."My Table")`},
+		// The allowed helper before it doesn't shift what is reported.
+		{`CREATE POLICY p ON t USING (public.is_service_role() OR owner = public.auth_uid());`, "(public.auth_uid)"},
+		// A string literal before it doesn't either.
+		{`INSERT INTO t (s) VALUES ('it''s public. here'); SELECT public.helper_x();`, "(public.helper_x)"},
+		{`SELECT * FROM pg_catalog.pg_class;`, "(pg_catalog.pg_class)"},
+		{`SELECT public.über();`, "(public.über)"},
+		{"SELECT * FROM public.\"a\nb\x1b\";", `(public."a?b?")`},
+		{`SELECT public.`, "(public.…)"},
+	}
+	for _, tc := range cases {
+		err := ValidateTenantMigrationSQL(tc.sql)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want error naming %s, got %v", tc.sql, tc.want, err)
+		}
+	}
+}
+
 // Each refusal names the rule that caught it, so a reordering of the
 // checks can't hide one behind another.
 func TestValidateTenantMigrationSQL_RefusalReasons(t *testing.T) {
