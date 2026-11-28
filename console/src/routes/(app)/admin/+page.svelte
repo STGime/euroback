@@ -107,7 +107,7 @@
 	// Both POST to the same endpoint; the server re-checks every address
 	// (verified, not unsubscribed, not bounced) and sends one message per
 	// recipient in the background.
-	type ComposeMode = 'audience' | 'signup-selected';
+	type ComposeMode = 'audience' | 'signup-selected' | 'service-notice';
 	let composeMode = $state<ComposeMode>('signup-selected');
 
 	// Manual per-row selection for the Signup Users table.
@@ -116,6 +116,10 @@
 	let broadcastLoaded = $state(false);
 	let broadcastLoading = $state(false);
 	let broadcastError = $state<string | null>(null);
+	// Service notice: every verified, active account (count only).
+	let noticeCount = $state<number | null>(null);
+	let noticeLoading = $state(false);
+	let noticeError = $state<string | null>(null);
 
 	// Broadcast recipients: signed-up accounts only (the invite list is
 	// no longer used; signup is open).
@@ -525,6 +529,56 @@
 		}
 	}
 
+	// Open the compose modal for a service notice (e.g. a change to the
+	// Terms). The count is fetched fresh on every open.
+	async function openServiceNotice() {
+		composeError = null;
+		composeSuccess = null;
+		composeMode = 'service-notice';
+		composeOpen = true;
+		noticeLoading = true;
+		noticeError = null;
+		try {
+			noticeCount = (await api.adminGetServiceNoticeAudience()).recipients;
+		} catch (e: any) {
+			noticeError = e?.message ?? 'Failed to load the number of accounts';
+		} finally {
+			noticeLoading = false;
+		}
+	}
+
+	async function sendServiceNotice() {
+		if (!noticeCount) {
+			composeError = 'No accounts to send to';
+			return;
+		}
+		if (!composeSubject.trim() || !composeBody.trim()) {
+			composeError = 'Subject and body are required';
+			return;
+		}
+		if (
+			!confirm(
+				`Send this service notice to all ${noticeCount} verified, active accounts? It ignores product-update preferences, so use it only for notices about the contract (for example a change to the Terms).`
+			)
+		)
+			return;
+		composeBusy = true;
+		try {
+			const res = await api.adminSendServiceNotice(composeSubject, composeBody, noticeCount);
+			composeSuccess = `Sending to ${res.recipients} account${res.recipients === 1 ? '' : 's'} in the background. The result appears in the audit log (broadcast.emailed, kind service_notice).`;
+		} catch (e: any) {
+			composeError = e?.message ?? 'Send failed';
+			// The audience changed meanwhile: show the new count.
+			try {
+				noticeCount = (await api.adminGetServiceNoticeAudience()).recipients;
+			} catch {
+				/* keep the old count */
+			}
+		} finally {
+			composeBusy = false;
+		}
+	}
+
 	function applyTemplate(tpl: { subject: string; body: string }) {
 		composeSubject = tpl.subject;
 		composeBody = tpl.body;
@@ -533,6 +587,7 @@
 	async function sendCompose() {
 		composeError = null;
 		composeSuccess = null;
+		if (composeMode === 'service-notice') return sendServiceNotice();
 		const recipients =
 			composeMode === 'audience' ? audienceRecipients : Array.from(selectedSignups);
 		if (recipients.length === 0) {
@@ -881,6 +936,14 @@
 			</button>
 			<button
 				type="button"
+				onclick={openServiceNotice}
+				class="rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-50 cursor-pointer transition-colors"
+				title="Email every verified, active account, whatever its mail preferences. Only for notices about the contract, such as a change to the Terms."
+			>
+				Service notice
+			</button>
+			<button
+				type="button"
 				onclick={openSignupCompose}
 				disabled={selectedSignups.size === 0}
 				class="inline-flex items-center gap-2 rounded-lg bg-eurobase-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-eurobase-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -1125,10 +1188,18 @@
 			<div class="flex items-center justify-between border-b border-gray-200 px-5 py-3">
 				<div>
 					<h3 class="text-base font-semibold text-gray-900">
-						{composeMode === 'audience' ? 'Compose broadcast' : 'Email signup users'}
+						{composeMode === 'audience' ? 'Compose broadcast' : composeMode === 'service-notice' ? 'Service notice' : 'Email signup users'}
 					</h3>
 					<p class="text-xs text-gray-500 mt-0.5">
-						{#if composeMode === 'audience'}
+						{#if composeMode === 'service-notice'}
+							{#if noticeLoading}
+								Loading…
+							{:else if noticeError}
+								<span class="text-red-600">{noticeError}</span>
+							{:else}
+								{noticeCount} verified, active account{noticeCount === 1 ? '' : 's'} · one email each · ignores mail preferences
+							{/if}
+						{:else if composeMode === 'audience'}
 							{#if broadcastLoading}
 								Loading audience…
 							{:else if broadcastError}
@@ -1229,7 +1300,7 @@
 				<button
 					type="button"
 					onclick={sendCompose}
-					disabled={composeBusy || composeSuccess !== null || (composeMode === 'audience' && (broadcastLoading || broadcastError !== null))}
+					disabled={composeBusy || composeSuccess !== null || (composeMode === 'audience' && (broadcastLoading || broadcastError !== null)) || (composeMode === 'service-notice' && (noticeLoading || noticeError !== null))}
 					class="rounded-md bg-eurobase-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-eurobase-700 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
 				>
 					{composeBusy ? 'Sending…' : 'Send'}

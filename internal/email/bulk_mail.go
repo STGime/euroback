@@ -78,8 +78,21 @@ type BroadcastMessage struct {
 // sender, a few in parallel. Failures are collected per recipient in
 // BulkResult.Errors; the error is non-nil only when nothing went out.
 func (s *EmailService) SendBroadcast(ctx context.Context, msgs []BroadcastMessage, subject string) (BulkResult, error) {
+	return sendEach(ctx, s.bulkClient(), msgs, subject, func(m BroadcastMessage) []Header {
+		return ListUnsubscribeHeaders(m.UnsubscribeURL)
+	})
+}
+
+// SendServiceNotice sends a service notice (a change to the Terms, for
+// example) to each recipient separately, from the platform's own sender
+// rather than the bulk one, without List-Unsubscribe: account holders
+// get it whatever their product-update preferences.
+func (s *EmailService) SendServiceNotice(ctx context.Context, msgs []BroadcastMessage, subject string) (BulkResult, error) {
+	return sendEach(ctx, s.client, msgs, subject, func(BroadcastMessage) []Header { return nil })
+}
+
+func sendEach(ctx context.Context, client *EmailClient, msgs []BroadcastMessage, subject string, headers func(BroadcastMessage) []Header) (BulkResult, error) {
 	res := BulkResult{}
-	client := s.bulkClient()
 	if !client.Configured() {
 		return res, fmt.Errorf("email client not configured (TEM credentials missing)")
 	}
@@ -93,7 +106,7 @@ func (s *EmailService) SendBroadcast(ctx context.Context, msgs []BroadcastMessag
 		go func(m BroadcastMessage) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			_, err := client.SendWithHeaders(ctx, m.To, subject, m.HTMLBody, ListUnsubscribeHeaders(m.UnsubscribeURL))
+			_, err := client.SendWithHeaders(ctx, m.To, subject, m.HTMLBody, headers(m))
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
