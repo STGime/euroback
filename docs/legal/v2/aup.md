@@ -89,7 +89,7 @@ Where this AUP is breached, we may, depending on the severity:
 - Terminate the contract under the Terms of Service;
 - Report to law enforcement and preserve relevant data under legal hold.
 
-We give advance notice where reasonably practical. We may act without advance notice where it would frustrate the action (for example, in active CSAM, fraud, or attack scenarios). Either way, when we restrict content, a feature, a Project or an account, we tell you at the latest when we act which restriction we applied, for how long and why, unless the law or an order of an authority prevents us. You can contest the decision by replying to our message; we look at it again and answer within 14 days. You may also complain to the Digital Services Coordinator of your EU country (in Estonia: TTJA) or go to court.
+We give advance notice where reasonably practical. We may act without advance notice where it would frustrate the action (for example, in active CSAM, fraud, or attack scenarios). Either way, when we restrict content, a feature, a Project or an account, we tell you at the latest when we act which restriction we applied, for how long and why, unless the law or an order of an authority prevents us. You can contest the decision by replying to our message; we look at it again and answer you without undue delay. You may also complain to the Digital Services Coordinator of your EU country (in Estonia: TTJA) or go to court.
 
 ## 9. Changes
 
