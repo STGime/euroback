@@ -332,12 +332,14 @@ func main() {
 	// from GET /platform/auth/signup/challenge. The key is
 	// SIGNUP_CHALLENGE_SECRET (≥32 bytes); without it in production the
 	// gateway refuses to start rather than silently leave signup open.
+	// A misspelt value must not leave the check off in production either.
+	challengeEnv, challengeSuffix := os.Getenv("ENV"), os.Getenv("DOMAIN_SUFFIX")
+	challengeProd := challengeEnv == "production" || challengeEnv == "prod" || strings.HasSuffix(challengeSuffix, "eurobase.app")
 	switch mode := os.Getenv("SIGNUP_CHALLENGE"); mode {
 	case "required":
 		sc, err := auth.NewSignupChallenge(os.Getenv("SIGNUP_CHALLENGE_SECRET"))
 		if err != nil {
-			env, suffix := os.Getenv("ENV"), os.Getenv("DOMAIN_SUFFIX")
-			if env == "production" || env == "prod" || strings.HasSuffix(suffix, "eurobase.app") {
+			if challengeProd {
 				log.Fatalf("FATAL: SIGNUP_CHALLENGE=required but %v", err)
 			}
 			slog.Warn("SIGNUP_CHALLENGE=required ignored", "error", err)
@@ -352,6 +354,9 @@ func main() {
 		slog.Info("signup challenge required")
 	case "", "off":
 	default:
+		if challengeProd {
+			log.Fatalf("FATAL: unknown SIGNUP_CHALLENGE value %q (use \"required\" or \"off\")", mode)
+		}
 		slog.Warn("unknown SIGNUP_CHALLENGE value, check off", "value", mode)
 	}
 

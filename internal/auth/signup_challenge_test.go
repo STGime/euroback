@@ -160,7 +160,7 @@ func TestSignupChallenge_BusyRaisesDifficulty(t *testing.T) {
 		t.Fatal("busy at start")
 	}
 	for i := 0; i < signupBusyThreshold; i++ {
-		c.recordVerified()
+		c.RecordSignup()
 	}
 	if !c.busy() {
 		t.Fatal("not busy after the threshold")
@@ -264,5 +264,69 @@ process.stdout.write(Buffer.from(JSON.stringify({ challenge, solution })).toStri
 	}
 	if got := c.Verify(context.Background(), strings.TrimSpace(string(out))); got != "" {
 		t.Fatalf("widget payload refused: %q", got)
+	}
+}
+
+// The same payload re-encoded (whitespace, field order) is still a replay:
+// the key is the challenge's signature, not the payload bytes.
+func TestSignupChallenge_ReplayReencoded(t *testing.T) {
+	c := newTestChallenge(t)
+	c.SetClaimer(memClaimer())
+	ch, _ := c.Create()
+	payload := solve(t, ch)
+	if r := c.Verify(context.Background(), payload); r != "" {
+		t.Fatalf("first use refused: %s", r)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(payload)
+	var generic map[string]any
+	_ = json.Unmarshal(raw, &generic)
+	pretty, _ := json.MarshalIndent(map[string]any{"solution": generic["solution"], "challenge": generic["challenge"]}, "", "  ")
+	if r := c.Verify(context.Background(), base64.StdEncoding.EncodeToString(pretty)); r != "replayed" {
+		t.Fatalf("re-encoded payload: %q, want replayed", r)
+	}
+}
+
+// A valid payload passes the challenge, then the rate limits still apply.
+func TestHandlePlatformSignUp_ValidPayloadThenRateLimit(t *testing.T) {
+	svc := &PlatformAuthService{}
+	c := newTestChallenge(t)
+	svc.EnableSignupChallenge(c)
+	ch, _ := c.Create()
+	var limited []string
+	check := func(w http.ResponseWriter, r *http.Request, action, id string) bool {
+		limited = append(limited, action)
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	}
+	body, _ := json.Marshal(map[string]any{"email": "a@example.org", "password": "x", "altcha": solve(t, ch)})
+	rec := httptest.NewRecorder()
+	HandlePlatformSignUp(svc, check)(rec, httptest.NewRequest(http.MethodPost, "/platform/auth/signup", strings.NewReader(string(body))))
+	if rec.Code != http.StatusTooManyRequests || len(limited) != 1 || limited[0] != "platform_signup" {
+		t.Fatalf("got %d, limits %v; want 429 from platform_signup", rec.Code, limited)
+	}
+	if c.busy() {
+		t.Fatal("a refused signup counted towards busy mode")
+	}
+}
+
+func TestHandlePlatformSignupChallenge_ProbeAndRateLimit(t *testing.T) {
+	svc := &PlatformAuthService{}
+	svc.EnableSignupChallenge(newTestChallenge(t))
+	var limited []string
+	check := func(w http.ResponseWriter, r *http.Request, action, id string) bool {
+		limited = append(limited, action)
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	}
+	h := HandlePlatformSignupChallenge(svc, check)
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/platform/auth/signup/challenge?check=1", nil))
+	if rec.Code != http.StatusNoContent || len(limited) != 0 {
+		t.Fatalf("probe: %d, limits %v; want 204 without a limit", rec.Code, limited)
+	}
+	rec = httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/platform/auth/signup/challenge", nil))
+	if rec.Code != http.StatusTooManyRequests || len(limited) != 1 || limited[0] != "platform_signup_challenge" {
+		t.Fatalf("create: %d, limits %v; want 429 from platform_signup_challenge", rec.Code, limited)
 	}
 }

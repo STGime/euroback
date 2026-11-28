@@ -87,7 +87,7 @@
 		challengeChecked = true;
 		api.signupChallengeRequired().then((on) => (challengeRequired = on));
 	});
-	let challengePending = $derived(isSignUp && challengeRequired && !challengePayload);
+
 
 	function parseError(raw: string): string {
 		const jsonMatch = raw.match(/\{"error":"(.+?)"\}/);
@@ -291,21 +291,31 @@
 			{ type: 'terms', version: LEGAL_VERSION },
 			{ type: 'dpa', version: LEGAL_VERSION },
 		];
+		let failed = false;
 		try {
-			return await api.signUp(email, password, docs, challengePayload ?? undefined);
+			// No solution yet (still solving, or the widget expired):
+			// wait for one instead of refusing the submit.
+			let solution = challengePayload;
+			if (challengeRequired && !solution && challengeWidget) solution = await challengeWidget.ensure();
+			return await api.signUp(email, password, docs, solution ?? undefined);
 		} catch (err) {
+			failed = true;
 			if (!(err instanceof APIError && err.code === 'challenge_failed')) throw err;
 			// Shows the widget if the check was switched on after this
-			// page loaded; the next submit then carries a solution.
+			// page loaded (or the probe hadn't answered yet when the form
+			// was sent): the widget isn't mounted for this attempt, so the
+			// user sees the message once and the next submit carries a
+			// solution.
 			challengeRequired = true;
 			if (!challengeWidget) throw err;
 			const fresh = await challengeWidget.refresh();
 			if (!fresh) throw err;
 			return await api.signUp(email, password, docs, fresh);
 		} finally {
-			// A payload is single use.
+			// A payload is single use: after a failed signup, solve a new
+			// one for the next attempt (a successful one leaves the form).
 			challengePayload = null;
-			challengeWidget?.refresh();
+			if (failed) void challengeWidget?.refresh();
 		}
 	}
 
@@ -318,10 +328,6 @@
 		}
 		if (isSignUp && !(acceptedTerms && acceptedDPA)) {
 			error = 'You must accept the Terms of Service and the Data Processing Agreement to sign up';
-			return;
-		}
-		if (challengePending) {
-			error = 'Please wait a moment: your browser is still running the signup check.';
 			return;
 		}
 		submitting = true;

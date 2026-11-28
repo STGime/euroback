@@ -44,8 +44,8 @@ const (
 	signupCounterBusyMin = 2500
 	signupCounterBusyMax = 7500
 
-	// signupBusyThreshold verified signups within signupBusyWindow switch
-	// new challenges to the busy range.
+	// signupBusyThreshold accounts created (with a solved challenge) within
+	// signupBusyWindow switch new challenges to the busy range.
 	signupBusyThreshold = 10
 	signupBusyWindow    = 15 * time.Minute
 
@@ -67,7 +67,7 @@ type SignupChallenge struct {
 	deriveKey altcha.DeriveKeyFunc
 
 	mu     sync.Mutex
-	recent []time.Time // verified signups within signupBusyWindow
+	recent []time.Time // accounts created within signupBusyWindow
 }
 
 // NewSignupChallenge builds the check from SIGNUP_CHALLENGE_SECRET. The two
@@ -93,7 +93,7 @@ func NewSignupChallenge(secret string) (*SignupChallenge, error) {
 // stays usable until it expires; the gateway logs that at startup.
 func (c *SignupChallenge) SetClaimer(fn ChallengeClaimer) { c.claim = fn }
 
-// busy reports whether recent verified signups reached the threshold.
+// busy reports whether recent signups reached the threshold.
 func (c *SignupChallenge) busy() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -110,7 +110,11 @@ func (c *SignupChallenge) pruneLocked() {
 	c.recent = c.recent[i:]
 }
 
-func (c *SignupChallenge) recordVerified() {
+// RecordSignup counts an account created with a solved challenge, for the
+// busy-mode difficulty. Only successful signups count: a solved payload
+// refused afterwards (waitlist, rate limit, weak password) must not let a
+// few solves push every real user onto harder challenges.
+func (c *SignupChallenge) RecordSignup() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pruneLocked()
@@ -188,16 +192,31 @@ func (c *SignupChallenge) Verify(ctx context.Context, encoded string) string {
 			return "replayed"
 		}
 	}
-	c.recordVerified()
 	return ""
 }
 
 // HandlePlatformSignupChallenge serves GET /platform/auth/signup/challenge.
-// 404 when the check is off, so the console knows to sign up without it.
-func HandlePlatformSignupChallenge(svc *PlatformAuthService) http.HandlerFunc {
+// 404 when the check is off, so the console knows to sign up without it;
+// `?check=1` only answers that (204 when on) without creating a challenge.
+// Creating one costs a key derivation, so it is rate limited
+// ("platform_signup_challenge", per client IP — product-wide until the
+// load balancer passes real client addresses).
+func HandlePlatformSignupChallenge(svc *PlatformAuthService, rateFn ...AuthRateLimiter) http.HandlerFunc {
+	var check AuthRateLimiter
+	if len(rateFn) > 0 {
+		check = rateFn[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if svc.signupChallenge == nil {
 			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("check") == "1" {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if check != nil && check(w, r, "platform_signup_challenge", clientIP(r)) {
 			return
 		}
 		ch, err := svc.signupChallenge.Create()

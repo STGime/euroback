@@ -895,7 +895,8 @@ export class EurobaseAPI {
 	 *  gateway would refuse. */
 	async signupChallengeRequired(): Promise<boolean> {
 		try {
-			const res = await fetch(this.signupChallengeURL(), { credentials: 'omit', cache: 'no-store' });
+			// ?check=1 answers on/off without creating a challenge.
+			const res = await fetch(`${this.signupChallengeURL()}?check=1`, { credentials: 'omit', cache: 'no-store' });
 			return res.status !== 404;
 		} catch {
 			return true;

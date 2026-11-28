@@ -36,20 +36,25 @@ import (
 // (ReleaseAuthRate), so typos and retries cost nothing while concurrent
 // requests still count; 5 a day is far above what one person needs.
 const (
-	SignupLimit          = 60
-	SignupWindow         = 1 * time.Hour
-	SignupMailboxLimit   = 5
-	SignupMailboxWindow  = 24 * time.Hour
-	SigninFailLimit      = 5
-	SigninFailWindow     = 15 * time.Minute
-	ForgotPasswordLimit  = 3
-	ForgotPasswordWindow = 15 * time.Minute
-	ResendVerifyLimit    = 1
-	ResendVerifyWindow   = 5 * time.Minute
-	MagicLinkLimit       = 3
-	MagicLinkWindow      = 15 * time.Minute
-	PhoneOTPLimit        = 3
-	PhoneOTPWindow       = 15 * time.Minute
+	SignupLimit         = 60
+	SignupWindow        = 1 * time.Hour
+	SignupMailboxLimit  = 5
+	SignupMailboxWindow = 24 * time.Hour
+	// SignupChallengeLimit caps signup challenges handed out (each costs
+	// a key derivation). Keyed by client IP, so product-wide while the
+	// load balancer hides client addresses: generous for that reason.
+	SignupChallengeLimit  = 300
+	SignupChallengeWindow = 1 * time.Minute
+	SigninFailLimit       = 5
+	SigninFailWindow      = 15 * time.Minute
+	ForgotPasswordLimit   = 3
+	ForgotPasswordWindow  = 15 * time.Minute
+	ResendVerifyLimit     = 1
+	ResendVerifyWindow    = 5 * time.Minute
+	MagicLinkLimit        = 3
+	MagicLinkWindow       = 15 * time.Minute
+	PhoneOTPLimit         = 3
+	PhoneOTPWindow        = 15 * time.Minute
 )
 
 // Per-source-IP ceilings on the email/SMS-SENDING endpoints, enforced IN
