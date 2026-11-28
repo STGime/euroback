@@ -19,6 +19,9 @@ type signUpRequest struct {
 	Email    string             `json:"email"`
 	Password string             `json:"password"`
 	Accepted []AcceptedDocument `json:"accepted_documents"`
+	// Altcha is the signup challenge solution (base64 JSON from the
+	// console's widget); required when the check is on.
+	Altcha string `json:"altcha"`
 }
 
 type signInRequest struct {
@@ -33,14 +36,32 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 		check = rateFn[0]
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Rate limit signups by IP: 5/hour.
-		if check != nil && check(w, r, "platform_signup", clientIP(r)) {
+		var req signUpRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
 
-		var req signUpRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		// The proof-of-work check comes first, before the rate limits:
+		// a request without a solved challenge must not use up the
+		// signup budget (product-wide while every request arrives with
+		// the load balancer's address) or a mailbox's slots.
+		if c := svc.signupChallenge; c != nil {
+			if reason := c.Verify(r.Context(), req.Altcha); reason != "" {
+				c.LogRefusal(reason, signupEmailDomain(req.Email))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": ErrSignupChallenge.Error(),
+					"code":  "challenge_failed",
+				})
+				return
+			}
+		}
+
+		// Rate limit signups by IP (ratelimit.SignupLimit).
+		if check != nil && check(w, r, "platform_signup", clientIP(r)) {
 			return
 		}
 
@@ -94,6 +115,9 @@ func HandlePlatformSignUp(svc *PlatformAuthService, rateFn ...AuthRateLimiter) h
 			return
 		}
 
+		if c := svc.signupChallenge; c != nil {
+			c.RecordSignup()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(resp)

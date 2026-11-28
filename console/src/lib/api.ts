@@ -868,10 +868,11 @@ export class EurobaseAPI {
 		email: string,
 		password: string,
 		acceptedDocuments: Array<{ type: string; version: string }>,
+		altcha?: string,
 	): Promise<{ access_token?: string; email_verification_required?: boolean; user: { id: string; email: string } }> {
 		const resp = await this.fetch<{ access_token?: string; email_verification_required?: boolean; user: { id: string; email: string } }>('/platform/auth/signup', {
 			method: 'POST',
-			body: JSON.stringify({ email, password, accepted_documents: acceptedDocuments })
+			body: JSON.stringify({ email, password, accepted_documents: acceptedDocuments, altcha: altcha || undefined })
 		});
 		// When email verification is required the backend issues no
 		// session — only persist a token if one came back (dev fallback
@@ -880,6 +881,26 @@ export class EurobaseAPI {
 			this.setToken(resp.access_token);
 		}
 		return resp;
+	}
+
+	/** URL of the signup proof-of-work challenge (ALTCHA, served by the
+	 *  gateway itself). */
+	signupChallengeURL(): string {
+		return `${this.baseURL}/platform/auth/signup/challenge`;
+	}
+
+	/** Whether signup needs a solved challenge: the endpoint answers 404
+	 *  when the check is off. Any other answer (or a network error) counts
+	 *  as on, so the widget shows the problem instead of a signup that the
+	 *  gateway would refuse. */
+	async signupChallengeRequired(): Promise<boolean> {
+		try {
+			// ?check=1 answers on/off without creating a challenge.
+			const res = await fetch(`${this.signupChallengeURL()}?check=1`, { credentials: 'omit', cache: 'no-store' });
+			return res.status !== 404;
+		} catch {
+			return true;
+		}
 	}
 
 	/** Confirm a platform user's email from the link token. On success the

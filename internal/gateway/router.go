@@ -645,6 +645,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				}{
 					"platform_signup":              {ratelimit.SignupLimit, ratelimit.SignupWindow},
 					"platform_signup_mailbox":      {ratelimit.SignupMailboxLimit, ratelimit.SignupMailboxWindow},
+					"platform_signup_challenge":    {ratelimit.SignupChallengeLimit, ratelimit.SignupChallengeWindow},
 					"platform_forgot":              {ratelimit.ForgotPasswordLimit, ratelimit.ForgotPasswordWindow},
 					"platform_resend_verification": {ratelimit.ResendVerifyLimit, ratelimit.ResendVerifyWindow},
 					"signin_fail":                  {ratelimit.SigninFailLimit, ratelimit.SigninFailWindow},
@@ -679,6 +680,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 				return ratelimit.CheckAuthRate(limiter, w, r.Context(), action, identifier, cfg.limit, cfg.window)
 			}
 		}
+		r.Get("/auth/signup/challenge", auth.HandlePlatformSignupChallenge(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/signup", auth.HandlePlatformSignUp(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/signin", auth.HandlePlatformSignIn(platformAuthSvc, platformRateCheck))
 		r.Post("/auth/forgot-password", auth.HandlePlatformForgotPassword(platformAuthSvc, platformRateCheck))

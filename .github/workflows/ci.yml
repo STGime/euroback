@@ -145,6 +145,17 @@ jobs:
           PUBLIC_API_URL: https://api.eurobase.app
           PUBLIC_BUILD_SHA: ${{ github.sha }}
 
+      # The console's signup widget (npm altcha) must produce payloads the
+      # gateway's Go library accepts; this job has the widget installed.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Signup widget ↔ gateway check
+        env:
+          SIGNUP_INTEROP_REQUIRED: "1"
+        run: go test ./internal/auth/ -run TestSignupChallenge_WidgetInterop -v
+
       # svelte-check disabled — too many strict TS warnings from route params.
       # TODO: fix string|undefined params across console pages, then re-enable.
       # - name: Lint
