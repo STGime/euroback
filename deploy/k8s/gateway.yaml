@@ -80,6 +80,12 @@ spec:
             # signup allowed.
             - name: SIGNUP_MX_CHECK
               value: "true"
+            # Signup needs a solved proof-of-work challenge (ALTCHA, served by
+            # the gateway; key SIGNUP_CHALLENGE_SECRET in eurobase-secrets).
+            # To close public signup again in an emergency:
+            #   kubectl -n eurobase set env deployment/gateway ALLOW_PUBLIC_SIGNUP=false
+            - name: SIGNUP_CHALLENGE
+              value: "required"
             # Scaleway's default security group on the Kapsule nodes blocks
             # outbound SMTP on 25/465/587; 2525 is open. Explains connect
             # timeouts on a blocked port as the block, and the console
@@ -146,18 +152,6 @@ spec:
               value: "true"
             - name: MOLLIE_ENV
               value: "live"
-            # TEMPORARY (2026-11-27) — public signup disabled to stop a
-            # signup bot. Overrides ALLOW_PUBLIC_SIGNUP=true in the
-            # eurobase-secrets Secret (env: beats envFrom:). While this is
-            # "false", only emails already on platform_allowlist can
-            # register; everyone else — including the bot — gets a 403
-            # waitlist response and no account is created.
-            # RE-ENABLE: delete this block and redeploy (the Secret's
-            # "true" takes over again).
-            # IMMEDIATE STOP, before this change deploys:
-            #   kubectl -n eurobase set env deployment/gateway ALLOW_PUBLIC_SIGNUP=false
-            - name: ALLOW_PUBLIC_SIGNUP
-              value: "false"
             # Per-project login for SDK customer SQL (/v1/db/sql + RPC) —
             # the step-4 security remediation. Customer SQL runs as the
             # project's own `<schema>_func` role through the gateway
