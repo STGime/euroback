@@ -24,7 +24,7 @@ REVIEWER NOTES — read before publication (v2)
 
 # Acceptable Use Policy
 
-**Version 2.2 — published 30 November 2026.** It applies to accounts created from 30 November 2026, and to all other accounts from **1 January 2027**. Until then, [version 2.1](https://github.com/STGime/euroback/blob/0967f6c5/docs/legal/v2/aup.md) applies to accounts created before 30 November 2026.
+**Version 2.2 — published 30 November 2026.** If you accept the Terms of Service 2.2 when you sign up, this version applies to you from that moment. For all other accounts it takes effect on **1 January 2027**; until that date, [version 2.1](/legal/aup-2.1) applies to them.
 
 This Acceptable Use Policy ("**AUP**") sets out what you may not do with the Eurobase service. It is incorporated into the **Terms of Service** at /legal/terms. Breach of this AUP is breach of those Terms, and may lead to suspension, termination, and reporting to law enforcement.
 
@@ -46,7 +46,7 @@ You are responsible for everything that happens under your account, including co
 - **Phish or mislead.** Set up sites that impersonate other organisations to extract credentials, payment data, or personal information, or collect other people's login credentials in any other way.
 - **Run malware** — host, distribute, command, control, or stage malicious code (viruses, worms, ransomware, RATs, info-stealers, etc.).
 - **Attack other systems** — port scanning, brute force, credential stuffing, exploitation, DDoS staging, or any other unauthorised access attempt against systems you do not own.
-- **Run proxies or relays for others.** Operate open proxies, VPN or tunnel endpoints, or other services that relay third parties' network traffic, or use Edge Functions as a general-purpose network relay.
+- **Run open proxies or tunnels.** Operate open proxies, VPN or tunnel endpoints, or other services that relay traffic to destinations chosen by whoever uses them, including with Edge Functions. Calling other services as part of your own application's features (for example, an API or image proxy for your app) is fine.
 - **Mine cryptocurrencies** in any form (CPU, GPU, Edge Function, browser cryptojacking).
 - **Circumvent rate limits, plan limits, billing controls, or abuse detection** through multiple accounts, proxies, or technical workarounds.
 - **Run gambling, gaming for stakes, or financial services** unless you hold the licence the activity requires in every jurisdiction it touches, and have shown that licence to us on request.
@@ -89,7 +89,7 @@ Where this AUP is breached, we may, depending on the severity:
 - Terminate the contract under the Terms of Service;
 - Report to law enforcement and preserve relevant data under legal hold.
 
-We give notice where reasonably practical. We do not give notice where doing so would frustrate the action (for example, in active CSAM, fraud, or attack scenarios). When we restrict content, a feature, a Project or an account, we tell you why, unless the law or an order of an authority prevents us. You can contest the decision by replying to our message, and you may also complain to the Digital Services Coordinator or go to court.
+We give advance notice where reasonably practical. We may act without advance notice where it would frustrate the action (for example, in active CSAM, fraud, or attack scenarios). Either way, when we restrict content, a feature, a Project or an account, we tell you at the latest when we act which restriction we applied, for how long and why, unless the law or an order of an authority prevents us. You can contest the decision by replying to our message; we look at it again and answer within 14 days. You may also complain to the Digital Services Coordinator of your EU country (in Estonia: TTJA) or go to court.
 
 ## 9. Changes
 

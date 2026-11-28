@@ -15,6 +15,7 @@ export function GET(): Response {
 		'/pricing',
 		'/legal',
 		'/legal/terms',
+		'/legal/aup',
 		'/legal/privacy',
 		'/legal/dpa',
 		'/legal/sub-processors',

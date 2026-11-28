@@ -24,13 +24,17 @@ import termsSource from '../../../docs/legal/v2/terms.md?raw';
 import privacySource from '../../../docs/legal/v2/privacy.md?raw';
 import slaSource from '../../../docs/legal/v2/sla.md?raw';
 import aupSource from '../../../docs/legal/v2/aup.md?raw';
+// Previous versions, frozen, for the time before the current one applies
+// to existing accounts (linked from the current versions' headers).
+import terms21Source from '../../../docs/legal/v2/archive/terms-2.1.md?raw';
+import aup21Source from '../../../docs/legal/v2/archive/aup-2.1.md?raw';
 
 // Versions the signup form records in legal_acceptances (login/
 // +page.svelte pins the same values; it can't import this module).
 // Bump both places, and add the legal_documents row in a migration,
 // when publishing a new revision.
 export const LEGAL_VERSION = '2.0'; // DPA, privacy, SLA
-export const DOC_VERSION: Record<string, string> = { terms: '2.2', aup: '2.2' };
+export const DOC_VERSION: Record<string, string> = { terms: '2.2', aup: '2.2', 'terms-2.1': '2.1', 'aup-2.1': '2.1' };
 
 // Placeholder values sourced from the repo (docs/emails/2026-07-19-
 // beta-update.html footer + CLAUDE.md's Estonian VAT section +
@@ -58,7 +62,7 @@ const PLACEHOLDERS: Record<string, string> = {
 	CONTACT_EMAIL: 'dpo@eurobase.app',
 };
 
-type LegalDoc = 'dpa' | 'terms' | 'privacy' | 'sla' | 'aup';
+type LegalDoc = 'dpa' | 'terms' | 'privacy' | 'sla' | 'aup' | 'terms-2.1' | 'aup-2.1';
 
 const DOC_META: Record<LegalDoc, { source: string; title: string }> = {
 	dpa: { source: dpaSource, title: 'Data Processing Agreement' },
@@ -66,10 +70,12 @@ const DOC_META: Record<LegalDoc, { source: string; title: string }> = {
 	privacy: { source: privacySource, title: 'Privacy Policy' },
 	sla: { source: slaSource, title: 'Service Level Agreement' },
 	aup: { source: aupSource, title: 'Acceptable Use Policy' },
+	'terms-2.1': { source: terms21Source, title: 'Terms of Service (previous version)' },
+	'aup-2.1': { source: aup21Source, title: 'Acceptable Use Policy (previous version)' },
 };
 
 export function isLegalDoc(slug: string): slug is LegalDoc {
-	return slug === 'dpa' || slug === 'terms' || slug === 'privacy' || slug === 'sla' || slug === 'aup';
+	return Object.hasOwn(DOC_META, slug);
 }
 
 // stripReviewerNotes removes the leading HTML comment block that

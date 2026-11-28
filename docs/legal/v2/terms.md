@@ -52,7 +52,7 @@ REVIEWER NOTES — read before publication (v2)
 
 # Terms of Service
 
-**Version 2.2 — published 30 November 2026.** It applies to accounts created from 30 November 2026, and to all other accounts from **1 January 2027**. Until then, [version 2.1](https://github.com/STGime/euroback/blob/0967f6c5/docs/legal/v2/terms.md) applies to accounts created before 30 November 2026.
+**Version 2.2 — published 30 November 2026.** If you accept version 2.2 when you sign up, it applies to you from that moment. For all other accounts it takes effect on **1 January 2027**; until that date, [version 2.1](/legal/terms-2.1) applies to them.
 
 These Terms of Service ("**Terms**") form a contract between **Eurobase OÜ**, registered at **Ahtri 12, Tallinn 15551, Estonia**, registry number **17557586**, VAT status: **not VAT-registered (below Estonian €40,000 threshold)** ("**Eurobase**", "**we**", "**us**") and you, the person or organisation creating an account ("**you**", "**Customer**"). By creating an account or using the Service you accept these Terms. If you act on behalf of an organisation you confirm you have authority to bind it.
 
@@ -99,7 +99,7 @@ Your use of the Service is subject to our **Acceptable Use Policy** ("**AUP**") 
 
 ## 7. Customer Data and personal data
 
-You retain all rights in your Customer Data. You grant us a non-exclusive licence to host, process, transmit, display, and back up Customer Data solely as necessary to provide the Service. We do not access Customer Data except as required to operate the Service, to comply with law, or with your instructions.
+You retain all rights in your Customer Data. You grant us a non-exclusive licence to host, process, transmit, display, and back up Customer Data solely as necessary to provide the Service. We do not access Customer Data except as required to operate the Service, to comply with law, to investigate reports and suspected breaches of these Terms or the AUP (§9), or with your instructions.
 
 Where Customer Data includes personal data, you act as **controller** and we act as **processor**. The DPA at **/legal/dpa** governs that processing and is incorporated into these Terms by reference. By using the Service to process personal data you accept the DPA.
 
@@ -109,11 +109,11 @@ Our **Service Level Agreement** at **/legal/sla** sets out our availability, bac
 
 ## 9. Suspension and termination
 
-You may close your account at any time via the console. We may suspend or terminate your account or any Project: (a) for material breach of these Terms or the AUP, (b) where required by law or court order, (c) where the Service is at risk (DDoS, exploit, etc.). We will give reasonable notice where practical.
+You may close your account at any time via the console. We may suspend or terminate your account or any Project: (a) for material breach of these Terms or the AUP, (b) where required by law or court order, (c) where the Service is at risk (DDoS, exploit, etc.). We will give reasonable advance notice where practical; where we act without it, we still tell you why when we act (see "Reports and enforcement" below).
 
 On termination by either party we keep your Customer Data available for export for **30 days**, after which it is irreversibly deleted from production systems and within 90 days from backups. We will delete sooner on your written request, subject to legal retention requirements (e.g. accounting records).
 
-**Reports and enforcement.** Anyone can report illegal content or misuse of the Service to **abuse@eurobase.app**; how we handle reports is described at **eurobase.app/abuse**. When content or use breaks the law, these Terms or the AUP, we may, depending on the severity: ask you to fix it within a stated time; restrict access to the content or to a feature (for example, a function or outbound email); suspend the Project; or suspend or terminate your account. A person reviews each case; we don't take these decisions by automated means alone. When we restrict your content, Project or account, we tell you which restriction we applied, why, and on what facts and terms or law it is based, unless the law or an order of an authority prevents us. You can contest a decision by replying to our message, and you may also complain to the Digital Services Coordinator or go to court.
+**Reports and enforcement.** Anyone can report illegal content or misuse of the Service to **abuse@eurobase.app**; how we handle reports is described at **eurobase.app/abuse**. When content or use breaks the law, these Terms or the AUP, we may, depending on the severity: ask you to fix it within a stated time; restrict access to the content or to a feature (for example, a function or outbound email); suspend the Project; or, for a material breach as in (a) above, suspend or terminate your account. A person reviews each case; we don't take these decisions by automated means alone. When we restrict your content, Project or account, we tell you at the latest when we act which restriction we applied, for how long, why, and on what facts and terms or law it is based, unless the law or an order of an authority prevents us. You can contest a decision by replying to our message; we look at it again and answer within 14 days. You may also complain to the Digital Services Coordinator of your EU country (in Estonia: the Consumer Protection and Technical Regulatory Authority, TTJA) or go to court.
 
 **If we cease operations.** If Eurobase ceases business operations, we will keep the Service and your Customer Data **online and exportable for at least 90 days** from the date we announce cessation, with notice to Project owners by email and export tooling available throughout, before any deletion. See the SLA at **/legal/sla** (§6).
 
