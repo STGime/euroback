@@ -91,7 +91,7 @@ func TestSuspendedMailbox_DB(t *testing.T) {
 
 	svc := NewPlatformAuthService(pool, "test-jwt-secret-please-ignore")
 	same := fmt.Sprintf("mbsuspended%d+again@googlemail.com", os.Getpid())
-	if !svc.suspendedMailbox(ctx, same) {
+	if _, susp := svc.mailboxAccounts(ctx, same); !susp {
 		t.Fatalf("%s shares the suspended account's mailbox; want refused", same)
 	}
 	_, err = svc.SignUp(ctx, same, "a-long-enough-passphrase-42", nil, "", "")
@@ -100,11 +100,78 @@ func TestSuspendedMailbox_DB(t *testing.T) {
 	}
 	// The exact address is left to the insert ("already registered"), so
 	// it doesn't reveal the suspension.
-	if svc.suspendedMailbox(ctx, strings.ToUpper(suspended)) {
-		t.Fatalf("exact address %s must not be answered by the suspended check", suspended)
+	if taken, _ := svc.mailboxAccounts(ctx, strings.ToUpper(suspended)); taken {
+		t.Fatalf("exact address %s must not be answered by the mailbox check", suspended)
 	}
 	other := fmt.Sprintf("mb.other.%d@gmail.com", os.Getpid())
-	if svc.suspendedMailbox(ctx, other) {
+	if taken, _ := svc.mailboxAccounts(ctx, other); taken {
 		t.Fatalf("%s is another mailbox; want allowed", other)
+	}
+}
+
+// One account per inbox: another "+tag" or Gmail spelling of an active
+// account's inbox is refused (400, ErrMailboxInUse) unless the address is
+// on platform_allowlist; other domains and other local parts are not.
+func TestMailboxInUse_DB(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("cannot connect: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("cannot ping: %v", err)
+	}
+
+	pid := os.Getpid()
+	existing := fmt.Sprintf("mb.inuse%d@gmail.com", pid)
+	plainExisting := fmt.Sprintf("mb.inuse%d@example.org", pid)
+	allowed := fmt.Sprintf("mbinuse%d+team@gmail.com", pid)
+	for _, e := range []string{existing, plainExisting} {
+		cleanupPlatformUser(ctx, pool, e)
+		if _, err := pool.Exec(ctx, `INSERT INTO public.platform_users (email) VALUES ($1)`, e); err != nil {
+			t.Fatalf("insert platform user: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, e := range []string{existing, plainExisting} {
+			cleanupPlatformUser(context.Background(), pool, e)
+		}
+		_, _ = pool.Exec(context.Background(), `DELETE FROM platform_allowlist WHERE email = $1`, allowed)
+	})
+
+	svc := NewPlatformAuthService(pool, "test-jwt-secret-please-ignore")
+	for _, addr := range []struct {
+		email string
+		taken bool
+	}{
+		{fmt.Sprintf("mbinuse%d+euro2@googlemail.com", pid), true},
+		{fmt.Sprintf("MB.InUse%d+x@Gmail.com", pid), true},
+		{fmt.Sprintf("mb.inuse%d+x@example.org", pid), true},
+		{fmt.Sprintf("mbinuse%d@example.org", pid), false}, // dots count outside Gmail
+		{fmt.Sprintf("mb.inuse%d@example.net", pid), false},
+		{fmt.Sprintf("mb.inuse%d1@gmail.com", pid), false},
+		{existing, false}, // the exact address is the insert's answer
+	} {
+		if taken, susp := svc.mailboxAccounts(ctx, addr.email); taken != addr.taken || susp {
+			t.Errorf("mailboxAccounts(%s) = %v, %v; want %v, false", addr.email, taken, susp, addr.taken)
+		}
+	}
+
+	second := fmt.Sprintf("mbinuse%d+euro2@gmail.com", pid)
+	if _, err := svc.SignUp(ctx, second, "a-long-enough-passphrase-42", nil, "", ""); err != ErrMailboxInUse || !isUserError(err) {
+		t.Fatalf("SignUp(%s) err = %v, want ErrMailboxInUse (400)", second, err)
+	}
+	// An allowlisted address passes this check (and fails later, on the
+	// missing acceptances, before anything is written).
+	if _, err := pool.Exec(ctx, `INSERT INTO platform_allowlist (email) VALUES ($1) ON CONFLICT DO NOTHING`, allowed); err != nil {
+		t.Fatalf("insert allowlist: %v", err)
+	}
+	if _, err := svc.SignUp(ctx, allowed, "a-long-enough-passphrase-42", nil, "", ""); err == ErrMailboxInUse {
+		t.Fatalf("SignUp(%s): allowlisted address refused as mailbox in use", allowed)
 	}
 }
