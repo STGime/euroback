@@ -534,6 +534,12 @@
 	async function openServiceNotice() {
 		composeError = null;
 		composeSuccess = null;
+		// Start empty: a product update half-written in the broadcast
+		// composer must not go out as a service notice.
+		if (composeMode !== 'service-notice') {
+			composeSubject = '';
+			composeBody = '';
+		}
 		composeMode = 'service-notice';
 		composeOpen = true;
 		noticeLoading = true;
@@ -565,7 +571,8 @@
 		composeBusy = true;
 		try {
 			const res = await api.adminSendServiceNotice(composeSubject, composeBody, noticeCount);
-			composeSuccess = `Sending to ${res.recipients} account${res.recipients === 1 ? '' : 's'} in the background. The result appears in the audit log (broadcast.emailed, kind service_notice).`;
+			const resumed = res.already_sent ? ` ${res.already_sent} already got this notice and are skipped.` : '';
+			composeSuccess = `Sending to ${res.recipients} account${res.recipients === 1 ? '' : 's'} in the background.${resumed} The result appears in the audit log (broadcast.emailed, kind service_notice).`;
 		} catch (e: any) {
 			composeError = e?.message ?? 'Send failed';
 			// The audience changed meanwhile: show the new count.
@@ -1223,6 +1230,13 @@
 			</div>
 
 			<div class="p-5 space-y-4">
+				{#if composeMode === 'service-notice'}
+				<p class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+					Only for notices about the contract, such as a change to the Terms. It goes to every
+					verified, active account, including people who turned off product updates. Sending the
+					same subject again only reaches the accounts that haven't got it yet.
+				</p>
+				{:else}
 				<div class="flex gap-2 text-xs">
 					<span class="text-gray-500">Presets:</span>
 					<button
@@ -1249,6 +1263,7 @@
 						Public beta open
 					</button>
 				</div>
+				{/if}
 
 				<div>
 					<label for="compose-subject" class="block text-xs text-gray-500 mb-1">Subject</label>
@@ -1269,7 +1284,7 @@
 						placeholder="<p>Hi,</p><p>…</p>"
 						class="w-full rounded-md border border-gray-300 px-3 py-2 text-xs font-mono"
 					></textarea>
-					<p class="mt-1 text-xs text-gray-400">Paste or write HTML. Plain text is fine too — just use &lt;p&gt; tags for line breaks. A line on how to turn off product updates is added at the bottom automatically.</p>
+					<p class="mt-1 text-xs text-gray-400">Paste or write HTML. Plain text is fine too — just use &lt;p&gt; tags for line breaks. {composeMode === 'service-notice' ? 'A line saying why the recipient gets this notice is added at the bottom automatically.' : 'A line on how to turn off product updates is added at the bottom automatically.'}</p>
 				</div>
 
 				<details class="rounded-md border border-gray-200 bg-gray-50">

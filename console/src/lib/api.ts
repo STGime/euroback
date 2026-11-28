@@ -2931,7 +2931,7 @@ export class EurobaseAPI {
 		subject: string,
 		bodyHtml: string,
 		expectedRecipients: number
-	): Promise<{ status: 'queued'; recipients: number }> {
+	): Promise<{ status: 'queued'; recipients: number; already_sent?: number }> {
 		return this.fetch('/platform/admin/service-notice', {
 			method: 'POST',
 			body: JSON.stringify({ subject, body_html: bodyHtml, expected_recipients: expectedRecipients })

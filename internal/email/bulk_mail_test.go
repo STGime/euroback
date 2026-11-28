@@ -131,3 +131,49 @@ func TestSendWithID_NoAdditionalHeaders(t *testing.T) {
 		t.Fatalf("transactional mail must not carry additional_headers: %v", raw)
 	}
 }
+
+// A service notice goes out from the platform sender (not the bulk one),
+// without List-Unsubscribe, retries a failed message once and reports
+// every result.
+func TestSendServiceNotice_PlatformSenderNoUnsubscribeRetry(t *testing.T) {
+	serviceNoticeRetryDelay = 0
+	cap := &temCapture{fail: map[string]bool{"bad@test.local": true}}
+	srv := httptest.NewServer(http.HandlerFunc(cap.handler))
+	defer srv.Close()
+	svc := NewEmailService(newClientPointingAt(srv.URL), nil, "")
+	svc.WithBulkSender("hello@news.example.test", "Eurobase news")
+
+	var mu sync.Mutex
+	results := map[string]string{}
+	res, err := svc.SendServiceNotice(context.Background(), []BroadcastMessage{
+		{To: "a@test.local", HTMLBody: "<p>a</p>"},
+		{To: "bad@test.local", HTMLBody: "<p>x</p>"},
+	}, "Terms", func(to, id string, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			results[to] = "error"
+		} else {
+			results[to] = id
+		}
+	})
+	if err != nil || res.Sent != 1 || res.Failed != 1 {
+		t.Fatalf("res %+v err %v", res, err)
+	}
+	if results["a@test.local"] != "e1" || results["bad@test.local"] != "error" {
+		t.Fatalf("results %v", results)
+	}
+	attempts := map[string]int{}
+	for _, r := range cap.reqs {
+		attempts[r.To[0].Email]++
+		if r.From.Email != "from@example.com" {
+			t.Errorf("from = %+v, want the platform sender", r.From)
+		}
+		if len(r.AdditionalHeaders) != 0 {
+			t.Errorf("headers %+v, want none (no List-Unsubscribe)", r.AdditionalHeaders)
+		}
+	}
+	if attempts["bad@test.local"] != 2 || attempts["a@test.local"] != 1 {
+		t.Fatalf("attempts %v, want one retry for the failure only", attempts)
+	}
+}

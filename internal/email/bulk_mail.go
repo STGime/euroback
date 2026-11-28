@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Bulk mail (product updates, the onboarding series) is kept apart from
@@ -26,6 +27,14 @@ const UnsubscribeMailto = "mailto:contact@eurobase.app?subject=Unsubscribe"
 
 // broadcastConcurrency bounds parallel TEM requests in SendBroadcast.
 const broadcastConcurrency = 8
+
+// serviceNoticeConcurrency is lower: service notices go out from the
+// platform sender, which also carries sign-in and verification mail.
+const serviceNoticeConcurrency = 2
+
+// serviceNoticeRetryDelay is the wait before the one retry of a failed
+// service-notice message (a TEM 429 / 5xx is usually brief).
+var serviceNoticeRetryDelay = 3 * time.Second
 
 // ListUnsubscribeHeaders returns the List-Unsubscribe headers for one
 // message. With a signed unsubscribe URL the message gets one-click
@@ -78,20 +87,23 @@ type BroadcastMessage struct {
 // sender, a few in parallel. Failures are collected per recipient in
 // BulkResult.Errors; the error is non-nil only when nothing went out.
 func (s *EmailService) SendBroadcast(ctx context.Context, msgs []BroadcastMessage, subject string) (BulkResult, error) {
-	return sendEach(ctx, s.bulkClient(), msgs, subject, func(m BroadcastMessage) []Header {
+	return sendEach(ctx, s.bulkClient(), msgs, subject, broadcastConcurrency, 0, func(m BroadcastMessage) []Header {
 		return ListUnsubscribeHeaders(m.UnsubscribeURL)
-	})
+	}, nil)
 }
 
 // SendServiceNotice sends a service notice (a change to the Terms, for
 // example) to each recipient separately, from the platform's own sender
 // rather than the bulk one, without List-Unsubscribe: account holders
-// get it whatever their product-update preferences.
-func (s *EmailService) SendServiceNotice(ctx context.Context, msgs []BroadcastMessage, subject string) (BulkResult, error) {
-	return sendEach(ctx, s.client, msgs, subject, func(BroadcastMessage) []Header { return nil })
+// get it whatever their product-update preferences. It sends slower than
+// a broadcast and retries a failed message once. onResult (may be nil)
+// is called once per message with the provider's message id or the
+// error, so the caller can record who got it.
+func (s *EmailService) SendServiceNotice(ctx context.Context, msgs []BroadcastMessage, subject string, onResult func(to, messageID string, err error)) (BulkResult, error) {
+	return sendEach(ctx, s.client, msgs, subject, serviceNoticeConcurrency, 1, func(BroadcastMessage) []Header { return nil }, onResult)
 }
 
-func sendEach(ctx context.Context, client *EmailClient, msgs []BroadcastMessage, subject string, headers func(BroadcastMessage) []Header) (BulkResult, error) {
+func sendEach(ctx context.Context, client *EmailClient, msgs []BroadcastMessage, subject string, concurrency, retries int, headers func(BroadcastMessage) []Header, onResult func(to, messageID string, err error)) (BulkResult, error) {
 	res := BulkResult{}
 	if !client.Configured() {
 		return res, fmt.Errorf("email client not configured (TEM credentials missing)")
@@ -99,14 +111,24 @@ func sendEach(ctx context.Context, client *EmailClient, msgs []BroadcastMessage,
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, broadcastConcurrency)
+	sem := make(chan struct{}, concurrency)
 	for _, m := range msgs {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(m BroadcastMessage) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			_, err := client.SendWithHeaders(ctx, m.To, subject, m.HTMLBody, headers(m))
+			id, err := client.SendWithHeaders(ctx, m.To, subject, m.HTMLBody, headers(m))
+			for i := 0; err != nil && i < retries && ctx.Err() == nil; i++ {
+				select {
+				case <-time.After(serviceNoticeRetryDelay):
+				case <-ctx.Done():
+				}
+				id, err = client.SendWithHeaders(ctx, m.To, subject, m.HTMLBody, headers(m))
+			}
+			if onResult != nil {
+				onResult(m.To, id, err)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

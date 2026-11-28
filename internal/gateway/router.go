@@ -986,7 +986,7 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// Service notices (e.g. a change to the Terms): every verified,
 			// active account, whatever its product-update preferences.
 			r.Get("/service-notice/audience", tenant.AdminServiceNoticeAudience(pool))
-			r.Post("/service-notice", tenant.AdminSendServiceNotice(pool, serviceNoticeMailer(emailService)))
+			r.With(auth.RequireConsoleSession).Post("/service-notice", tenant.AdminSendServiceNotice(pool, serviceNoticeMailer(emailService)))
 			// Team-tier closed-beta grants (M2, issue #308).
 			r.Get("/team-beta", tenant.AdminListTeamBetaUsers(pool))
 			r.Post("/users/{id}/suspend", tenant.AdminSuspendUser(pool))
