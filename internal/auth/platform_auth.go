@@ -214,46 +214,83 @@ var ErrUndeliverableEmail = errors.New("this address can't receive email (reserv
 // admin-managed signup blocklist (public.platform_blocked_signup_domains;
 // candidates built by mailaddr.SignupDomainCandidates) — deliverable
 // domains that only ever produce abuse or throwaway accounts. The message
-// is kept generic so it doesn't advertise the blocklist. Also used for a
-// signup to the mailbox of a suspended account (suspendedMailbox).
+// is kept generic so it doesn't advertise the blocklist.
 var ErrBlockedSignupDomain = errors.New("this email address can't be used to sign up")
 
 // ErrNotPlainEmail refuses quoted, escaped or otherwise unusual address
 // forms (mailaddr.IsPlain): they reach the same inbox as the plain form.
 var ErrNotPlainEmail = errors.New("please use a plain email address, like name@example.com")
 
-// suspendedMailbox reports whether email delivers to the same mailbox
-// (mailaddr.Base: "+tag" and Gmail dots ignored) as a suspended account,
-// so a suspended user can't come back under "name+1@…". Suspended
-// accounts are few (partial index on suspended_at), so they are compared
-// in Go with the one normalisation. Fails open on a read error, like the
-// domain blocklist: abuse mitigation, not a security boundary.
-func (s *PlatformAuthService) suspendedMailbox(ctx context.Context, email string) bool {
+// ErrMailboxInUse refuses a signup to an inbox that already has an
+// account under another spelling (mailaddr.Base: "+tag" and Gmail dots
+// ignored): one account per inbox. An address on platform_allowlist is
+// exempt (team test accounts). The inbox of a suspended account gets the
+// same answer, so it doesn't tell whether that account is suspended.
+var ErrMailboxInUse = errors.New("an account already uses this inbox under another address (for example with a +tag) — please sign in with that account, or use Forgot password to get a reset link at this inbox")
+
+// mailboxAccounts reports whether another account (not the exact address,
+// which the insert answers with "email already registered") delivers to
+// the same inbox as email, and whether one of those is suspended. The SQL
+// narrows the rows by domain and by the local part without quotes,
+// backslashes, "+tag" and dots, split at the last "@" like Base (so it
+// keeps every row Base could match, including legacy quoted addresses);
+// Base decides. Fails open on a read error, like the domain
+// blocklist: abuse mitigation, not a security boundary.
+func (s *PlatformAuthService) mailboxAccounts(ctx context.Context, email string) (taken, suspended bool) {
 	base := mailaddr.Base(email)
-	rows, err := s.pool.Query(ctx, `SELECT email FROM public.platform_users WHERE suspended_at IS NOT NULL`)
+	at := strings.LastIndexByte(base, '@')
+	if at < 0 {
+		return false, false
+	}
+	local, domain := strings.ReplaceAll(base[:at], ".", ""), base[at+1:]
+	domains := []string{domain}
+	if domain == "gmail.com" {
+		domains = append(domains, "googlemail.com")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT email, suspended_at IS NOT NULL
+		  FROM public.platform_users
+		 WHERE rtrim(substring(lower(email) from '@([^@]*)$'), '.') = ANY($1)
+		   AND replace(split_part(translate(substring(lower(email) from '^(.*)@[^@]*$'), '"\', ''), '+', 1), '.', '') = $2`,
+		domains, local)
 	if err != nil {
-		slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
-		return false
+		slog.Warn("signup mailbox check failed; allowing signup", "error", err)
+		return false, false
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e string
-		if err := rows.Scan(&e); err != nil {
-			slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
-			return false
+		var susp bool
+		if err := rows.Scan(&e, &susp); err != nil {
+			slog.Warn("signup mailbox check failed; allowing signup", "error", err)
+			return false, false
 		}
-		// The exact address is left to the insert, which answers "email
-		// already registered" as for any existing account, so this check
-		// doesn't tell whether a known address is suspended.
-		if !strings.EqualFold(e, email) && mailaddr.Base(e) == base {
-			slog.Info("signup refused: mailbox of a suspended account")
-			return true
+		if strings.EqualFold(e, email) || mailaddr.Base(e) != base {
+			continue
+		}
+		taken = true
+		if susp {
+			suspended = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		slog.Warn("signup suspended-mailbox check failed; allowing signup", "error", err)
+		slog.Warn("signup mailbox check failed; allowing signup", "error", err)
+		return false, false
 	}
-	return false
+	return taken, suspended
+}
+
+// allowlisted reports whether email is on platform_allowlist.
+func (s *PlatformAuthService) allowlisted(ctx context.Context, email string) bool {
+	var ok bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM platform_allowlist WHERE email = $1)`, email,
+	).Scan(&ok); err != nil {
+		// Fail open, like the other signup abuse checks.
+		slog.Warn("signup allowlist lookup failed; allowing signup", "error", err)
+		return true
+	}
+	return ok
 }
 
 // SignUp creates a new platform user with email + bcrypt-hashed password.
@@ -295,8 +332,15 @@ func (s *PlatformAuthService) SignUp(ctx context.Context, email, password string
 			return nil, ErrBlockedSignupDomain
 		}
 	}
-	if s.suspendedMailbox(ctx, email) {
-		return nil, ErrBlockedSignupDomain
+	// One account per inbox. A suspended account's inbox is refused even
+	// for an allowlisted address (a suspended user can't come back under
+	// "name+1@…"), with the same answer as an active one.
+	if taken, suspended := s.mailboxAccounts(ctx, email); suspended {
+		slog.Info("signup refused: mailbox of a suspended account")
+		return nil, ErrMailboxInUse
+	} else if taken && !s.allowlisted(ctx, email) {
+		slog.Info("signup refused: mailbox already has an account")
+		return nil, ErrMailboxInUse
 	}
 	if err := ValidatePasswordStrength(password, email); err != nil {
 		return nil, err
