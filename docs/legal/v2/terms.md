@@ -41,11 +41,18 @@ REVIEWER NOTES — read before publication (v2)
      000110 bumps Pro to €25/mo. Announced 1 September 2026 → 31-day
      notice period, satisfying §12. New restriction language, hard-
      cap wording, and price table below.
+  6. v2.2 — published 30 November 2026 (notice email the same day,
+     §15): binding for new accounts at signup, for existing accounts
+     from 1 January 2027 (32 days' notice). Adds "Reports and enforcement" to §9
+     (EU Digital Services Act Art. 14 / 16 / 17: the restrictions we
+     apply, the statement of reasons and how to contest) and points §6
+     to the AUP at /legal/aup and to /abuse. Companion AUP v2.2: open
+     proxies / relays, credential harvesting, reporting at /abuse.
 -->
 
 # Terms of Service
 
-**Version 2.1 — effective 2 October 2026**
+**Version 2.2 — published 30 November 2026.** It applies to accounts created from 30 November 2026, and to all other accounts from **1 January 2027**. Until then, [version 2.1](https://github.com/STGime/euroback/blob/0967f6c5/docs/legal/v2/terms.md) applies to accounts created before 30 November 2026.
 
 These Terms of Service ("**Terms**") form a contract between **Eurobase OÜ**, registered at **Ahtri 12, Tallinn 15551, Estonia**, registry number **17557586**, VAT status: **not VAT-registered (below Estonian €40,000 threshold)** ("**Eurobase**", "**we**", "**us**") and you, the person or organisation creating an account ("**you**", "**Customer**"). By creating an account or using the Service you accept these Terms. If you act on behalf of an organisation you confirm you have authority to bind it.
 
@@ -88,7 +95,7 @@ The Service is offered in multiple tiers, described on the pricing page at eurob
 
 ## 6. Acceptable use
 
-Your use of the Service is subject to the **AUP**. We may suspend Projects or terminate accounts that violate the AUP, with notice where reasonably practical and immediately where required to protect the Service, other customers, or third parties.
+Your use of the Service is subject to our **Acceptable Use Policy** ("**AUP**") at **/legal/aup**. We may suspend Projects or terminate accounts that violate the AUP, with notice where reasonably practical and immediately where required to protect the Service, other customers, or third parties.
 
 ## 7. Customer Data and personal data
 
@@ -105,6 +112,8 @@ Our **Service Level Agreement** at **/legal/sla** sets out our availability, bac
 You may close your account at any time via the console. We may suspend or terminate your account or any Project: (a) for material breach of these Terms or the AUP, (b) where required by law or court order, (c) where the Service is at risk (DDoS, exploit, etc.). We will give reasonable notice where practical.
 
 On termination by either party we keep your Customer Data available for export for **30 days**, after which it is irreversibly deleted from production systems and within 90 days from backups. We will delete sooner on your written request, subject to legal retention requirements (e.g. accounting records).
+
+**Reports and enforcement.** Anyone can report illegal content or misuse of the Service to **abuse@eurobase.app**; how we handle reports is described at **eurobase.app/abuse**. When content or use breaks the law, these Terms or the AUP, we may, depending on the severity: ask you to fix it within a stated time; restrict access to the content or to a feature (for example, a function or outbound email); suspend the Project; or suspend or terminate your account. A person reviews each case; we don't take these decisions by automated means alone. When we restrict your content, Project or account, we tell you which restriction we applied, why, and on what facts and terms or law it is based, unless the law or an order of an authority prevents us. You can contest a decision by replying to our message, and you may also complain to the Digital Services Coordinator or go to court.
 
 **If we cease operations.** If Eurobase ceases business operations, we will keep the Service and your Customer Data **online and exportable for at least 90 days** from the date we announce cessation, with notice to Project owners by email and export tooling available throughout, before any deletion. See the SLA at **/legal/sla** (§6).
 

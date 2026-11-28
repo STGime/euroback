@@ -23,12 +23,14 @@ import dpaSource from '../../../docs/legal/v2/dpa.md?raw';
 import termsSource from '../../../docs/legal/v2/terms.md?raw';
 import privacySource from '../../../docs/legal/v2/privacy.md?raw';
 import slaSource from '../../../docs/legal/v2/sla.md?raw';
+import aupSource from '../../../docs/legal/v2/aup.md?raw';
 
-// LEGAL_VERSION mirrors the click-through consent version tracked
-// against legal_acceptances (login/+page.svelte line 26 pins the
-// same '2.0'). Bump BOTH when publishing a new revision so users
-// get a fresh acceptance prompt.
-export const LEGAL_VERSION = '2.0';
+// Versions the signup form records in legal_acceptances (login/
+// +page.svelte pins the same values; it can't import this module).
+// Bump both places, and add the legal_documents row in a migration,
+// when publishing a new revision.
+export const LEGAL_VERSION = '2.0'; // DPA, privacy, SLA
+export const DOC_VERSION: Record<string, string> = { terms: '2.2', aup: '2.2' };
 
 // Placeholder values sourced from the repo (docs/emails/2026-07-19-
 // beta-update.html footer + CLAUDE.md's Estonian VAT section +
@@ -56,17 +58,18 @@ const PLACEHOLDERS: Record<string, string> = {
 	CONTACT_EMAIL: 'dpo@eurobase.app',
 };
 
-type LegalDoc = 'dpa' | 'terms' | 'privacy' | 'sla';
+type LegalDoc = 'dpa' | 'terms' | 'privacy' | 'sla' | 'aup';
 
 const DOC_META: Record<LegalDoc, { source: string; title: string }> = {
 	dpa: { source: dpaSource, title: 'Data Processing Agreement' },
 	terms: { source: termsSource, title: 'Terms of Service' },
 	privacy: { source: privacySource, title: 'Privacy Policy' },
 	sla: { source: slaSource, title: 'Service Level Agreement' },
+	aup: { source: aupSource, title: 'Acceptable Use Policy' },
 };
 
 export function isLegalDoc(slug: string): slug is LegalDoc {
-	return slug === 'dpa' || slug === 'terms' || slug === 'privacy' || slug === 'sla';
+	return slug === 'dpa' || slug === 'terms' || slug === 'privacy' || slug === 'sla' || slug === 'aup';
 }
 
 // stripReviewerNotes removes the leading HTML comment block that
@@ -119,5 +122,5 @@ export function renderLegal(slug: string): { title: string; html: string; versio
 	const { source, title } = DOC_META[slug];
 	const md = substitute(stripLeadingH1(stripReviewerNotes(source)));
 	const html = marked.parse(md, { async: false }) as string;
-	return { title, html, version: LEGAL_VERSION };
+	return { title, html, version: DOC_VERSION[slug] ?? LEGAL_VERSION };
 }
