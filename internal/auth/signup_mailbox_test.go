@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -95,8 +96,18 @@ func TestSuspendedMailbox_DB(t *testing.T) {
 		t.Fatalf("%s shares the suspended account's mailbox; want refused", same)
 	}
 	_, err = svc.SignUp(ctx, same, "a-long-enough-passphrase-42", nil, "", "")
-	if err != ErrBlockedSignupDomain || !isUserError(err) {
-		t.Fatalf("SignUp(%s) err = %v, want ErrBlockedSignupDomain (400)", same, err)
+	if !errors.Is(err, ErrMailboxInUse) || !isUserError(err) {
+		t.Fatalf("SignUp(%s) err = %v, want ErrMailboxInUse (400, same answer as an active account)", same, err)
+	}
+	// Refused even when allowlisted.
+	if _, err := pool.Exec(ctx, `INSERT INTO platform_allowlist (email) VALUES ($1) ON CONFLICT DO NOTHING`, same); err != nil {
+		t.Fatalf("insert allowlist: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM platform_allowlist WHERE email = $1`, same)
+	})
+	if _, err := svc.SignUp(ctx, same, "a-long-enough-passphrase-42", nil, "", ""); !errors.Is(err, ErrMailboxInUse) {
+		t.Fatalf("SignUp(%s) allowlisted err = %v, want ErrMailboxInUse", same, err)
 	}
 	// The exact address is left to the insert ("already registered"), so
 	// it doesn't reveal the suspension.
@@ -130,15 +141,17 @@ func TestMailboxInUse_DB(t *testing.T) {
 	pid := os.Getpid()
 	existing := fmt.Sprintf("mb.inuse%d@gmail.com", pid)
 	plainExisting := fmt.Sprintf("mb.inuse%d@example.org", pid)
+	quotedExisting := fmt.Sprintf(`"mbq%d"@gmail.com`, pid)          // legacy quoted spelling
+	googlemailExisting := fmt.Sprintf("mb.gm%d@googlemail.com", pid) // stored on googlemail
 	allowed := fmt.Sprintf("mbinuse%d+team@gmail.com", pid)
-	for _, e := range []string{existing, plainExisting} {
+	for _, e := range []string{existing, plainExisting, quotedExisting, googlemailExisting} {
 		cleanupPlatformUser(ctx, pool, e)
 		if _, err := pool.Exec(ctx, `INSERT INTO public.platform_users (email) VALUES ($1)`, e); err != nil {
 			t.Fatalf("insert platform user: %v", err)
 		}
 	}
 	t.Cleanup(func() {
-		for _, e := range []string{existing, plainExisting} {
+		for _, e := range []string{existing, plainExisting, quotedExisting, googlemailExisting} {
 			cleanupPlatformUser(context.Background(), pool, e)
 		}
 		_, _ = pool.Exec(context.Background(), `DELETE FROM platform_allowlist WHERE email = $1`, allowed)
@@ -156,6 +169,9 @@ func TestMailboxInUse_DB(t *testing.T) {
 		{fmt.Sprintf("mb.inuse%d@example.net", pid), false},
 		{fmt.Sprintf("mb.inuse%d1@gmail.com", pid), false},
 		{existing, false}, // the exact address is the insert's answer
+		{fmt.Sprintf("mbq%d+2@gmail.com", pid), true},
+		{fmt.Sprintf("m.b.q%d@googlemail.com", pid), true},
+		{fmt.Sprintf("mbgm%d+x@gmail.com", pid), true},
 	} {
 		if taken, susp := svc.mailboxAccounts(ctx, addr.email); taken != addr.taken || susp {
 			t.Errorf("mailboxAccounts(%s) = %v, %v; want %v, false", addr.email, taken, susp, addr.taken)
@@ -163,7 +179,7 @@ func TestMailboxInUse_DB(t *testing.T) {
 	}
 
 	second := fmt.Sprintf("mbinuse%d+euro2@gmail.com", pid)
-	if _, err := svc.SignUp(ctx, second, "a-long-enough-passphrase-42", nil, "", ""); err != ErrMailboxInUse || !isUserError(err) {
+	if _, err := svc.SignUp(ctx, second, "a-long-enough-passphrase-42", nil, "", ""); !errors.Is(err, ErrMailboxInUse) || !isUserError(err) {
 		t.Fatalf("SignUp(%s) err = %v, want ErrMailboxInUse (400)", second, err)
 	}
 	// An allowlisted address passes this check (and fails later, on the
@@ -171,7 +187,8 @@ func TestMailboxInUse_DB(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO platform_allowlist (email) VALUES ($1) ON CONFLICT DO NOTHING`, allowed); err != nil {
 		t.Fatalf("insert allowlist: %v", err)
 	}
-	if _, err := svc.SignUp(ctx, allowed, "a-long-enough-passphrase-42", nil, "", ""); err == ErrMailboxInUse {
-		t.Fatalf("SignUp(%s): allowlisted address refused as mailbox in use", allowed)
+	if _, err := svc.SignUp(ctx, allowed, "a-long-enough-passphrase-42", nil, "", ""); err == nil ||
+		!strings.HasPrefix(err.Error(), "you must accept the following to sign up:") {
+		t.Fatalf("SignUp(%s) err = %v, want the acceptances error (past the inbox check)", allowed, err)
 	}
 }
