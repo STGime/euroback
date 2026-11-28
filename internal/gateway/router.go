@@ -983,6 +983,10 @@ func NewRouter(pool *pgxpool.Pool, developerPool *pgxpool.Pool, migrationExec *q
 			// still goes through /allowlist/email (validation was
 			// widened in-place to accept either source).
 			r.Get("/broadcast/audience", tenant.AdminListBroadcastAudience(pool))
+			// Service notices (e.g. a change to the Terms): every verified,
+			// active account, whatever its product-update preferences.
+			r.Get("/service-notice/audience", tenant.AdminServiceNoticeAudience(pool))
+			r.With(auth.RequireConsoleSession).Post("/service-notice", tenant.AdminSendServiceNotice(pool, serviceNoticeMailer(emailService)))
 			// Team-tier closed-beta grants (M2, issue #308).
 			r.Get("/team-beta", tenant.AdminListTeamBetaUsers(pool))
 			r.Post("/users/{id}/suspend", tenant.AdminSuspendUser(pool))
@@ -2412,4 +2416,13 @@ func broadcastUnsubscribeURL(signer *email.UnsubscribeSigner) tenant.Unsubscribe
 	return func(userID string) string {
 		return email.BuildUnsubscribeURL(signer, base, userID, "beta_updates")
 	}
+}
+
+// serviceNoticeMailer keeps a nil *email.EmailService a nil interface,
+// so the handler answers 503 instead of calling a nil service.
+func serviceNoticeMailer(s *email.EmailService) tenant.ServiceNoticeEmailer {
+	if s == nil {
+		return nil
+	}
+	return s
 }

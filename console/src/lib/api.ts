@@ -2918,6 +2918,26 @@ export class EurobaseAPI {
 		return this.fetch('/platform/admin/broadcast/audience');
 	}
 
+	/** Number of accounts a service notice reaches (every verified,
+	 *  active account, whatever its mail preferences). Superadmin only. */
+	async adminGetServiceNoticeAudience(): Promise<{ recipients: number }> {
+		return this.fetch('/platform/admin/service-notice/audience');
+	}
+
+	/** Send a service notice (e.g. a change to the Terms) to every
+	 *  verified, active account. expectedRecipients is the count the
+	 *  operator confirmed; a different live count answers 409. */
+	async adminSendServiceNotice(
+		subject: string,
+		bodyHtml: string,
+		expectedRecipients: number
+	): Promise<{ status: 'queued'; recipients: number; already_sent?: number }> {
+		return this.fetch('/platform/admin/service-notice', {
+			method: 'POST',
+			body: JSON.stringify({ subject, body_html: bodyHtml, expected_recipients: expectedRecipients })
+		});
+	}
+
 	/** Get request logs for a project. */
 	async getLogs(
 		projectId: string,
